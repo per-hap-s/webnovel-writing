@@ -1,0 +1,1 @@
+Inspect the task state and generate a structured resume plan with the detected breakpoint.

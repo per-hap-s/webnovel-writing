@@ -1,0 +1,17 @@
+{
+  "name": "plan",
+  "version": 1,
+  "steps": [
+    {
+      "name": "plan",
+      "type": "codex",
+      "template": "plan.md",
+      "references": ["skills/webnovel-plan/SKILL.md"],
+      "required_output_keys": ["volume_plan", "chapters"],
+      "output_schema": {
+        "volume_plan": {},
+        "chapters": []
+      }
+    }
+  ]
+}

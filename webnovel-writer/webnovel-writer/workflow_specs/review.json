@@ -1,0 +1,34 @@
+﻿{
+  "name": "review",
+  "version": 1,
+  "steps": [
+    {
+      "name": "consistency-review",
+      "type": "codex",
+      "template": "review-consistency.md",
+      "references": ["agents/consistency-checker.md"],
+      "required_output_keys": ["overall_score", "pass", "issues", "metrics", "summary"],
+      "output_schema": {"agent": "consistency-review", "chapter": 1, "overall_score": 0, "pass": true, "issues": [], "metrics": {}, "summary": "string"}
+    },
+    {
+      "name": "continuity-review",
+      "type": "codex",
+      "template": "review-continuity.md",
+      "references": ["agents/continuity-checker.md"],
+      "required_output_keys": ["overall_score", "pass", "issues", "metrics", "summary"],
+      "output_schema": {"agent": "continuity-review", "chapter": 1, "overall_score": 0, "pass": true, "issues": [], "metrics": {}, "summary": "string"}
+    },
+    {
+      "name": "ooc-review",
+      "type": "codex",
+      "template": "review-ooc.md",
+      "references": ["agents/ooc-checker.md"],
+      "required_output_keys": ["overall_score", "pass", "issues", "metrics", "summary"],
+      "output_schema": {"agent": "ooc-review", "chapter": 1, "overall_score": 0, "pass": true, "issues": [], "metrics": {}, "summary": "string"}
+    },
+    {
+      "name": "review-summary",
+      "type": "internal"
+    }
+  ]
+}

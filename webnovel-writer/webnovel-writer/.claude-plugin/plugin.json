@@ -1,0 +1,18 @@
+{
+  "name": "webnovel-writer",
+  "version": "5.5.0",
+  "description": "Deprecated compatibility metadata for the retired Claude plugin package.",
+  "author": {
+    "name": "lingfengQAQ"
+  },
+  "homepage": "https://github.com/lingfengQAQ/webnovel-writer",
+  "repository": "https://github.com/lingfengQAQ/webnovel-writer",
+  "license": "GPL-3.0",
+  "keywords": [
+    "webnovel",
+    "skills",
+    "agents",
+    "rag",
+    "codex-cli"
+  ]
+}

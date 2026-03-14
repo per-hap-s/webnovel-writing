@@ -1,0 +1,1 @@
+Produce the initialization scaffold plan for a new or partially initialized project as structured JSON.

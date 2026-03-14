@@ -1,0 +1,17 @@
+{
+  "name": "resume",
+  "version": 1,
+  "steps": [
+    {
+      "name": "resume",
+      "type": "codex",
+      "template": "resume.md",
+      "references": ["skills/webnovel-resume/SKILL.md"],
+      "required_output_keys": ["resume_plan", "detected_breakpoint"],
+      "output_schema": {
+        "resume_plan": {},
+        "detected_breakpoint": {}
+      }
+    }
+  ]
+}

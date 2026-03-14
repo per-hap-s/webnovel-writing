@@ -1,0 +1,1 @@
+Produce a volume or chapter plan as structured JSON grounded in the project's outline and constraints.

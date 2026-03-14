@@ -1,0 +1,23 @@
+{
+  "name": "webnovel-writer-marketplace",
+  "description": "Deprecated compatibility metadata. Webnovel Writer is now distributed as a Codex-only CLI and EXE.",
+  "metadata": {
+    "description": "Deprecated compatibility metadata. Webnovel Writer is now distributed as a Codex-only CLI and EXE."
+  },
+  "owner": {
+    "name": "lingfengQAQ"
+  },
+  "plugins": [
+    {
+      "name": "webnovel-writer",
+      "description": "Deprecated compatibility metadata for the old Claude plugin package.",
+      "version": "5.5.0",
+      "author": {
+        "name": "lingfengQAQ"
+      },
+      "source": "./webnovel-writer",
+      "category": "productivity",
+      "homepage": "https://github.com/lingfengQAQ/webnovel-writer"
+    }
+  ]
+}

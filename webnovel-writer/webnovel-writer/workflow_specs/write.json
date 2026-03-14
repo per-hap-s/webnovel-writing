@@ -1,0 +1,166 @@
+{
+  "name": "write",
+  "version": 1,
+  "steps": [
+    {
+      "name": "context",
+      "type": "codex",
+      "template": "write-context.md",
+      "references": [
+        "agents/context-agent.md",
+        "skills/webnovel-write/references/step-1.5-contract.md",
+        "references/reading-power-taxonomy.md"
+      ],
+      "required_output_keys": [
+        "task_brief",
+        "contract_v2",
+        "draft_prompt"
+      ],
+      "output_schema": {
+        "task_brief": {},
+        "contract_v2": {},
+        "draft_prompt": "string"
+      }
+    },
+    {
+      "name": "draft",
+      "type": "codex",
+      "template": "write-draft.md",
+      "references": [
+        "skills/webnovel-write/SKILL.md",
+        "references/shared/core-constraints.md"
+      ],
+      "required_output_keys": [
+        "chapter_file",
+        "content",
+        "word_count"
+      ],
+      "output_schema": {
+        "chapter_file": "正文/第0001章.md",
+        "content": "string",
+        "word_count": 0
+      }
+    },
+    {
+      "name": "consistency-review",
+      "type": "codex",
+      "template": "review-consistency.md",
+      "references": [
+        "agents/consistency-checker.md"
+      ],
+      "required_output_keys": [
+        "overall_score",
+        "pass",
+        "issues",
+        "metrics",
+        "summary"
+      ],
+      "output_schema": {
+        "agent": "consistency-review",
+        "chapter": 1,
+        "overall_score": 0,
+        "pass": true,
+        "issues": [],
+        "metrics": {},
+        "summary": "string"
+      }
+    },
+    {
+      "name": "continuity-review",
+      "type": "codex",
+      "template": "review-continuity.md",
+      "references": [
+        "agents/continuity-checker.md"
+      ],
+      "required_output_keys": [
+        "overall_score",
+        "pass",
+        "issues",
+        "metrics",
+        "summary"
+      ],
+      "output_schema": {
+        "agent": "continuity-review",
+        "chapter": 1,
+        "overall_score": 0,
+        "pass": true,
+        "issues": [],
+        "metrics": {},
+        "summary": "string"
+      }
+    },
+    {
+      "name": "ooc-review",
+      "type": "codex",
+      "template": "review-ooc.md",
+      "references": [
+        "agents/ooc-checker.md"
+      ],
+      "required_output_keys": [
+        "overall_score",
+        "pass",
+        "issues",
+        "metrics",
+        "summary"
+      ],
+      "output_schema": {
+        "agent": "ooc-review",
+        "chapter": 1,
+        "overall_score": 0,
+        "pass": true,
+        "issues": [],
+        "metrics": {},
+        "summary": "string"
+      }
+    },
+    {
+      "name": "review-summary",
+      "type": "internal"
+    },
+    {
+      "name": "polish",
+      "type": "codex",
+      "template": "write-polish.md",
+      "references": [
+        "skills/webnovel-write/references/polish-guide.md",
+        "skills/webnovel-write/references/writing/typesetting.md"
+      ],
+      "required_output_keys": [
+        "chapter_file",
+        "content",
+        "anti_ai_force_check",
+        "change_summary"
+      ],
+      "output_schema": {
+        "chapter_file": "正文/第0001章.md",
+        "content": "string",
+        "anti_ai_force_check": "pass",
+        "change_summary": []
+      }
+    },
+    {
+      "name": "approval-gate",
+      "type": "internal"
+    },
+    {
+      "name": "data-sync",
+      "type": "codex",
+      "template": "write-data-sync.md",
+      "references": [
+        "agents/data-agent.md"
+      ],
+      "required_output_keys": [
+        "files_written",
+        "summary_file",
+        "state_updated",
+        "index_updated"
+      ],
+      "output_schema": {
+        "files_written": [],
+        "summary_file": ".webnovel/summaries/ch0001.md",
+        "state_updated": true,
+        "index_updated": true
+      }
+    }
+  ]
+}
