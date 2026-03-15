@@ -8,9 +8,10 @@
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = $PSScriptRoot
-$dashboardLauncher = Join-Path $repoRoot 'Launch-Webnovel-Dashboard.ps1'
-$loginLauncher = Join-Path $repoRoot 'Login-Codex-CLI.ps1'
+$workspaceRoot = Split-Path $PSScriptRoot -Parent
+$repoRoot = Join-Path $workspaceRoot 'webnovel-writer'
+$dashboardLauncher = Join-Path $PSScriptRoot 'Launch-Webnovel-Dashboard.ps1'
+$loginLauncher = Join-Path $PSScriptRoot 'Login-Codex-CLI.ps1'
 $guideSourcePath = Join-Path $repoRoot 'Quick-Start-CN.txt'
 $guidePath = Join-Path $env:TEMP 'webnovel-writer-quick-start-cn.txt'
 $guideTemplateBase64 = 'V2Vibm92ZWwgV3JpdGVyIOWQr+WKqOivtOaYjg0KPT09PT09PT09PT09PT09PT09PT09PT09DQoNCuS4gOOAgeS4u+iPnOWNleaAjuS5iOeUqA0KDQoxLiDlkK/liqggRGFzaGJvYXJkDQogICDlnKjmnKzmnLrmiZPlvIAgV2ViIOmdouadv+OAgg0KICAg6YCC5ZCI77ya5Y+q5Zyo5b2T5YmN55S16ISR5LiK5L2/55So44CCDQogICDmiZPlvIDlkI7lnLDlnYDpgJrluLjmmK8gaHR0cDovLzEyNy4wLjAuMTo4NzY1DQoNCjIuIOWQr+WKqCBEYXNoYm9hcmTvvIjlsYDln5/nvZHorr/pl67vvIkNCiAgIOWcqOacrOacuuWQr+WKqOmdouadv++8jOWQjOaXtuWFgeiuuOaJi+acuuWSjOWQjOS4gOWxgOWfn+e9keiuvuWkh+iuv+mXruOAgg0KICAg6YCC5ZCI77ya5oOz55So5omL5py65p+l55yL77yM5oiW6ICF5Zyo5ZCM5LiA572R57uc6YeM55qE5YW25LuW6K6+5aSH5LiK5omT5byA44CCDQogICDmiZPlvIDlkI7pmaTkuobmnKzmnLrlnLDlnYDvvIzov5jkvJrmmL7npLrkuIDkuKrlsYDln5/nvZHlnLDlnYDvvIzkvovlpoIgaHR0cDovLzE5Mi4xNjgueC54Ojg3NjUNCiAgIOaPkOmGku+8mumcgOimgeeUteiEkeWSjOaJi+acuuWcqOWQjOS4gOWxgOWfn+e9ke+8jOS4lOmYsueBq+WimeWFgeiuuOivpeerr+WPo+OAgg0KDQozLiDnmbvlvZUgQ29kZXggQ0xJDQogICDmiZPlvIDnmbvlvZXnqpflj6PvvIzmiafooYwgQ29kZXggQ0xJIOeZu+W9le+8jOW5tuajgOafpeW9k+WJjeeZu+W9leeKtuaAgeOAgg0KICAg6YCC5ZCI77ya56ys5LiA5qyh5L2/55So77yM5oiW55m75b2V5aSx5pWI5ZCO6YeN5paw55m75b2V44CCDQoNCjQuIOaJk+W8gOe7iOerrw0KICAg5omT5byA5LiA5Liq5bey57uP5a6a5L2N5Yiw6aG555uu55uu5b2V55qEIFBvd2VyU2hlbGwg56qX5Y+j44CCDQogICDpgILlkIjvvJrmiYvliqjov5DooYzlkb3ku6TjgIHmn6XnnIvml6Xlv5fjgIHmjpLmn6Xpl67popjjgIINCg0KNS4g5omT5byA5ZCv5Yqo6K+05piODQogICDnlKjorrDkuovmnKzmiZPlvIDov5nku73kuK3mlofor7TmmI7jgIINCiAgIOi/memHjOS4jeS8muWGjeaJk+W8gCBSRUFETUUubWTjgIINCg0K5LqM44CB5o6o6I2Q5L2/55So6aG65bqPDQoNCjEuIOWmguaenOi/mOayoeeZu+W9le+8jOWFiOmAiSAzIOeZu+W9lSBDb2RleCBDTEnjgIINCjIuIOeEtuWQjumAiSAxIOaIliAyIOWQr+WKqCBEYXNoYm9hcmTjgIINCjMuIOWcqOa1j+iniOWZqOmHjOaJk+W8gOmdouadv+WQju+8jOWFiOeci+KAnOaAu+iniOKAnemhteehruiupOmhueebruOAgeWGmeS9nOaooeWei+WSjCBSQUcg54q25oCB44CCDQo0LiDlho3ljrvigJzku7vliqHigJ3pobXlj5HotbfmiJbot5/ouKrku7vliqHjgIINCg0K5LiJ44CBV2ViIOmdouadv+aAjuS5iOeUqA0KDQoxLiDmgLvop4gNCiAgIOafpeeci+mhueebruWQjeensOOAgemimOadkOOAgeaAu+Wtl+aVsOOAgeW9k+WJjeeroOiKguOAgeWGmeS9nOaooeWei+WSjCBSQUcg54q25oCB44CCDQogICDov5nph4zkuZ/og73liJvlu7rpobnnm67vvIzmiJblj5HotbfigJzliIbmnpDnjrDmnInpobnnm67igJ3jgIHigJzop4TliJLljbfigJ3jgIHigJzmkrDlhpnnq6DoioLigJ3jgIHigJzmiafooYzlrqHmn6XigJ3jgIHigJzmgaLlpI3mtYHnqIvigJ3ku7vliqHjgIINCg0KMi4g5Lu75YqhDQogICDlt6bkvqfmmK/ku7vliqHliJfooajvvIzlj7PkvqfmmK/ku7vliqHor6bmg4XjgIINCiAgIOWPr+S7peafpeeci+eKtuaAgeOAgeW9k+WJjeatpemqpOOAgeWuoeaJueeKtuaAgeOAgeatpemqpOi+k+WHuuWSjOS6i+S7tua1geOAgg0KICAg5aaC5p6c5Lu75Yqh6L+b5YWl4oCc562J5b6F5Zue5YaZ5a6h5om54oCd77yM5bCx5Zyo6L+Z6YeM5om55YeG5oiW5ouS57ud44CCDQoNCjMuIOaVsOaNrg0KICAg5p+l55yL5a6e5L2T44CB5YWz57O744CB56ug6IqC562J57uT5p6E5YyW5pWw5o2u44CCDQogICDpgILlkIjmo4Dmn6XkurrnianjgIHkuJbnlYzop4Llkoznq6DoioLmlbDmja7mmK/lkKblkIzmraXjgIINCg0KNC4g5paH5Lu2DQogICDmtY/op4jpobnnm67mlofmoaPmoJHvvIzlubbmn6XnnIvmlofku7blhoXlrrnjgIINCiAgIOmAguWQiOW/q+mAn+aguOWvueeroOiKguOAgemFjee9ruWSjOS7u+WKoei+k+WHuuOAgg0KDQo1LiDotKjph48NCiAgIOafpeeci+WkseaViOS6i+WunuWuoeaJueOAgeWuoeafpeaMh+agh+OAgea4heWNleivhOWIhuOAgVJBRyDmn6Xor6LorrDlvZXlkozlt6Xlhbfnu5/orqHjgIINCiAgIOmAguWQiOaOkuafpei0qOmHj+mXrumimOOAgeWbnueci+ajgOe0ouaDheWGteWSjOehruiupOW8guW4uOOAgg0KDQrlm5vjgIHluLjop4Hmg4XlhrUNCg0KLSDpgInmi6kgMSDliLAgNSDlkI7vvIzlvZPliY3oj5zljZXnqpflj6PkvJrkv53nlZnvvJvmjInlm57ovabkvJrlm57liLDkuLvoj5zljZXjgIINCi0gUkVBRE1FLm1kIOS5i+WJjeS8muiiqyBUcmFlQ04g5omT5byA77yM5piv5Zug5Li6IFdpbmRvd3Mg5oqKIC5tZCDpu5jorqTlhbPogZTliLDkuoYgVHJhZUNO77yM5LiN5piv5pys6aG555uu5by65Yi25oyH5a6a55qE44CCDQotIOWmguaenOivtOaYjuWGjeasoeWHuueOsOS5seegge+8jOWFiOWFs+aOieaXp+eahOiusOS6i+acrOeql+WPo++8jOWGjeS7juiPnOWNlemHjeaWsOaJk+W8gOOAgg0K'
@@ -66,7 +67,7 @@ function Start-DashboardWindow([switch]$LanMode) {
         $argList += '-Lan'
     }
 
-    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $repoRoot -ArgumentList $argList | Out-Null
+    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $workspaceRoot -ArgumentList $argList | Out-Null
 }
 
 function Start-LoginWindow {
@@ -146,12 +147,12 @@ function Show-Menu {
 
 function Show-Help {
     Write-Host $textUsage
-    Write-Host '  Start-Webnovel-Writer.bat'
-    Write-Host '  Start-Webnovel-Writer.bat dashboard'
-    Write-Host '  Start-Webnovel-Writer.bat dashboard-lan'
-    Write-Host '  Start-Webnovel-Writer.bat login'
-    Write-Host '  Start-Webnovel-Writer.bat shell'
-    Write-Host '  Start-Webnovel-Writer.bat readme'
+    Write-Host '  tools\Start-Webnovel-Writer.bat'
+    Write-Host '  tools\Start-Webnovel-Writer.bat dashboard'
+    Write-Host '  tools\Start-Webnovel-Writer.bat dashboard-lan'
+    Write-Host '  tools\Start-Webnovel-Writer.bat login'
+    Write-Host '  tools\Start-Webnovel-Writer.bat shell'
+    Write-Host '  tools\Start-Webnovel-Writer.bat readme'
 }
 
 switch ($Action) {

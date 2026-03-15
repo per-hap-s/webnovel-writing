@@ -30,6 +30,11 @@ def _resolve_project_root(cli_root: str | None) -> Path:
     return resolve_project_root(cwd=Path.cwd())
 
 
+def _build_browser_url(host: str, port: int) -> str:
+    browser_host = "127.0.0.1" if host == "0.0.0.0" else host
+    return f"http://{browser_host}:{port}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Webnovel Dashboard Server")
     parser.add_argument("--project-root", type=str, default=None, help="小说项目根目录")
@@ -48,11 +53,12 @@ def main() -> None:
     app = create_app(project_root)
 
     url = f"http://{args.host}:{args.port}"
+    browser_url = _build_browser_url(args.host, args.port)
     print(f"Dashboard 启动: {url}")
     print(f"API 文档: {url}/docs")
 
     if not args.no_browser:
-        webbrowser.open(url)
+        webbrowser.open(browser_url)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

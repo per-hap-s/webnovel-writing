@@ -8,8 +8,10 @@
 
 $ErrorActionPreference = 'Stop'
 
-$appRoot = Join-Path $PSScriptRoot 'webnovel-writer'
-$pythonExe = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+$workspaceRoot = Split-Path $PSScriptRoot -Parent
+$repoRoot = Join-Path $workspaceRoot 'webnovel-writer'
+$appRoot = Join-Path $repoRoot 'webnovel-writer'
+$pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $codexBin = Join-Path $env:APPDATA 'npm'
 $nodeDir = Join-Path $env:LOCALAPPDATA 'Programs\NodePortable'
 $env:Path = $codexBin + ';' + $nodeDir + ';' + $env:Path

@@ -1,10 +1,16 @@
-﻿param(
-    [string]$PythonExe = ".venv\Scripts\python.exe"
+param(
+    [string]$PythonExe
 )
 
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$workspaceRoot = Split-Path $PSScriptRoot -Parent
+$root = Join-Path $workspaceRoot 'webnovel-writer'
 $spec = Join-Path $root 'webnovel.spec'
+
+if (-not $PythonExe) {
+    $PythonExe = Join-Path $root '.venv\Scripts\python.exe'
+}
 
 if (-not (Test-Path $PythonExe)) {
     throw "Python executable not found: $PythonExe"
@@ -14,3 +20,7 @@ if (-not (Test-Path $PythonExe)) {
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed with exit code $LASTEXITCODE"
 }
+
+Write-Host
+Write-Host '构建完成，按回车关闭窗口。'
+[void](Read-Host)

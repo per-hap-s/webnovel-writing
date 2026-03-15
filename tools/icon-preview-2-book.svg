@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f4ead7" />
+      <stop offset="100%" stop-color="#e1c18c" />
+    </linearGradient>
+    <linearGradient id="cover" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8a3d27" />
+      <stop offset="100%" stop-color="#5d2418" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)" />
+  <path d="M58 70c0-12 10-22 22-22h42c18 0 36 6 48 16v124c-12-10-30-16-48-16H80c-12 0-22 10-22 22z" fill="url(#cover)" />
+  <path d="M198 70c0-12-10-22-22-22h-42c-18 0-36 6-48 16v124c12-10 30-16 48-16h42c12 0 22 10 22 22z" fill="#a34c31" />
+  <path d="M128 64v124" stroke="#f8eedf" stroke-width="6" stroke-linecap="round" opacity="0.9" />
+  <path d="M84 96h30M84 114h44M84 132h36" stroke="#f4dcc5" stroke-width="6" stroke-linecap="round" />
+  <path d="M142 96h30M142 114h34M142 132h40" stroke="#f4dcc5" stroke-width="6" stroke-linecap="round" />
+  <path d="M178 42l16 22-16 20" fill="none" stroke="#2f241a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+</svg>
