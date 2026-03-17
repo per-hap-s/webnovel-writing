@@ -159,7 +159,44 @@
         "files_written": [],
         "summary_file": ".webnovel/summaries/ch0001.md",
         "state_updated": true,
-        "index_updated": true
+        "index_updated": true,
+        "chapter_meta": {
+          "title": "string",
+          "location": "string",
+          "characters": [
+            "string"
+          ]
+        },
+        "organizations": [
+          {
+            "name": "string",
+            "summary": "string"
+          }
+        ],
+        "locations": [
+          {
+            "name": "string",
+            "summary": "string"
+          }
+        ],
+        "world_rules": [
+          {
+            "name": "string",
+            "summary": "string"
+          }
+        ],
+        "setting_entries": [
+          {
+            "name": "string",
+            "category": "faction|location|rule",
+            "summary": "string"
+          }
+        ],
+        "entities_new": [],
+        "entities_appeared": [],
+        "relationships_new": [],
+        "state_changes": [],
+        "uncertain": []
       }
     }
   ]

@@ -62,6 +62,12 @@ const STATUS_CODE_MAP = {
     504: 'REQUEST_TIMEOUT',
 }
 
+Object.assign(CODE_MESSAGE_MAP, {
+    LLM_TIMEOUT: '写作模型请求超时。',
+    LLM_CONNECTION_ERROR: '写作模型接口连接失败。',
+    LLM_INVALID_RESPONSE: '写作模型返回的数据格式无效。',
+})
+
 class AppError extends Error {
     constructor({
         displayMessage,
@@ -82,12 +88,21 @@ class AppError extends Error {
 
 function buildUrl(path, params = {}) {
     const url = new URL(`${BASE}${path}`, window.location.origin)
+    const currentProjectRoot = getCurrentProjectRoot()
+    if (currentProjectRoot && !Object.prototype.hasOwnProperty.call(params, 'project_root')) {
+        url.searchParams.set('project_root', currentProjectRoot)
+    }
     Object.entries(params).forEach(([key, value]) => {
         if (value !== undefined && value !== null && value !== '') {
             url.searchParams.set(key, value)
         }
     })
     return url.toString()
+}
+
+export function getCurrentProjectRoot() {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('project_root') || ''
 }
 
 function inferCodeFromStatus(statusCode) {
@@ -254,7 +269,7 @@ export function postJSON(path, body = {}) {
 
 export function subscribeSSE(onMessage, handlers = {}) {
     const { onOpen, onError } = handlers
-    const es = new EventSource(`${BASE}/api/events`)
+    const es = new EventSource(buildUrl('/api/events'))
     es.onopen = () => {
         if (onOpen) onOpen()
     }

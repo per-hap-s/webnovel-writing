@@ -157,6 +157,11 @@ class TaskStore:
             "updated_at": _now_iso(),
             "started_at": None,
             "finished_at": None,
+            "interrupted_at": None,
+            "recovered_at": None,
+            "resume_target_task_id": None,
+            "resume_from_step": None,
+            "resume_reason": None,
             "error": None,
             "step_order": [step["name"] for step in workflow.get("steps", [])],
             "workflow_spec": workflow,
@@ -353,6 +358,7 @@ class TaskStore:
             status="completed",
             current_step=None,
             finished_at=_now_iso(),
+            error=None,
         )
 
     def mark_failed(self, task_id: str, step_name: Optional[str], error: Dict[str, Any]) -> Dict[str, Any]:
@@ -362,6 +368,16 @@ class TaskStore:
             current_step=step_name,
             finished_at=_now_iso(),
             error=error,
+        )
+
+    def mark_interrupted(self, task_id: str, step_name: Optional[str], reason: str) -> Dict[str, Any]:
+        return self.update_task(
+            task_id,
+            status="interrupted",
+            current_step=step_name,
+            interrupted_at=_now_iso(),
+            finished_at=None,
+            error={"code": "TASK_INTERRUPTED", "message": reason},
         )
 
     def mark_rejected(self, task_id: str, reason: str) -> Dict[str, Any]:
@@ -374,7 +390,7 @@ class TaskStore:
             error={"code": "WRITEBACK_REJECTED", "message": reason},
         )
 
-    def reset_for_retry(self, task_id: str) -> Dict[str, Any]:
+    def reset_for_retry(self, task_id: str, *, preserve_approval: bool = False) -> Dict[str, Any]:
         with self._lock:
             task = self.get_task(task_id)
             if task is None:
@@ -384,15 +400,48 @@ class TaskStore:
             step_results = artifacts.setdefault("step_results", {})
             if failed_step:
                 step_results.pop(failed_step, None)
-            artifacts["approval"] = {}
+            if not preserve_approval:
+                artifacts["approval"] = {}
             task["status"] = "queued"
-            task["approval_status"] = "not_required"
+            if not preserve_approval:
+                task["approval_status"] = "not_required"
             task["current_step"] = None
             task["finished_at"] = None
             task["error"] = None
             task["updated_at"] = _now_iso()
             self._write_task(task)
             return task
+
+    def prepare_for_resume(self, task_id: str, *, resume_from_step: Optional[str], reason: str) -> Dict[str, Any]:
+        return self.update_task(
+            task_id,
+            status="queued",
+            current_step=resume_from_step,
+            finished_at=None,
+            error=None,
+            recovered_at=_now_iso(),
+            resume_from_step=resume_from_step,
+            resume_reason=reason,
+        )
+
+    def mark_stale_running_tasks(self, active_task_ids: Optional[set[str]] = None) -> int:
+        active = active_task_ids or set()
+        updated = 0
+        for task in self.list_tasks(limit=1000):
+            task_id = task.get("id")
+            if not task_id or task.get("status") != "running" or task_id in active:
+                continue
+            current_step = task.get("current_step")
+            self.mark_interrupted(task_id, current_step, "Task interrupted before service restart recovery")
+            self.append_event(
+                task_id,
+                "warning",
+                "Task marked interrupted after service restart",
+                step_name=current_step,
+                payload={"resume_hint": current_step},
+            )
+            updated += 1
+        return updated
 
     def _task_path(self, task_id: str) -> Path:
         return self.base_dir / f"{task_id}.json"

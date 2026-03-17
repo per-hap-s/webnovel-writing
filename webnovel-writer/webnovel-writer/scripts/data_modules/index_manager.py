@@ -66,6 +66,7 @@ class ChapterMeta:
     word_count: int
     characters: List[str]
     summary: str = ""
+    file_path: str = ""
 
 
 @dataclass
@@ -252,9 +253,16 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                     word_count INTEGER,
                     characters TEXT,
                     summary TEXT,
+                    file_path TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            chapter_columns = {row[1] for row in cursor.execute("PRAGMA table_info(chapters)").fetchall()}
+            if "file_path" not in chapter_columns:
+                cursor.execute("ALTER TABLE chapters ADD COLUMN file_path TEXT")
+            if "updated_at" not in chapter_columns:
+                cursor.execute("ALTER TABLE chapters ADD COLUMN updated_at TIMESTAMP")
 
             # 场景表
             cursor.execute("""

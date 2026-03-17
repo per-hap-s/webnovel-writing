@@ -166,16 +166,288 @@ def _ensure_state_schema(state: Dict[str, Any]) -> Dict[str, Any]:
     ps.setdefault("location", {"current": "", "last_chapter": 0})
     ps.setdefault("golden_finger", {"name": "", "level": 1, "cooldown": 0, "skills": []})
     ps.setdefault("attributes", {})
+    planning = state.setdefault("planning", {})
+    planning.setdefault("profile", {})
+    planning.setdefault("readiness", {})
+    planning.setdefault("last_blocked", None)
+    planning.setdefault("volume_plans", {})
 
     return state
 
 
-def _build_master_outline(target_chapters: int, *, chapters_per_volume: int = 50) -> str:
+PLANNING_PROFILE_FIELD_SPECS: List[Dict[str, Any]] = [
+    {"name": "story_logline", "label": "故事一句话", "multiline": False, "required": True},
+    {"name": "protagonist_name", "label": "主角姓名", "multiline": False, "required": True},
+    {"name": "protagonist_identity", "label": "主角身份", "multiline": False, "required": True},
+    {"name": "protagonist_initial_state", "label": "主角初始状态", "multiline": True, "required": True},
+    {"name": "protagonist_desire", "label": "主角欲望", "multiline": False, "required": True},
+    {"name": "protagonist_flaw", "label": "主角缺陷", "multiline": False, "required": True},
+    {"name": "core_setting", "label": "核心设定", "multiline": True, "required": True},
+    {"name": "ability_cost", "label": "能力代价", "multiline": True, "required": True},
+    {"name": "volume_1_title", "label": "第 1 卷标题", "multiline": False, "required": True},
+    {"name": "volume_1_conflict", "label": "第 1 卷核心冲突", "multiline": True, "required": True},
+    {"name": "volume_1_climax", "label": "第 1 卷高潮", "multiline": True, "required": True},
+    {
+        "name": "major_characters_text",
+        "label": "主要角色",
+        "multiline": True,
+        "required": True,
+        "format_hint": "每行：姓名 | 定位 | 与主角关系 | 卷1作用",
+    },
+    {
+        "name": "factions_text",
+        "label": "势力",
+        "multiline": True,
+        "required": True,
+        "format_hint": "每行：势力 | 立场 | 与主角关系",
+    },
+    {"name": "rules_outline", "label": "规则梗概", "multiline": True, "required": True},
+    {
+        "name": "foreshadowing_text",
+        "label": "伏笔与回收",
+        "multiline": True,
+        "required": True,
+        "format_hint": "每行：伏笔内容 | 埋设章 | 回收章 | 层级",
+    },
+]
+
+PLANNING_PROFILE_FIELD_MAP = {item["name"]: item for item in PLANNING_PROFILE_FIELD_SPECS}
+PLANNING_PLACEHOLDER_MARKERS = (
+    "（待填写）",
+    "(待填写)",
+    "待填写",
+    "待补充",
+    "TODO",
+    "TBD",
+    "示例",
+    "占位",
+)
+
+
+def get_planning_profile_field_specs() -> List[Dict[str, Any]]:
+    return [dict(item) for item in PLANNING_PROFILE_FIELD_SPECS]
+
+
+def _is_placeholder_text(value: str) -> bool:
+    stripped = (value or "").strip()
+    if not stripped:
+        return True
+    return any(marker in stripped for marker in PLANNING_PLACEHOLDER_MARKERS)
+
+
+def normalize_planning_profile(raw: Dict[str, Any] | None, *, title: str = "", genre: str = "") -> Dict[str, str]:
+    source = raw or {}
+    profile: Dict[str, str] = {}
+    for spec in PLANNING_PROFILE_FIELD_SPECS:
+        key = spec["name"]
+        profile[key] = str(source.get(key) or "").strip()
+    return profile
+
+
+def build_initial_planning_profile(
+    *,
+    title: str,
+    genre: str,
+    protagonist_name: str = "",
+    golden_finger_name: str = "",
+    core_selling_points: str = "",
+    protagonist_desire: str = "",
+    protagonist_flaw: str = "",
+    protagonist_archetype: str = "",
+    protagonist_structure: str = "",
+    factions: str = "",
+    power_system_type: str = "",
+    gf_irreversible_cost: str = "",
+) -> Dict[str, str]:
+    initial = {
+        "story_logline": core_selling_points.strip(),
+        "protagonist_name": protagonist_name.strip(),
+        "protagonist_identity": protagonist_archetype.strip(),
+        "protagonist_initial_state": protagonist_structure.strip(),
+        "protagonist_desire": protagonist_desire.strip(),
+        "protagonist_flaw": protagonist_flaw.strip(),
+        "core_setting": golden_finger_name.strip(),
+        "ability_cost": gf_irreversible_cost.strip(),
+        "volume_1_title": "",
+        "volume_1_conflict": "",
+        "volume_1_climax": "",
+        "major_characters_text": protagonist_name.strip(),
+        "factions_text": factions.strip(),
+        "rules_outline": power_system_type.strip(),
+        "foreshadowing_text": "",
+    }
+    return normalize_planning_profile(initial, title=title, genre=genre)
+
+
+def build_planning_fill_template() -> Dict[str, Any]:
+    template = {spec["name"]: "" for spec in PLANNING_PROFILE_FIELD_SPECS}
+    template["major_characters_text"] = "姓名 | 定位 | 与主角关系 | 卷1作用"
+    template["factions_text"] = "势力 | 立场 | 与主角关系"
+    template["foreshadowing_text"] = "伏笔内容 | 埋设章 | 回收章 | 层级"
+    return {
+        "profile": template,
+        "required_fields": [spec["name"] for spec in PLANNING_PROFILE_FIELD_SPECS if spec.get("required")],
+        "field_specs": get_planning_profile_field_specs(),
+    }
+
+
+def evaluate_planning_readiness(profile: Dict[str, Any] | None, *, outline_text: str = "") -> Dict[str, Any]:
+    normalized = normalize_planning_profile(profile)
+    missing_items: List[Dict[str, Any]] = []
+    for spec in PLANNING_PROFILE_FIELD_SPECS:
+        if not spec.get("required"):
+            continue
+        value = normalized.get(spec["name"], "")
+        if _is_placeholder_text(value):
+            missing_items.append(
+                {
+                    "field": spec["name"],
+                    "label": spec["label"],
+                    "format_hint": spec.get("format_hint", ""),
+                }
+            )
+
+    outline_sections = [
+        "## 故事前提",
+        "## 主线推进",
+        "## 主要角色",
+        "## 势力",
+        "## 规则梗概",
+        "## 伏笔与回收",
+        "## 卷结构",
+    ]
+    outline_present = [section for section in outline_sections if section in (outline_text or "")]
+    outline_missing = [section for section in outline_sections if section not in outline_present]
+    ok = not missing_items
+    return {
+        "ok": ok,
+        "status": "ready" if ok else "needs_info",
+        "message": "planning profile ready" if ok else "planning profile is missing required information",
+        "missing_items": missing_items,
+        "missing_fields": [item["field"] for item in missing_items],
+        "missing_count": len(missing_items),
+        "completed_fields": len(PLANNING_PROFILE_FIELD_SPECS) - len(missing_items),
+        "total_required_fields": len(PLANNING_PROFILE_FIELD_SPECS),
+        "outline_sections_present": outline_present,
+        "outline_sections_missing": outline_missing,
+    }
+
+
+def _render_profile_block(title: str, lines: List[str]) -> List[str]:
+    return [title, *lines, ""]
+
+
+def _render_multiline_rows(value: str, fallback: str) -> List[str]:
+    rows = [line.strip() for line in (value or "").splitlines() if line.strip()]
+    if rows:
+        return [f"- {row}" for row in rows]
+    return [f"- {fallback}"]
+
+
+def _replace_markdown_section(text: str, heading: str, lines: List[str]) -> str:
+    normalized_lines = [heading, *lines]
+    block = "\n".join(normalized_lines).strip() + "\n"
+    if not text.strip():
+        return "# 总纲\n\n" + block
+
+    pattern = re.compile(rf"(?ms)^({re.escape(heading)}\n)(.*?)(?=^## |\Z)")
+    if pattern.search(text):
+        return pattern.sub(block, text, count=1)
+    base = text.rstrip()
+    if not base.endswith("\n"):
+        base += "\n"
+    return f"{base}\n{block}"
+
+
+def sync_master_outline_with_profile(
+    outline_text: str,
+    *,
+    title: str,
+    genre: str,
+    target_chapters: int,
+    profile: Dict[str, Any] | None,
+) -> str:
+    normalized = normalize_planning_profile(profile, title=title, genre=genre)
+    base_text = (outline_text or "").strip()
+    if not base_text:
+        base_text = _build_master_outline(target_chapters, title=title, genre=genre)
+    if "# 总纲" not in base_text:
+        base_text = "# 总纲\n\n" + base_text
+    if "## 卷结构" not in base_text:
+        base_text = _build_master_outline(target_chapters, title=title, genre=genre).strip()
+
+    story_premise = [
+        f"- 书名：{title or '（待填写）'}",
+        f"- 题材：{genre or '（待填写）'}",
+        f"- 一句话梗概：{normalized['story_logline'] or '（待填写）'}",
+        f"- 主角：{normalized['protagonist_name'] or '（待填写）'}",
+        f"- 主角身份：{normalized['protagonist_identity'] or '（待填写）'}",
+        f"- 主角初始状态：{normalized['protagonist_initial_state'] or '（待填写）'}",
+        f"- 核心设定：{normalized['core_setting'] or '（待填写）'}",
+        f"- 能力代价：{normalized['ability_cost'] or '（待填写）'}",
+    ]
+    mainline = [
+        f"- 主角当前欲望：{normalized['protagonist_desire'] or '（待填写）'}",
+        f"- 主角核心缺陷：{normalized['protagonist_flaw'] or '（待填写）'}",
+        f"- 第1卷标题：{normalized['volume_1_title'] or '（待填写）'}",
+        f"- 第1卷核心冲突：{normalized['volume_1_conflict'] or '（待填写）'}",
+        f"- 第1卷高潮：{normalized['volume_1_climax'] or '（待填写）'}",
+    ]
+    major_characters = _render_multiline_rows(normalized["major_characters_text"], "姓名 | 定位 | 与主角关系 | 卷1作用")
+    factions = _render_multiline_rows(normalized["factions_text"], "势力 | 立场 | 与主角关系")
+    rules = _render_multiline_rows(normalized["rules_outline"], "请补充世界规则、能力限制与制度约束")
+    foreshadowing = _render_multiline_rows(normalized["foreshadowing_text"], "伏笔内容 | 埋设章 | 回收章 | 层级")
+
+    updated = base_text
+    updated = _replace_markdown_section(updated, "## 故事前提", story_premise)
+    updated = _replace_markdown_section(updated, "## 主线推进", mainline)
+    updated = _replace_markdown_section(updated, "## 主要角色", major_characters)
+    updated = _replace_markdown_section(updated, "## 势力", factions)
+    updated = _replace_markdown_section(updated, "## 规则梗概", rules)
+    updated = _replace_markdown_section(updated, "## 伏笔与回收", foreshadowing)
+    if "## 卷结构" not in updated:
+        volume_block = _build_master_outline(target_chapters, title=title, genre=genre)
+        volume_part = volume_block.split("## 卷结构", 1)[1]
+        updated = updated.rstrip() + "\n\n## 卷结构" + volume_part
+    return updated.rstrip() + "\n"
+
+
+def _build_master_outline(
+    target_chapters: int,
+    *,
+    chapters_per_volume: int = 50,
+    title: str = "",
+    genre: str = "",
+    protagonist_name: str = "",
+    golden_finger_name: str = "",
+    core_selling_points: str = "",
+    protagonist_desire: str = "",
+    protagonist_flaw: str = "",
+    factions: str = "",
+    power_system_type: str = "",
+    gf_irreversible_cost: str = "",
+) -> str:
     volumes = (target_chapters - 1) // chapters_per_volume + 1 if target_chapters > 0 else 1
     lines: list[str] = [
         "# 总纲",
         "",
         "> 本文件为“总纲骨架”，用于 webnovel plan 细化为卷大纲与章纲。",
+        "",
+        "## 故事前提",
+        f"- 书名：{title or '（待填写）'}",
+        f"- 题材：{genre or '（待填写）'}",
+        f"- 主角：{protagonist_name or '（待填写）'}",
+        f"- 核心设定：{golden_finger_name or '（待填写）'}",
+        f"- 能力代价：{gf_irreversible_cost or '（待填写，明确能力收益与不可逆代价）'}",
+        "",
+        "## 主线推进",
+        f"- 主角当前欲望：{protagonist_desire or '（待填写）'}",
+        f"- 主角核心缺陷：{protagonist_flaw or '（待填写）'}",
+        f"- 核心冲突：{core_selling_points or '（待填写，至少写出主打矛盾与爽点来源）'}",
+        f"- 势力格局：{factions or '（待填写）'}",
+        f"- 规则/体系：{power_system_type or '（待填写）'}",
+        "- 关键伏笔：至少填写 2 条，注明埋点与预期回收位置。",
+        "- 节奏要求：前 3 章给出钩子、首次收益、代价显影；前 10 章形成阶段对抗。",
         "",
         "## 卷结构",
         "",
@@ -187,16 +459,63 @@ def _build_master_outline(target_chapters: int, *, chapters_per_volume: int = 50
         lines.extend(
             [
                 f"### 第{v}卷（第{start}-{end}章）",
+                "- 卷目标：",
                 "- 核心冲突：",
+                "- 升级与代价：",
                 "- 关键爽点：",
+                "- 阶段敌手/阻力：",
                 "- 卷末高潮：",
                 "- 主要登场角色：",
                 "- 关键伏笔（埋/收）：",
+                "- 前5章拆解：",
                 "",
             ]
         )
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _ensure_plan_ready_outline(
+    outline_text: str,
+    *,
+    title: str,
+    genre: str,
+    protagonist_name: str,
+    golden_finger_name: str,
+    core_selling_points: str,
+    protagonist_desire: str,
+    protagonist_flaw: str,
+    factions: str,
+    power_system_type: str,
+    gf_irreversible_cost: str,
+) -> str:
+    text = (outline_text or "").rstrip()
+    required_sections = {
+        "## 故事前提": [
+            f"- 书名：{title or '（待填写）'}",
+            f"- 题材：{genre or '（待填写）'}",
+            f"- 主角：{protagonist_name or '（待填写）'}",
+            f"- 核心设定：{golden_finger_name or '（待填写）'}",
+            f"- 能力代价：{gf_irreversible_cost or '（待填写，明确能力收益与不可逆代价）'}",
+        ],
+        "## 主线推进": [
+            f"- 主角当前欲望：{protagonist_desire or '（待填写）'}",
+            f"- 主角核心缺陷：{protagonist_flaw or '（待填写）'}",
+            f"- 核心冲突：{core_selling_points or '（待填写，至少写出主打矛盾与爽点来源）'}",
+            f"- 势力格局：{factions or '（待填写）'}",
+            f"- 规则/体系：{power_system_type or '（待填写）'}",
+            "- 关键伏笔：至少填写 2 条，注明埋点与预期回收位置。",
+            "- 节奏要求：前 3 章给出钩子、首次收益、代价显影；前 10 章形成阶段对抗。",
+        ],
+    }
+    append_blocks: list[str] = []
+    for heading, lines in required_sections.items():
+        if heading in text:
+            continue
+        append_blocks.extend(["", heading, *lines])
+    if not append_blocks:
+        return text.rstrip() + "\n"
+    return (text + "\n" + "\n".join(append_blocks).strip() + "\n").replace("\n\n\n", "\n\n")
 
 
 def _inject_volume_rows(template_text: str, target_chapters: int, *, chapters_per_volume: int = 50) -> str:
@@ -347,6 +666,22 @@ def init_project(
     # 确保 golden_finger 字段存在且可编辑
     if not state["protagonist_state"]["golden_finger"].get("name"):
         state["protagonist_state"]["golden_finger"]["name"] = "未命名金手指"
+
+    planning_profile = build_initial_planning_profile(
+        title=title,
+        genre=genre,
+        protagonist_name=protagonist_name,
+        golden_finger_name=golden_finger_name,
+        core_selling_points=core_selling_points,
+        protagonist_desire=protagonist_desire,
+        protagonist_flaw=protagonist_flaw,
+        protagonist_archetype=protagonist_archetype,
+        protagonist_structure=protagonist_structure,
+        factions=factions,
+        power_system_type=power_system_type,
+        gf_irreversible_cost=gf_irreversible_cost,
+    )
+    state["planning"]["profile"] = planning_profile
 
     state["progress"]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,8 +963,47 @@ def init_project(
     if outline_content:
         outline_content = _inject_volume_rows(outline_content, int(target_chapters)).rstrip() + "\n"
     else:
-        outline_content = _build_master_outline(int(target_chapters))
-    _write_text_if_missing(project_path / "大纲" / "总纲.md", outline_content)
+        outline_content = _build_master_outline(
+            int(target_chapters),
+            title=title,
+            genre=genre,
+            protagonist_name=protagonist_name,
+            golden_finger_name=golden_finger_name,
+            core_selling_points=core_selling_points,
+            protagonist_desire=protagonist_desire,
+            protagonist_flaw=protagonist_flaw,
+            factions=factions,
+            power_system_type=power_system_type,
+            gf_irreversible_cost=gf_irreversible_cost,
+        )
+    outline_content = _ensure_plan_ready_outline(
+        outline_content,
+        title=title,
+        genre=genre,
+        protagonist_name=protagonist_name,
+        golden_finger_name=golden_finger_name,
+        core_selling_points=core_selling_points,
+        protagonist_desire=protagonist_desire,
+        protagonist_flaw=protagonist_flaw,
+        factions=factions,
+        power_system_type=power_system_type,
+        gf_irreversible_cost=gf_irreversible_cost,
+    )
+    outline_path = project_path / "大纲" / "总纲.md"
+    existing_outline = _read_text_if_exists(outline_path)
+    if existing_outline:
+        outline_content = existing_outline
+    outline_content = sync_master_outline_with_profile(
+        outline_content,
+        title=title,
+        genre=genre,
+        target_chapters=int(target_chapters),
+        profile=planning_profile,
+    )
+    outline_path.parent.mkdir(parents=True, exist_ok=True)
+    outline_path.write_text(outline_content, encoding="utf-8")
+    state["planning"]["readiness"] = evaluate_planning_readiness(planning_profile, outline_text=outline_content)
+    atomic_write_json(state_path, state, use_lock=True, backup=False)
 
     _write_text_if_missing(
         project_path / "大纲" / "爽点规划.md",

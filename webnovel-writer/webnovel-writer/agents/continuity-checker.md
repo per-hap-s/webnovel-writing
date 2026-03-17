@@ -63,6 +63,11 @@ description: 连贯性检查，输出结构化报告供润色步骤参考
 - **C**: 缺少过渡，靠读者推测
 - **F**: 完全断裂，逻辑跳跃
 
+Additional continuity checks:
+- Rewind or second-pass actions must contain at least one explicit time anchor.
+- Key interception, chase, or countermeasure scenes must state a minimum spatial relation so the action can be followed.
+- Repeated warnings should not stay source-ambiguous for too long without the protagonist making a same-source, different-source, or undetermined judgment.
+
 #### Tier 2: Plot Thread Coherence (情节线连贯)
 
 **Track active plot threads**:

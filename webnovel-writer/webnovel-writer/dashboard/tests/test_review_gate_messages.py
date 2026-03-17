@@ -24,7 +24,7 @@ class TimelineBlockingRunner:
     def probe(self):
         return {'provider': 'timeline-block', 'installed': True}
 
-    def run(self, step_spec, workspace, prompt_bundle):
+    def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
         self.calls.append(step_spec['name'])
         if step_spec['name'] == 'consistency-review':
             payload = {
@@ -96,6 +96,6 @@ def test_review_gate_emits_readable_event_messages(tmp_path: Path):
     assert result['status'] == 'failed'
     assert result['error']['code'] == 'REVIEW_GATE_BLOCKED'
     assert result['error']['message'].startswith('审查关卡阻止继续执行：[high]')
-    assert 'Review summary persisted' in messages
+    assert 'Review summary prepared' in messages
     assert 'Review gate blocked execution' in messages
 

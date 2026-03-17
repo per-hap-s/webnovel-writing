@@ -7,17 +7,19 @@ const LLM_PROVIDER_OPTIONS = [
     { value: 'azure-openai', label: 'Azure OpenAI' },
 ]
 
+const DEFAULT_LAUNCHER_FORM = {
+    project_root: '',
+    title: '',
+    genre: '玄幻',
+    chapter: 1,
+    chapter_range: '1-3',
+    volume: '1',
+    mode: 'standard',
+    require_manual_approval: true,
+}
+
 export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIONS }) {
-    const [form, setForm] = useState({
-        project_root: '',
-        title: '',
-        genre: '玄幻',
-        chapter: 1,
-        chapter_range: '1-3',
-        volume: '1',
-        mode: 'standard',
-        require_manual_approval: true,
-    })
+    const [form, setForm] = useState(DEFAULT_LAUNCHER_FORM)
     const [submitting, setSubmitting] = useState(false)
     const [error, setError] = useState(null)
 
@@ -98,6 +100,205 @@ export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIO
             </div>
             <ErrorNotice error={error} />
             <button className="primary-button" onClick={submit} disabled={submitting}>{submitting ? '提交中...' : (template.submitLabel || '创建任务')}</button>
+        </div>
+    )
+}
+
+export function ProjectBootstrapSection({
+    currentProjectRoot,
+    currentTitle,
+    currentGenre,
+    projectInitialized,
+    onSuccess,
+}) {
+    const [form, setForm] = useState(() => buildBootstrapForm(currentProjectRoot, currentTitle, currentGenre))
+    const [prefillKey, setPrefillKey] = useState('')
+    const [submitting, setSubmitting] = useState(false)
+    const [error, setError] = useState(null)
+
+    const nextPrefillKey = `${currentProjectRoot || ''}|${currentTitle || ''}|${currentGenre || ''}|${projectInitialized ? '1' : '0'}`
+
+    useEffect(() => {
+        if (nextPrefillKey === prefillKey) return
+        setForm(buildBootstrapForm(currentProjectRoot, currentTitle, currentGenre))
+        setPrefillKey(nextPrefillKey)
+        setError(null)
+    }, [currentProjectRoot, currentTitle, currentGenre, projectInitialized, nextPrefillKey, prefillKey])
+
+    const normalizedCurrentRoot = normalizePath(currentProjectRoot)
+    const normalizedTargetRoot = normalizePath(form.project_root || currentProjectRoot)
+    const targetingCurrentProject = Boolean(projectInitialized && normalizedCurrentRoot && normalizedTargetRoot === normalizedCurrentRoot)
+
+    async function submit() {
+        if (targetingCurrentProject) return
+        setSubmitting(true)
+        setError(null)
+        try {
+            const response = await postJSON('/api/project/bootstrap', {
+                project_root: form.project_root,
+                title: form.title,
+                genre: form.genre,
+            })
+            if (onSuccess) onSuccess(response)
+        } catch (err) {
+            setError(normalizeError(err))
+        } finally {
+            setSubmitting(false)
+        }
+    }
+
+    return (
+        <div className="launcher-card">
+            <div className="launcher-title">创建项目</div>
+            {projectInitialized ? (
+                <div className="tiny">
+                    当前已经打开一个已初始化项目。这里已按当前项目预填；如果要新建，请先把“项目根目录”改成新的空目录。
+                </div>
+            ) : (
+                <div className="tiny">
+                    当前目录还未初始化，可以直接在这里创建项目。
+                </div>
+            )}
+            <div className="field-stack">
+                <Field label="项目根目录">
+                    <input value={form.project_root} onChange={(event) => setForm({ ...form, project_root: event.target.value })} placeholder="请输入新的项目目录" />
+                </Field>
+                <Field label="小说标题">
+                    <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="留空则使用目录名" />
+                </Field>
+                <Field label="题材">
+                    <input value={form.genre} onChange={(event) => setForm({ ...form, genre: event.target.value })} placeholder="玄幻" />
+                </Field>
+            </div>
+            {targetingCurrentProject ? (
+                <div className="planning-warning subtle">
+                    <div className="tiny">当前项目已初始化，不能对当前目录重复创建。请先修改“项目根目录”为新的空目录。</div>
+                </div>
+            ) : null}
+            <ErrorNotice error={error} />
+            <button className="primary-button" onClick={submit} disabled={submitting || targetingCurrentProject}>
+                {submitting ? '创建中...' : '创建项目'}
+            </button>
+        </div>
+    )
+}
+
+export function PlanningProfileSection({ onSaved }) {
+    const [form, setForm] = useState({})
+    const [fieldSpecs, setFieldSpecs] = useState([])
+    const [readiness, setReadiness] = useState(null)
+    const [lastBlocked, setLastBlocked] = useState(null)
+    const [loading, setLoading] = useState(true)
+    const [saving, setSaving] = useState(false)
+    const [error, setError] = useState(null)
+    const [message, setMessage] = useState('')
+
+    useEffect(() => {
+        let active = true
+        async function loadProfile() {
+            setLoading(true)
+            try {
+                const response = await fetchJSON('/api/project/planning-profile')
+                if (!active) return
+                setForm(response.profile || {})
+                setFieldSpecs(response.field_specs || [])
+                setReadiness(response.readiness || null)
+                setLastBlocked(response.last_blocked || null)
+                setError(null)
+            } catch (err) {
+                if (!active) return
+                setError(normalizeError(err))
+            } finally {
+                if (active) setLoading(false)
+            }
+        }
+        loadProfile()
+        return () => {
+            active = false
+        }
+    }, [])
+
+    async function saveProfile() {
+        setSaving(true)
+        setError(null)
+        setMessage('')
+        try {
+            const response = await postJSON('/api/project/planning-profile', form)
+            setForm(response.profile || {})
+            setFieldSpecs(response.field_specs || [])
+            setReadiness(response.readiness || null)
+            setLastBlocked(response.last_blocked || null)
+            setMessage('规划必填信息已保存，总纲与 readiness 已同步更新。')
+            if (onSaved) onSaved(response)
+        } catch (err) {
+            setError(normalizeError(err))
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const missingItems = readiness?.missing_items || []
+
+    return (
+        <div className="planning-profile">
+            <div className="planning-status-row">
+                <div className={`planning-pill ${readiness?.ok ? 'ready' : 'blocked'}`}>
+                    {readiness?.ok ? '已满足 plan 条件' : '待补信息'}
+                </div>
+                <div className="tiny">
+                    {readiness ? `已填写 ${readiness.completed_fields || 0}/${readiness.total_required_fields || 0}` : '正在读取 readiness...'}
+                </div>
+            </div>
+            {missingItems.length > 0 ? (
+                <div className="planning-warning">
+                    <div className="subsection-title">缺失项清单</div>
+                    <div className="planning-tags">
+                        {missingItems.map((item) => (
+                            <span key={item.field || item.label} className="planning-tag">{item.label}</span>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+            {lastBlocked?.blocking_items?.length ? (
+                <div className="planning-warning subtle">
+                    <div className="subsection-title">最近一次 plan 阻断</div>
+                    <div className="tiny">{lastBlocked.reason || '信息不足'}</div>
+                    <div className="planning-tags">
+                        {lastBlocked.blocking_items.map((item, index) => (
+                            <span key={`${item.field || item.label}-${index}`} className="planning-tag">{item.label}</span>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+            <div className="planning-grid">
+                {fieldSpecs.map((field) => {
+                    const value = form[field.name] || ''
+                    return (
+                        <Field key={field.name} label={field.label}>
+                            {field.multiline ? (
+                                <textarea
+                                    rows={field.name === 'rules_outline' ? 4 : 3}
+                                    value={value}
+                                    onChange={(event) => setForm({ ...form, [field.name]: event.target.value })}
+                                    placeholder={field.format_hint || '请输入内容'}
+                                />
+                            ) : (
+                                <input
+                                    value={value}
+                                    onChange={(event) => setForm({ ...form, [field.name]: event.target.value })}
+                                    placeholder={field.format_hint || '请输入内容'}
+                                />
+                            )}
+                            {field.format_hint ? <div className="tiny">{field.format_hint}</div> : null}
+                        </Field>
+                    )
+                })}
+            </div>
+            <ErrorNotice error={error} />
+            {message ? <div className="success-text">{message}</div> : null}
+            <button className="primary-button" onClick={saveProfile} disabled={loading || saving}>
+                {saving ? '保存中...' : '保存规划信息'}
+            </button>
         </div>
     )
 }
@@ -316,10 +517,12 @@ export function ApiSettingsSection({ llmStatus, ragStatus, onSaved }) {
 
 function translateConnection(status) {
     if (!status) return '\u672a\u68c0\u6d4b'
-    if (status.connection_status === 'connected') return '\u5df2\u8fde\u63a5'
-    if (status.connection_status === 'failed') return '\u8fde\u63a5\u5931\u8d25'
-    if (status.connection_status === 'not_configured') return '\u672a\u914d\u7f6e'
-    return status.connection_status || '\u672a\u68c0\u6d4b'
+    const effectiveStatus = status.effective_status || status.connection_status
+    if (effectiveStatus === 'connected') return '\u5df2\u8fde\u63a5'
+    if (effectiveStatus === 'degraded') return '\u63a2\u6d3b\u5f02\u5e38\uff0c\u6700\u8fd1\u6267\u884c\u6210\u529f'
+    if (effectiveStatus === 'failed') return '\u8fde\u63a5\u5931\u8d25'
+    if (effectiveStatus === 'not_configured') return '\u672a\u914d\u7f6e'
+    return effectiveStatus || '\u672a\u68c0\u6d4b'
 }
 
 
@@ -328,6 +531,7 @@ export function TaskCenterPageSection({
     selectedTask,
     onSelectTask,
     onMutated,
+    onNavigateOverview,
     MetricCard,
     translateTaskType,
     translateTaskStatus,
@@ -335,9 +539,19 @@ export function TaskCenterPageSection({
     translateStepName,
     translateEventLevel,
     translateEventMessage,
+    resolveTaskStatusLabel,
+    resolveCurrentStepLabel,
 }) {
     const [events, setEvents] = useState([])
     const [actionError, setActionError] = useState(null)
+    const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
+
+    useEffect(() => {
+        if (!tasks.some(isRuntimeActiveTask)) return undefined
+        setRuntimeNow(Date.now())
+        const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000)
+        return () => window.clearInterval(timer)
+    }, [tasks])
 
     useEffect(() => {
         if (!selectedTask?.id) return
@@ -359,61 +573,100 @@ export function TaskCenterPageSection({
             <section className="panel list-panel">
                 <div className="panel-title">任务监控</div>
                 <div className="task-list">
-                    {tasks.map((task) => (
+                    {tasks.map((task) => {
+                        const liveTask = withLiveRuntimeStatus(task, runtimeNow)
+                        return (
                         <button key={task.id} className={`task-item ${selectedTask?.id === task.id ? 'active' : ''}`} onClick={() => onSelectTask(task.id)}>
-                            <div>{translateTaskType(task.task_type)}</div>
-                            <div className="muted">{translateTaskStatus(task.status)}</div>
-                            <div className="tiny">{translateStepName(task.current_step || 'idle')}</div>
+                            <div className="task-item-header">
+                                <div>{translateTaskType(liveTask.task_type)}</div>
+                                <span className={`runtime-badge ${resolveRuntimeBadgeTone(liveTask)}`}>{resolveRuntimeBadgeLabel(liveTask)}</span>
+                            </div>
+                            <div className="muted">{resolveTaskStatusLabel ? resolveTaskStatusLabel(liveTask) : translateTaskStatus(liveTask.status)}</div>
+                            <div className="tiny">{resolveCurrentStepLabel ? resolveCurrentStepLabel(liveTask) : translateStepName(liveTask.current_step || 'idle')}</div>
+                            <div className="tiny runtime-summary">{buildRuntimeSummary(liveTask)}</div>
                         </button>
-                    ))}
+                    )})}
                     {tasks.length === 0 && <div className="empty-state">暂无任务</div>}
                 </div>
             </section>
             <section className="panel detail-panel">
                 <div className="panel-title">任务详情</div>
                 {!selectedTask && <div className="empty-state">请选择任务查看详情</div>}
-                {selectedTask && (
+                {selectedTask && (() => {
+                    const liveSelectedTask = withLiveRuntimeStatus(selectedTask, runtimeNow)
+                    return (
                     <>
                         <div className="detail-grid">
-                            <MetricCard label="状态" value={translateTaskStatus(selectedTask.status)} />
-                            <MetricCard label="当前步骤" value={translateStepName(selectedTask.current_step || 'idle')} />
-                            <MetricCard label="审批" value={translateApprovalStatus(selectedTask.approval_status || 'n/a')} />
-                            <MetricCard label="类型" value={translateTaskType(selectedTask.task_type)} />
+                            <MetricCard label="状态" value={resolveTaskStatusLabel ? resolveTaskStatusLabel(liveSelectedTask) : translateTaskStatus(liveSelectedTask.status)} />
+                            <MetricCard label="当前步骤" value={resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle')} />
+                            <MetricCard label="审批" value={translateApprovalStatus(liveSelectedTask.approval_status || 'n/a')} />
+                            <MetricCard label="类型" value={translateTaskType(liveSelectedTask.task_type)} />
+                        </div>
+                        {liveSelectedTask?.artifacts?.plan_blocked ? (
+                            <div className="planning-warning">
+                                <div className="subsection-title">待补信息</div>
+                                <div className="tiny">规划任务未失败，但当前输入不足，需先补录后再重新运行 plan。</div>
+                                <div className="planning-tags">
+                                    {(liveSelectedTask.artifacts.blocking_items || []).map((item, index) => (
+                                        <span key={`${item.field || item.label}-${index}`} className="planning-tag">{item.label || item.field || '未命名缺失项'}</span>
+                                    ))}
+                                </div>
+                                {onNavigateOverview ? <button className="secondary-button" onClick={onNavigateOverview}>前往总览补录</button> : null}
+                            </div>
+                        ) : null}
+                        <div className="subsection">
+                            <div className="subsection-title">实时运行状态</div>
+                            <div className="detail-grid">
+                                <MetricCard label="当前阶段" value={liveSelectedTask.runtime_status?.phase_label || (resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle'))} />
+                                <MetricCard label="阶段说明" value={liveSelectedTask.runtime_status?.phase_detail || '暂无'} />
+                                <MetricCard label="运行状态" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
+                                <MetricCard label="已运行时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.running_seconds)} />
+                                <MetricCard label="已等待时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.waiting_seconds)} />
+                                <MetricCard label="当前尝试" value={formatCountValue(liveSelectedTask.runtime_status?.attempt)} />
+                                <MetricCard label="重试次数" value={formatCountValue(liveSelectedTask.runtime_status?.retry_count, true)} />
+                                <MetricCard label="超时预算" value={formatTimeoutValue(liveSelectedTask.runtime_status?.timeout_seconds)} />
+                                <MetricCard label="最近事件" value={liveSelectedTask.runtime_status?.last_event_label || '暂无'} />
+                                <MetricCard label="最近更新时间" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_event_at || liveSelectedTask.updated_at || '-')} />
+                                <MetricCard label="最近活动" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_activity_at || '-')} />
+                                <MetricCard label="错误码" value={liveSelectedTask.runtime_status?.error_code || '-'} />
+                                <MetricCard label="HTTP 状态" value={liveSelectedTask.runtime_status?.http_status || '-'} />
+                                <MetricCard label="是否可重试" value={formatRetryableValue(liveSelectedTask.runtime_status?.retryable)} />
+                            </div>
                         </div>
                         <div className="button-row">
-                            <button className="secondary-button" onClick={() => perform(`/api/tasks/${selectedTask.id}/retry`, {})}>重试</button>
-                            {selectedTask.status === 'awaiting_writeback_approval' && (
+                            <button className="secondary-button" onClick={() => perform(`/api/tasks/${liveSelectedTask.id}/retry`, {})}>重试</button>
+                            {liveSelectedTask.status === 'awaiting_writeback_approval' && (
                                 <>
-                                    <button className="primary-button" onClick={() => perform('/api/review/approve', { task_id: selectedTask.id, reason: '由仪表盘批准回写' })}>批准回写</button>
-                                    <button className="danger-button" onClick={() => perform('/api/review/reject', { task_id: selectedTask.id, reason: '由仪表盘拒绝回写' })}>拒绝回写</button>
+                                    <button className="primary-button" onClick={() => perform('/api/review/approve', { task_id: liveSelectedTask.id, reason: '由仪表盘批准回写' })}>批准回写</button>
+                                    <button className="danger-button" onClick={() => perform('/api/review/reject', { task_id: liveSelectedTask.id, reason: '由仪表盘拒绝回写' })}>拒绝回写</button>
                                 </>
                             )}
                         </div>
                         <ErrorNotice error={actionError} />
-                        <ErrorNotice error={selectedTask.error || null} title="任务失败原因" />
+                        <ErrorNotice error={liveSelectedTask.error || null} title="任务失败原因" />
                         <div className="subsection">
                             <div className="subsection-title">步骤输出</div>
-                            <pre className="code-block">{JSON.stringify(selectedTask.artifacts?.step_results || {}, null, 2)}</pre>
+                            <pre className="code-block">{JSON.stringify(liveSelectedTask.artifacts?.step_results || {}, null, 2)}</pre>
                         </div>
                         <div className="subsection">
                             <div className="subsection-title">事件流</div>
                             <div className="event-list">
                                 {events.map((event) => (
                                     <div key={event.id} className={`event-card ${event.level}`}>
-                                        <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} · {event.timestamp}</div>
+                                        <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} · {formatTimestampShort(event.timestamp)}</div>
                                         <div>{translateEventMessage(event.message)}</div>
                                     </div>
                                 ))}
                             </div>
                         </div>
                     </>
-                )}
+                )})()}
             </section>
         </div>
     )
 }
 
-export function DataPageSection({ SimpleTable }) {
+export function DataPageSection({ SimpleTable, refreshToken }) {
     const [entities, setEntities] = useState([])
     const [relationships, setRelationships] = useState([])
     const [chapters, setChapters] = useState([])
@@ -422,16 +675,18 @@ export function DataPageSection({ SimpleTable }) {
         fetchJSON('/api/entities').then(setEntities).catch(() => setEntities([]))
         fetchJSON('/api/relationships', { limit: 80 }).then(setRelationships).catch(() => setRelationships([]))
         fetchJSON('/api/chapters').then(setChapters).catch(() => setChapters([]))
-    }, [])
+    }, [refreshToken])
 
     return (
         <div className="page-grid">
             <section className="panel">
                 <div className="panel-title">实体</div>
+                {chapters.length > 0 && entities.length === 0 ? <div className="tiny">当前已有章节，但暂未看到结构化实体；如本章未抽取到结果，会在对应任务事件流里显示 warning。</div> : null}
                 <SimpleTable rows={entities} columns={['name', 'type', 'tier', 'last_appearance']} />
             </section>
             <section className="panel">
                 <div className="panel-title">关系</div>
+                {chapters.length > 0 && relationships.length === 0 ? <div className="tiny">当前已有章节，但暂未看到结构化关系；请同时检查对应写作任务的 `data-sync` 事件。</div> : null}
                 <SimpleTable rows={relationships} columns={['from_entity', 'to_entity', 'type', 'chapter']} />
             </section>
             <section className="panel full-span">
@@ -442,10 +697,11 @@ export function DataPageSection({ SimpleTable }) {
     )
 }
 
-export function FilesPageSection() {
+export function FilesPageSection({ refreshToken }) {
     const [tree, setTree] = useState({})
     const [selectedPath, setSelectedPath] = useState('')
-    const [content, setContent] = useState('')
+    const [fileDetail, setFileDetail] = useState({ path: '', content: '', exists: false, is_binary: false, encoding: 'utf-8' })
+    const [loading, setLoading] = useState(false)
     const [error, setError] = useState(null)
 
     useEffect(() => {
@@ -456,18 +712,38 @@ export function FilesPageSection() {
             setTree({})
             setError(normalizeError(err))
         })
-    }, [])
+    }, [refreshToken])
 
     useEffect(() => {
-        if (!selectedPath) return
+        if (!selectedPath) {
+            setFileDetail({ path: '', content: '', exists: false, is_binary: false, encoding: 'utf-8' })
+            return
+        }
+        setLoading(true)
         fetchJSON('/api/files/read', { path: selectedPath }).then((result) => {
-            setContent(result.content || '')
+            setFileDetail({
+                path: result.path || selectedPath,
+                content: typeof result.content === 'string' ? result.content : '',
+                exists: Boolean(result.exists),
+                is_binary: Boolean(result.is_binary),
+                encoding: result.encoding || 'utf-8',
+            })
             setError(null)
         }).catch((err) => {
-            setContent('读取失败')
+            setFileDetail({ path: selectedPath, content: '', exists: false, is_binary: false, encoding: 'utf-8' })
             setError(normalizeError(err))
-        })
-    }, [selectedPath])
+        }).finally(() => setLoading(false))
+    }, [selectedPath, refreshToken])
+
+    const previewText = !selectedPath
+        ? '请选择左侧文件'
+        : loading
+            ? '读取中...'
+            : fileDetail.is_binary
+                ? `该文件为二进制或非 UTF-8 文本，当前编码：${fileDetail.encoding}`
+                : fileDetail.exists
+                    ? (fileDetail.content === '' ? '无内容' : fileDetail.content)
+                    : '读取失败'
 
     return (
         <div className="split-layout">
@@ -478,7 +754,7 @@ export function FilesPageSection() {
             <section className="panel detail-panel">
                 <div className="panel-title">{selectedPath || '选择文件'}</div>
                 <ErrorNotice error={error} />
-                <pre className="code-block large">{content || '无内容'}</pre>
+                <pre className="code-block large">{previewText}</pre>
             </section>
         </div>
     )
@@ -549,6 +825,146 @@ export function QualityPageSection({ refreshToken, onMutated, SimpleTable, trans
             </section>
         </div>
     )
+}
+
+function resolveRuntimeBadgeLabel(task) {
+    if (task?.artifacts?.plan_blocked) return '待补信息'
+    const stepState = task?.runtime_status?.step_state
+    if (stepState === 'retrying') return '重试中'
+    if (stepState === 'waiting_approval') return '待审批'
+    if (stepState === 'failed') return '已失败'
+    if (stepState === 'completed') return '已完成'
+    if (stepState === 'running') return '运行中'
+    return '待执行'
+}
+
+function resolveRuntimeBadgeTone(task) {
+    if (task?.artifacts?.plan_blocked) return 'warning'
+    const stepState = task?.runtime_status?.step_state
+    if (stepState === 'running') return 'info'
+    if (stepState === 'retrying') return 'warning'
+    if (stepState === 'waiting_approval') return 'warning'
+    if (stepState === 'failed') return 'danger'
+    if (stepState === 'completed') return 'success'
+    return 'muted'
+}
+
+function buildRuntimeSummary(task) {
+    if (task?.artifacts?.plan_blocked) return '需先回总览补录规划信息'
+    const runtime = task?.runtime_status || {}
+    const parts = []
+    if (runtime.phase_label) parts.push(runtime.phase_label)
+    if (runtime.phase_detail) parts.push(runtime.phase_detail)
+    if (runtime.step_state === 'retrying' && runtime.attempt) {
+        parts.push(`第 ${runtime.attempt} 次尝试`)
+    } else if (runtime.step_state === 'running' && runtime.running_seconds > 0) {
+        parts.push(formatRuntimeDuration(runtime.running_seconds))
+    } else if (runtime.step_state === 'failed' && runtime.error_code) {
+        parts.push(runtime.error_code)
+    } else if (runtime.step_state === 'waiting_approval') {
+        parts.push('等待人工批准回写')
+    } else if (runtime.step_state === 'completed' && runtime.running_seconds > 0) {
+        parts.push(`耗时 ${formatRuntimeDuration(runtime.running_seconds)}`)
+    }
+    if (!parts.length) return '暂无实时状态'
+    return parts.join(' · ')
+}
+
+function isRuntimeActiveTask(task) {
+    const stepState = task?.runtime_status?.step_state
+    return stepState === 'running' || stepState === 'retrying'
+}
+
+function withLiveRuntimeStatus(task, nowMs) {
+    if (!task?.runtime_status || !isRuntimeActiveTask(task)) return task
+    const runtime = task.runtime_status
+    const referenceMs = parseTimestampToMs(runtime.last_activity_at || runtime.last_event_at || task.updated_at)
+    if (!Number.isFinite(referenceMs)) return task
+    const elapsedSeconds = Math.max(0, Math.floor((nowMs - referenceMs) / 1000))
+    if (elapsedSeconds <= 0) return task
+    const runningSeconds = Math.max(0, Number(runtime.running_seconds || 0)) + elapsedSeconds
+    const waitingSeconds = shouldTickWaiting(runtime)
+        ? Math.max(0, Number(runtime.waiting_seconds || 0)) + elapsedSeconds
+        : Math.max(0, Number(runtime.waiting_seconds || 0))
+    return {
+        ...task,
+        runtime_status: {
+            ...runtime,
+            running_seconds: runningSeconds,
+            waiting_seconds: waitingSeconds,
+        },
+    }
+}
+
+function shouldTickWaiting(runtime) {
+    return ['llm_request_started', 'request_dispatched', 'awaiting_model_response', 'step_heartbeat'].includes(runtime?.last_event_message)
+        || Number(runtime?.waiting_seconds || 0) > 0
+}
+
+function parseTimestampToMs(value) {
+    if (!value) return Number.NaN
+    const parsed = new Date(String(value).includes('T') ? String(value) : String(value).replace(' ', 'T'))
+    return parsed.getTime()
+}
+
+function formatRuntimeDuration(seconds) {
+    const total = Number(seconds || 0)
+    if (!Number.isFinite(total) || total <= 0) return '-'
+    const hours = Math.floor(total / 3600)
+    const minutes = Math.floor((total % 3600) / 60)
+    const remainSeconds = total % 60
+    if (hours > 0) return `${hours}小时${minutes}分${remainSeconds}秒`
+    if (minutes > 0) return `${minutes}分${remainSeconds}秒`
+    return `${remainSeconds}秒`
+}
+
+function formatTimeoutValue(seconds) {
+    const total = Number(seconds || 0)
+    if (!Number.isFinite(total) || total <= 0) return '-'
+    return `${total} 秒`
+}
+
+function formatCountValue(value, allowZero = false) {
+    if (value === null || value === undefined || value === '') return '-'
+    const count = Number(value)
+    if (!Number.isFinite(count)) return String(value)
+    if (!allowZero && count <= 0) return '-'
+    return String(count)
+}
+
+function formatRetryableValue(value) {
+    if (value === null || value === undefined) return '-'
+    return value ? '是' : '否'
+}
+
+function formatTimestampShort(value) {
+    if (!value || value === '-') return '-'
+    const text = String(value)
+    const normalized = text.includes('T') ? text : text.replace(' ', 'T')
+    const parsed = new Date(normalized)
+    if (Number.isNaN(parsed.getTime())) {
+        return text.replace('T', ' ').replace(/\.\d+/, '')
+    }
+    const year = parsed.getFullYear()
+    const month = String(parsed.getMonth() + 1).padStart(2, '0')
+    const day = String(parsed.getDate()).padStart(2, '0')
+    const hour = String(parsed.getHours()).padStart(2, '0')
+    const minute = String(parsed.getMinutes()).padStart(2, '0')
+    const second = String(parsed.getSeconds()).padStart(2, '0')
+    return `${year}-${month}-${day} ${hour}:${minute}:${second}`
+}
+
+function buildBootstrapForm(projectRoot, title, genre) {
+    return {
+        ...DEFAULT_LAUNCHER_FORM,
+        project_root: projectRoot || '',
+        title: title || '',
+        genre: genre || '玄幻',
+    }
+}
+
+function normalizePath(value) {
+    return String(value || '').trim().replace(/[\\/]+$/, '').toLowerCase()
 }
 
 function Field({ label, children }) {

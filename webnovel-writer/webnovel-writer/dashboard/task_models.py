@@ -37,6 +37,24 @@ class BootstrapProjectRequest(BaseModel):
     genre: str = "\u7384\u5e7b"
 
 
+class PlanningProfileRequest(BaseModel):
+    story_logline: str = ""
+    protagonist_name: str = ""
+    protagonist_identity: str = ""
+    protagonist_initial_state: str = ""
+    protagonist_desire: str = ""
+    protagonist_flaw: str = ""
+    core_setting: str = ""
+    ability_cost: str = ""
+    volume_1_title: str = ""
+    volume_1_conflict: str = ""
+    volume_1_climax: str = ""
+    major_characters_text: str = ""
+    factions_text: str = ""
+    rules_outline: str = ""
+    foreshadowing_text: str = ""
+
+
 class RetryRequest(BaseModel):
     resume_from_step: Optional[str] = None
 

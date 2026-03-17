@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +30,41 @@ class MappingRunner:
     def probe(self):
         return {'provider': 'codex-cli', 'installed': True, 'configured': True}
 
-    def run(self, step_spec, workspace, prompt_bundle):
+    def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
+        return step_result(step_spec['name'])
+
+
+class HangingRunner(MappingRunner):
+    runs_dirname = 'llm-runs'
+    timeout_ms = 1000
+    max_request_retries = 0
+    retry_backoff_seconds = 0
+
+    def _timeout_seconds_for_step(self, step_name):
+        return 1
+
+    def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
+        time.sleep(0.2)
+        return step_result(step_spec['name'])
+
+
+class HeartbeatRunner(MappingRunner):
+    runs_dirname = 'llm-runs'
+    timeout_ms = 1000
+    max_request_retries = 0
+    retry_backoff_seconds = 0
+
+    def _timeout_seconds_for_step(self, step_name):
+        return 1
+
+    def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
+        if progress_callback:
+            progress_callback('request_dispatched', {'attempt': 1, 'retry_count': 0})
+            progress_callback('awaiting_model_response', {'attempt': 1, 'retry_count': 0})
+        time.sleep(0.05)
+        if progress_callback:
+            progress_callback('response_received', {'attempt': 1, 'retry_count': 0})
+            progress_callback('parsing_output', {'attempt': 1, 'retry_count': 0})
         return step_result(step_spec['name'])
 
 
@@ -73,3 +108,129 @@ def test_retry_keeps_failed_step_and_queues_again(tmp_path: Path):
 
     retried = service.retry_task(task['id'])
     assert retried['status'] == 'queued'
+
+
+def test_retry_defaults_to_polish_or_data_sync(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {
+        'name': 'write',
+        'version': 1,
+        'steps': [
+            {'name': 'context', 'type': 'llm'},
+            {'name': 'draft', 'type': 'llm'},
+            {'name': 'polish', 'type': 'llm'},
+            {'name': 'approval-gate', 'type': 'internal'},
+            {'name': 'data-sync', 'type': 'llm'},
+        ],
+    }
+    polish_task = service.store.create_task('write', {'chapter': 1}, workflow)
+    service.store.update_task(polish_task['id'], workflow_spec=workflow, status='failed', current_step='polish', error={'code': 'LLM_TIMEOUT'})
+
+    retried_polish = service.retry_task(polish_task['id'])
+    polish_event = service.get_events(polish_task['id'])[-1]
+    assert retried_polish['status'] == 'queued'
+    assert polish_event['payload']['resume_from_step'] == 'polish'
+
+    data_sync_task = service.store.create_task('write', {'chapter': 2}, workflow)
+    service.store.update_task(
+        data_sync_task['id'],
+        workflow_spec=workflow,
+        status='failed',
+        current_step='data-sync',
+        approval_status='approved',
+        artifacts={'step_results': {'polish': {'success': True}}, 'approval': {'status': 'approved'}},
+        error={'code': 'LLM_HTTP_ERROR'},
+    )
+
+    retried_data_sync = service.retry_task(data_sync_task['id'])
+    data_sync_event = service.get_events(data_sync_task['id'])[-1]
+    refreshed = service.get_task(data_sync_task['id'])
+    assert retried_data_sync['status'] == 'queued'
+    assert data_sync_event['payload']['resume_from_step'] == 'data-sync'
+    assert refreshed['approval_status'] == 'approved'
+
+
+def test_external_step_watchdog_fails_instead_of_hanging(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    workflow = {'name': 'plan', 'version': 1, 'steps': [{'name': 'plan', 'type': 'llm', 'instructions': 'do', 'output_schema': {}}]}
+    service = OrchestrationService(project_root, runner=HangingRunner())
+    service.store.create_task('plan', {'volume': 1}, workflow)
+    task = service.store.list_tasks(limit=1)[0]
+
+    service._run_plan_preflight = lambda *args, **kwargs: None
+    service._watchdog_timeout_seconds = lambda step_name: 0.01
+    asyncio.run(service._run_task(task['id']))
+
+    failed_task = service.get_task(task['id'])
+    assert failed_task['status'] == 'failed'
+    assert failed_task['error']['code'] == 'LLM_TIMEOUT'
+    assert failed_task['current_step'] == 'plan'
+    events = service.get_events(task['id'])
+    assert any(event['message'] == 'llm_request_started' for event in events)
+    assert any(event['message'] == 'llm_request_timed_out' for event in events)
+    error_path = project_root / '.webnovel' / 'observability' / 'llm-runs' / f"{task['id']}-plan" / 'error.json'
+    assert error_path.is_file()
+
+
+def test_runtime_status_aggregates_retry_and_waiting_approval(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {
+        'name': 'write',
+        'version': 1,
+        'steps': [
+            {'name': 'context', 'type': 'llm'},
+            {'name': 'approval-gate', 'type': 'internal'},
+        ],
+    }
+    task = service.store.create_task('write', {'chapter': 1}, workflow)
+    service.store.update_task(task['id'], workflow_spec=workflow, status='running', current_step='context', started_at='2026-03-16T10:00:00')
+    service.store.append_event(
+        task['id'],
+        'warning',
+        'step_retry_started',
+        step_name='context',
+        payload={'attempt': 2, 'retry_count': 1, 'timeout_seconds': 120, 'retryable': True},
+    )
+
+    retried = service.get_task(task['id'])
+    assert retried['runtime_status']['step_state'] == 'retrying'
+    assert retried['runtime_status']['attempt'] == 2
+    assert retried['runtime_status']['retry_count'] == 1
+
+    service.store.mark_waiting_for_approval(
+        task['id'],
+        'approval-gate',
+        {'status': 'pending', 'requested_at': '2026-03-16T10:05:00', 'next_step': 'data-sync'},
+    )
+    service.store.append_event(task['id'], 'warning', 'step_waiting_approval', step_name='approval-gate', payload={'retryable': True})
+    waiting = service.get_task(task['id'])
+    assert waiting['runtime_status']['step_state'] == 'waiting_approval'
+    assert waiting['runtime_status']['phase_label'] == '回写审批'
+
+
+def test_long_running_step_emits_progress_and_heartbeat(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    workflow = {'name': 'plan', 'version': 1, 'steps': [{'name': 'plan', 'type': 'llm', 'instructions': 'do', 'output_schema': {}}]}
+    service = OrchestrationService(project_root, runner=HeartbeatRunner())
+    service.store.create_task('plan', {'volume': 1}, workflow)
+    task = service.store.list_tasks(limit=1)[0]
+
+    service._run_plan_preflight = lambda *args, **kwargs: None
+    service._runner_heartbeat_seconds = lambda step_name: 0.01
+    service._watchdog_timeout_seconds = lambda step_name: 0.2
+    asyncio.run(service._run_task(task['id']))
+
+    refreshed = service.get_task(task['id'])
+    events = service.get_events(task['id'])
+    messages = [event['message'] for event in events]
+
+    assert refreshed['status'] == 'completed'
+    assert refreshed['runtime_status']['phase_detail'] == '当前步骤已完成。'
+    assert 'prompt_compiled' in messages
+    assert 'request_dispatched' in messages
+    assert 'awaiting_model_response' in messages
+    assert 'step_heartbeat' in messages
+    assert 'response_received' in messages
+    assert 'parsing_output' in messages

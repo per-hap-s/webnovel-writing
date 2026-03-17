@@ -4,12 +4,13 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -28,6 +29,24 @@ STEP_ERROR_MESSAGES = {
     "CODEX_STEP_FAILED": "Codex 步骤执行失败。",
 }
 
+STEP_ERROR_MESSAGES.update(
+    {
+        "LLM_NOT_CONFIGURED": "请先配置写作模型的 API Key 和模型名称。",
+        "LLM_TIMEOUT": "写作模型请求超时。",
+        "LLM_CONNECTION_ERROR": "写作模型接口连接失败。",
+        "LLM_HTTP_ERROR": "写作模型接口请求失败。",
+        "LLM_INVALID_RESPONSE": "写作模型返回的数据格式无效。",
+        "LLM_REQUEST_FAILED": "写作模型接口连接失败。",
+        "LLM_RESPONSE_INVALID": "写作模型返回的数据格式无效。",
+        "INVALID_STEP_OUTPUT": "步骤输出中不包含有效 JSON 对象。",
+        "CODEX_CLI_NOT_FOUND": "未找到 Codex CLI 可执行文件。",
+        "CODEX_AUTH_REQUIRED": "Codex CLI 尚未登录。",
+        "CODEX_TIMEOUT": "Codex 步骤执行超时。",
+        "CODEX_EXEC_ERROR": "Codex CLI 调用失败。",
+        "CODEX_STEP_FAILED": "Codex 步骤执行失败。",
+    }
+)
+
 
 def _ensure_str(data: Union[str, bytes, None]) -> str:
     if data is None:
@@ -37,34 +56,151 @@ def _ensure_str(data: Union[str, bytes, None]) -> str:
     return str(data)
 
 
-def extract_json_payload(raw: str) -> Optional[Dict[str, Any]]:
+@dataclass
+class JsonExtractionResult:
+    payload: Optional[Dict[str, Any]]
+    stage: str
+    recovered: bool
+    error: Optional[str] = None
+    missing_required_keys: tuple[str, ...] = ()
+
+
+def _finalize_extraction_result(
+    payload: Optional[Dict[str, Any]],
+    *,
+    stage: str,
+    recovered: bool,
+    error: Optional[str] = None,
+    required_keys: Optional[list[str]] = None,
+) -> JsonExtractionResult:
+    missing_required_keys: tuple[str, ...] = ()
+    if payload is not None and required_keys:
+        missing_required_keys = tuple(key for key in required_keys if key not in payload)
+    return JsonExtractionResult(
+        payload=payload,
+        stage=stage,
+        recovered=recovered,
+        error=error,
+        missing_required_keys=missing_required_keys,
+    )
+
+
+def _balanced_json_candidates(raw: str) -> tuple[list[str], bool]:
+    candidates: list[str] = []
+    start: Optional[int] = None
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(raw):
+        if start is None:
+            if char == "{":
+                start = index
+                depth = 1
+                in_string = False
+                escape = False
+            continue
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                candidates.append(raw[start : index + 1])
+                start = None
+
+    return candidates, start is not None
+
+
+def extract_json_payload_details(raw: str, required_keys: Optional[list[str]] = None) -> JsonExtractionResult:
     raw = (raw or "").strip()
     if not raw:
-        return None
+        return _finalize_extraction_result(None, stage="empty", recovered=False, error="empty output", required_keys=required_keys)
 
     try:
         parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else None
+        if isinstance(parsed, dict):
+            return _finalize_extraction_result(parsed, stage="strict_json", recovered=False, required_keys=required_keys)
+        return _finalize_extraction_result(
+            None,
+            stage="json_non_object",
+            recovered=False,
+            error="top-level JSON value is not an object",
+            required_keys=required_keys,
+        )
     except json.JSONDecodeError:
         pass
 
-    fence = re.search(r"```json\s*(\{.*?\})\s*```", raw, flags=re.DOTALL)
-    if fence:
+    for fence_match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE):
+        fence_body = fence_match.group(1).strip()
         try:
-            parsed = json.loads(fence.group(1))
-            return parsed if isinstance(parsed, dict) else None
+            parsed = json.loads(fence_body)
+            if isinstance(parsed, dict):
+                return _finalize_extraction_result(parsed, stage="json_fence", recovered=True, required_keys=required_keys)
         except json.JSONDecodeError:
-            pass
+            candidates, _ = _balanced_json_candidates(fence_body)
+            for candidate in candidates:
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    return _finalize_extraction_result(parsed, stage="json_fence", recovered=True, required_keys=required_keys)
 
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
+    candidates, truncated = _balanced_json_candidates(raw)
+    for candidate in candidates:
         try:
-            parsed = json.loads(raw[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
+            parsed = json.loads(candidate)
         except json.JSONDecodeError:
-            return None
-    return None
+            continue
+        if isinstance(parsed, dict):
+            return _finalize_extraction_result(
+                parsed,
+                stage="balanced_object",
+                recovered=(candidate != raw),
+                required_keys=required_keys,
+            )
+
+    if truncated:
+        return _finalize_extraction_result(
+            None,
+            stage="json_truncated",
+            recovered=False,
+            error="JSON object appears truncated",
+            required_keys=required_keys,
+        )
+    if "{" in raw:
+        return _finalize_extraction_result(
+            None,
+            stage="json_invalid",
+            recovered=False,
+            error="JSON object found but could not be parsed",
+            required_keys=required_keys,
+        )
+    return _finalize_extraction_result(
+        None,
+        stage="no_json",
+        recovered=False,
+        error="no JSON object found in output",
+        required_keys=required_keys,
+    )
+
+
+def extract_json_payload(raw: str) -> Optional[Dict[str, Any]]:
+    return extract_json_payload_details(raw).payload
 
 
 @dataclass
@@ -78,7 +214,8 @@ class StepResult:
     structured_output: Optional[Dict[str, Any]]
     prompt_file: str
     output_file: str
-    error: Optional[Dict[str, str]] = None
+    error: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -92,6 +229,7 @@ class StepResult:
             "prompt_file": self.prompt_file,
             "output_file": self.output_file,
             "error": self.error,
+            "metadata": self.metadata,
         }
 
 
@@ -108,27 +246,116 @@ class LLMRunner:
     def probe(self) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def run(self, step_spec: Dict[str, Any], workspace: Path, prompt_bundle: Dict[str, Any]) -> StepResult:
+    def run(
+        self,
+        step_spec: Dict[str, Any],
+        workspace: Path,
+        prompt_bundle: Dict[str, Any],
+        progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+    ) -> StepResult:
         run_dir = self._prepare_run_dir(prompt_bundle, step_spec)
         prompt_file = run_dir / "prompt.md"
         bundle_file = run_dir / "prompt-bundle.json"
         output_file = run_dir / "raw-output.txt"
+        request_file = run_dir / "request.json"
 
         prompt_text = self._build_prompt(step_spec, prompt_bundle)
         prompt_file.write_text(prompt_text, encoding="utf-8")
         bundle_file.write_text(json.dumps(prompt_bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_json_artifact(
+            request_file,
+            self._build_request_metadata(step_spec, Path(workspace).resolve(), prompt_bundle),
+        )
 
         started_at = time.perf_counter()
-        result = self._execute(step_spec, Path(workspace).resolve(), prompt_bundle, prompt_text, prompt_file, output_file)
+        try:
+            result = self._execute(
+                step_spec,
+                Path(workspace).resolve(),
+                prompt_bundle,
+                prompt_text,
+                prompt_file,
+                output_file,
+                progress_callback,
+            )
+        except Exception as exc:
+            self._write_json_artifact(
+                run_dir / "error.json",
+                {
+                    "success": False,
+                    "step_name": str(step_spec.get("name") or ""),
+                    "error": {
+                        "code": "LLM_RUNNER_EXCEPTION",
+                        "message": str(exc),
+                    },
+                },
+            )
+            raise
         if result.timing_ms == 0:
             result.timing_ms = int((time.perf_counter() - started_at) * 1000)
-        return self._normalize_result(result)
+        normalized = self._normalize_result(result)
+        self._write_outcome_artifacts(run_dir, normalized)
+        return normalized
 
     def _prepare_run_dir(self, prompt_bundle: Dict[str, Any], step_spec: Dict[str, Any]) -> Path:
         runs_root = self.project_root / ".webnovel" / "observability" / self.runs_dirname
         run_dir = runs_root / f"{prompt_bundle['task_id']}-{step_spec['name']}"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
+
+    def _build_request_metadata(
+        self,
+        step_spec: Dict[str, Any],
+        workspace: Path,
+        prompt_bundle: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        timeout_method = getattr(self, "_timeout_seconds_for_step", None)
+        timeout_seconds: Optional[int] = None
+        if callable(timeout_method):
+            try:
+                timeout_seconds = int(timeout_method(step_spec.get("name")))
+            except Exception:
+                timeout_seconds = None
+        return {
+            "task_id": prompt_bundle.get("task_id"),
+            "step_name": str(step_spec.get("name") or ""),
+            "workspace": str(workspace),
+            "runner": self.__class__.__name__,
+            "provider": getattr(self, "provider", None),
+            "model": getattr(self, "model", None),
+            "base_url": getattr(self, "base_url", None),
+            "timeout_seconds": timeout_seconds,
+            "context_metrics": prompt_bundle.get("context_metrics"),
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _write_json_artifact(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    def _write_outcome_artifacts(self, run_dir: Path, result: StepResult) -> None:
+        result_payload = {
+            "success": result.success,
+            "step_name": result.step_name,
+            "return_code": result.return_code,
+            "timing_ms": result.timing_ms,
+            "structured_output": result.structured_output,
+            "metadata": result.metadata,
+            "prompt_file": result.prompt_file,
+            "output_file": result.output_file,
+        }
+        result_file = run_dir / "result.json"
+        error_file = run_dir / "error.json"
+        if result.success:
+            self._write_json_artifact(result_file, result_payload)
+            if error_file.exists():
+                error_file.unlink()
+            return
+        self._write_json_artifact(
+            error_file,
+            result_payload | {"error": result.error, "stderr": result.stderr, "stdout": result.stdout},
+        )
+        if result_file.exists():
+            result_file.unlink()
 
     def _build_prompt(self, step_spec: Dict[str, Any], prompt_bundle: Dict[str, Any]) -> str:
         payload = json.dumps(prompt_bundle.get("input", {}), ensure_ascii=False, indent=2)
@@ -187,6 +414,7 @@ class LLMRunner:
         prompt_text: str,
         prompt_file: Path,
         output_file: Path,
+        progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
     ) -> StepResult:
         raise NotImplementedError
 
@@ -242,6 +470,7 @@ class MockRunner(LLMRunner):
         prompt_text: str,
         prompt_file: Path,
         output_file: Path,
+        progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
     ) -> StepResult:
         payloads = self._load_payloads()
         if not payloads:
@@ -305,6 +534,8 @@ class OpenAICompatibleRunner(LLMRunner):
             or "https://api.openai.com/v1"
         ).rstrip("/")
         self.temperature = float(os.environ.get("WEBNOVEL_LLM_TEMPERATURE", "0.1"))
+        self.max_request_retries = max(0, int(os.environ.get("WEBNOVEL_LLM_MAX_RETRIES", "2")))
+        self.retry_backoff_seconds = max(0.1, float(os.environ.get("WEBNOVEL_LLM_RETRY_BACKOFF_SECONDS", "1.0")))
         self._health_checked_at_epoch = 0.0
         self._connection_status = "not_checked"
         self._connection_checked_at: Optional[str] = None
@@ -410,6 +641,7 @@ class OpenAICompatibleRunner(LLMRunner):
         prompt_text: str,
         prompt_file: Path,
         output_file: Path,
+        progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
     ) -> StepResult:
         if not self.is_configured():
             return StepResult(
@@ -514,6 +746,392 @@ class OpenAICompatibleRunner(LLMRunner):
         )
 
 
+    def _check_connection(self, force: bool = False) -> None:
+        if not self.is_configured():
+            self._set_connection_state("not_configured", None)
+            return
+        if not force and self._health_cache_valid():
+            return
+
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "health-check"}],
+        }
+        req = urlrequest.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlrequest.urlopen(req, timeout=self.health_timeout_seconds) as response:
+                raw_response = response.read().decode("utf-8", errors="replace")
+            data = json.loads(raw_response)
+            if not isinstance(data.get("choices"), list):
+                self._set_connection_state(
+                    "failed",
+                    {"code": "LLM_INVALID_RESPONSE", "message": "写作模型健康检查返回格式无效。"},
+                )
+                return
+            self._set_connection_state("connected", None)
+        except urlerror.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            self._set_connection_state(
+                "failed",
+                {
+                    "code": "LLM_HTTP_ERROR",
+                    "message": "写作模型健康检查失败。",
+                    "original_message": body or str(exc),
+                    "status_code": int(exc.code),
+                },
+            )
+        except (urlerror.URLError, TimeoutError, OSError) as exc:
+            error_code = "LLM_TIMEOUT" if self._is_timeout_error(exc) else "LLM_CONNECTION_ERROR"
+            self._set_connection_state(
+                "failed",
+                {
+                    "code": error_code,
+                    "message": STEP_ERROR_MESSAGES[error_code],
+                    "original_message": str(exc),
+                },
+            )
+        except json.JSONDecodeError as exc:
+            self._set_connection_state(
+                "failed",
+                {
+                    "code": "LLM_INVALID_RESPONSE",
+                    "message": "写作模型健康检查返回的 JSON 无法解析。",
+                    "original_message": str(exc),
+                },
+            )
+
+    def _execute(
+        self,
+        step_spec: Dict[str, Any],
+        workspace: Path,
+        prompt_bundle: Dict[str, Any],
+        prompt_text: str,
+        prompt_file: Path,
+        output_file: Path,
+        progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+    ) -> StepResult:
+        if not self.is_configured():
+            return StepResult(
+                step_name=step_spec["name"],
+                success=False,
+                return_code=78,
+                timing_ms=0,
+                stdout="",
+                stderr="LLM API not configured",
+                structured_output=None,
+                prompt_file=str(prompt_file),
+                output_file=str(output_file),
+                error={
+                    "code": "LLM_NOT_CONFIGURED",
+                    "message": STEP_ERROR_MESSAGES["LLM_NOT_CONFIGURED"],
+                },
+            )
+
+        payload = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Return exactly one JSON object. Do not wrap it in markdown fences.",
+                },
+                {"role": "user", "content": prompt_text},
+            ],
+        }
+        req = urlrequest.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+
+        step_name = step_spec.get("name")
+        timeout_seconds = self._timeout_seconds_for_step(step_name)
+        max_attempts = self._max_attempts_for_step(step_name)
+        last_result: Optional[StepResult] = None
+
+        for attempt in range(1, max_attempts + 1):
+            attempt_output_file = self._attempt_output_file(output_file, attempt)
+            metadata: Dict[str, Any] = {
+                "attempt": attempt,
+                "timeout_seconds": timeout_seconds,
+                "retry_count": attempt - 1,
+            }
+            try:
+                if progress_callback:
+                    progress_callback("request_dispatched", {"attempt": attempt, "retry_count": attempt - 1})
+                    progress_callback("awaiting_model_response", {"attempt": attempt, "retry_count": attempt - 1})
+                with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
+                    raw_response = response.read().decode("utf-8", errors="replace")
+                attempt_output_file.write_text(raw_response, encoding="utf-8")
+            except urlerror.HTTPError as exc:
+                raw_response = exc.read().decode("utf-8", errors="replace")
+                attempt_output_file.write_text(raw_response, encoding="utf-8")
+                error_info = self._http_error_info(exc, raw_response, attempt, timeout_seconds)
+                self._write_attempt_metadata(attempt_output_file, metadata | error_info)
+                last_result = StepResult(
+                    step_name=step_spec["name"],
+                    success=False,
+                    return_code=int(exc.code),
+                    timing_ms=0,
+                    stdout="",
+                    stderr=raw_response,
+                    structured_output=None,
+                    prompt_file=str(prompt_file),
+                    output_file=str(attempt_output_file),
+                    error=error_info,
+                    metadata=metadata,
+                )
+                if self._should_retry_error(error_info) and attempt < max_attempts:
+                    if progress_callback:
+                        progress_callback(
+                            "step_retry_scheduled",
+                            {
+                                "attempt": attempt + 1,
+                                "retry_count": attempt,
+                                "error_code": error_info.get("code"),
+                                "http_status": error_info.get("http_status"),
+                            },
+                        )
+                    self._sleep_before_retry(attempt, step_name)
+                    continue
+                output_file.write_text(raw_response, encoding="utf-8")
+                return last_result
+            except (urlerror.URLError, TimeoutError, OSError) as exc:
+                raw_error = str(exc)
+                attempt_output_file.write_text(raw_error, encoding="utf-8")
+                error_info = self._request_error_info(exc, attempt, timeout_seconds)
+                self._write_attempt_metadata(attempt_output_file, metadata | error_info)
+                last_result = StepResult(
+                    step_name=step_spec["name"],
+                    success=False,
+                    return_code=124 if error_info["code"] == "LLM_TIMEOUT" else 111,
+                    timing_ms=0,
+                    stdout="",
+                    stderr=raw_error,
+                    structured_output=None,
+                    prompt_file=str(prompt_file),
+                    output_file=str(attempt_output_file),
+                    error=error_info,
+                    metadata=metadata,
+                )
+                if self._should_retry_error(error_info) and attempt < max_attempts:
+                    if progress_callback:
+                        progress_callback(
+                            "step_retry_scheduled",
+                            {
+                                "attempt": attempt + 1,
+                                "retry_count": attempt,
+                                "error_code": error_info.get("code"),
+                            },
+                        )
+                    self._sleep_before_retry(attempt, step_name)
+                    continue
+                output_file.write_text(raw_error, encoding="utf-8")
+                return last_result
+
+            if progress_callback:
+                progress_callback("response_received", {"attempt": attempt, "retry_count": attempt - 1})
+            try:
+                if progress_callback:
+                    progress_callback("parsing_output", {"attempt": attempt, "retry_count": attempt - 1})
+                parsed = json.loads(raw_response)
+            except json.JSONDecodeError as exc:
+                error_info = {
+                    "code": "LLM_INVALID_RESPONSE",
+                    "message": str(exc),
+                    "attempt": attempt,
+                    "retryable": False,
+                    "timeout_seconds": timeout_seconds,
+                }
+                self._write_attempt_metadata(attempt_output_file, metadata | error_info | {"parse_stage": "raw_response_invalid_json"})
+                output_file.write_text(raw_response, encoding="utf-8")
+                return StepResult(
+                    step_name=step_spec["name"],
+                    success=False,
+                    return_code=65,
+                    timing_ms=0,
+                    stdout=raw_response,
+                    stderr="",
+                    structured_output=None,
+                    prompt_file=str(prompt_file),
+                    output_file=str(attempt_output_file),
+                    error=error_info,
+                    metadata=metadata,
+                )
+
+            choices = parsed.get("choices")
+            if not isinstance(choices, list) or not choices:
+                error_info = {
+                    "code": "LLM_INVALID_RESPONSE",
+                    "message": "response.choices is missing or empty",
+                    "attempt": attempt,
+                    "retryable": False,
+                    "timeout_seconds": timeout_seconds,
+                }
+                self._write_attempt_metadata(attempt_output_file, metadata | error_info | {"parse_stage": "choices_missing"})
+                output_file.write_text(raw_response, encoding="utf-8")
+                return StepResult(
+                    step_name=step_spec["name"],
+                    success=False,
+                    return_code=65,
+                    timing_ms=0,
+                    stdout=raw_response,
+                    stderr="",
+                    structured_output=None,
+                    prompt_file=str(prompt_file),
+                    output_file=str(attempt_output_file),
+                    error=error_info,
+                    metadata=metadata,
+                )
+
+            content = _ensure_str(choices[0].get("message", {}).get("content", ""))
+            extraction = extract_json_payload_details(content, required_keys=step_spec.get("required_output_keys"))
+            metadata.update(
+                {
+                    "parse_stage": extraction.stage,
+                    "json_extraction_recovered": extraction.recovered,
+                    "missing_required_keys": list(extraction.missing_required_keys),
+                }
+            )
+            self._write_attempt_metadata(attempt_output_file, metadata)
+            output_file.write_text(raw_response, encoding="utf-8")
+
+            if extraction.payload is None:
+                error_info = {
+                    "code": "INVALID_STEP_OUTPUT",
+                    "message": STEP_ERROR_MESSAGES["INVALID_STEP_OUTPUT"],
+                    "attempt": attempt,
+                    "retryable": False,
+                    "timeout_seconds": timeout_seconds,
+                    "parse_stage": extraction.stage,
+                    "raw_output_present": bool(content.strip()),
+                }
+                return StepResult(
+                    step_name=step_spec["name"],
+                    success=False,
+                    return_code=65,
+                    timing_ms=0,
+                    stdout=content,
+                    stderr="",
+                    structured_output=None,
+                    prompt_file=str(prompt_file),
+                    output_file=str(attempt_output_file),
+                    error=error_info,
+                    metadata=metadata,
+                )
+
+            return StepResult(
+                step_name=step_spec["name"],
+                success=True,
+                return_code=0,
+                timing_ms=0,
+                stdout=content,
+                stderr="",
+                structured_output=extraction.payload,
+                prompt_file=str(prompt_file),
+                output_file=str(attempt_output_file),
+                metadata=metadata,
+            )
+
+        if last_result is not None:
+            return last_result
+        raise RuntimeError(f"failed to execute step: {step_spec.get('name')}")
+
+    def _timeout_seconds_for_step(self, step_name: Any) -> int:
+        base_timeout_seconds = max(1, self.timeout_ms // 1000)
+        normalized = str(step_name or "").strip().lower()
+        if normalized in {"draft", "polish", "data-sync"}:
+            return max(base_timeout_seconds, 240)
+        if normalized == "plan":
+            return max(base_timeout_seconds, 300)
+        if normalized == "context" or "review" in normalized:
+            return max(base_timeout_seconds, 150)
+        return base_timeout_seconds
+
+    def _max_retries_for_step(self, step_name: Any) -> int:
+        normalized = str(step_name or "").strip().lower()
+        if normalized == "plan":
+            return min(self.max_request_retries, 1)
+        return self.max_request_retries
+
+    def _max_attempts_for_step(self, step_name: Any) -> int:
+        return self._max_retries_for_step(step_name) + 1
+
+    def _retry_backoff_seconds_for_step(self, step_name: Any) -> float:
+        normalized = str(step_name or "").strip().lower()
+        if normalized == "plan":
+            return max(self.retry_backoff_seconds, 2.0)
+        return self.retry_backoff_seconds
+
+    def _attempt_output_file(self, output_file: Path, attempt: int) -> Path:
+        if attempt == 1:
+            return output_file
+        return output_file.with_name(f"{output_file.stem}.attempt-{attempt}{output_file.suffix}")
+
+    def _write_attempt_metadata(self, output_file: Path, payload: Dict[str, Any]) -> None:
+        meta_file = output_file.with_name(f"{output_file.stem}.meta.json")
+        meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _is_timeout_error(self, exc: BaseException) -> bool:
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            return True
+        if isinstance(exc, urlerror.URLError):
+            reason = getattr(exc, "reason", None)
+            return isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower()
+        return "timed out" in str(exc).lower()
+
+    def _http_error_info(self, exc: urlerror.HTTPError, raw_response: str, attempt: int, timeout_seconds: int) -> Dict[str, Any]:
+        status_code = int(exc.code)
+        return {
+            "code": "LLM_HTTP_ERROR",
+            "message": raw_response or str(exc),
+            "attempt": attempt,
+            "retryable": 500 <= status_code < 600,
+            "http_status": status_code,
+            "timeout_seconds": timeout_seconds,
+        }
+
+    def _request_error_info(self, exc: BaseException, attempt: int, timeout_seconds: int) -> Dict[str, Any]:
+        error_code = "LLM_TIMEOUT" if self._is_timeout_error(exc) else "LLM_CONNECTION_ERROR"
+        return {
+            "code": error_code,
+            "message": str(exc),
+            "attempt": attempt,
+            "retryable": True,
+            "timeout_seconds": timeout_seconds,
+        }
+
+    def _should_retry_error(self, error: Dict[str, Any]) -> bool:
+        if not bool(error.get("retryable")):
+            return False
+        code = str(error.get("code") or "")
+        if code in {"LLM_TIMEOUT", "LLM_CONNECTION_ERROR"}:
+            return True
+        if code == "LLM_HTTP_ERROR":
+            status_code = int(error.get("http_status") or 0)
+            return 500 <= status_code < 600
+        return False
+
+    def _sleep_before_retry(self, attempt: int, step_name: Any) -> None:
+        time.sleep(self._retry_backoff_seconds_for_step(step_name) * (2 ** max(0, attempt - 1)))
+
+
 class CodexCliRunner(LLMRunner):
     runs_dirname = "codex-runs"
 
@@ -585,6 +1203,7 @@ class CodexCliRunner(LLMRunner):
         prompt_text: str,
         prompt_file: Path,
         output_file: Path,
+        progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
     ) -> StepResult:
         binary, resolved_binary = self._discover_binary()
         self.binary = binary

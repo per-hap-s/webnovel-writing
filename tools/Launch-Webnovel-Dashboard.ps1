@@ -98,6 +98,8 @@ if (-not (Test-Path $stateFile)) {
     if (-not (Test-Path $stateFile)) {
         throw '项目初始化后没有生成 .webnovel\state.json。'
     }
+
+    Write-Host '请在 Dashboard 总览页补齐规划必填信息后再运行 plan。'
 }
 
 Write-Host ('项目目录：' + $ProjectRoot)

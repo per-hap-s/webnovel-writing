@@ -14,6 +14,7 @@ from subprocess import run
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -23,6 +24,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from scripts.init_project import (
+    build_planning_fill_template,
+    evaluate_planning_readiness,
+    get_planning_profile_field_specs,
+    normalize_planning_profile,
+    sync_master_outline_with_profile,
+)
+
 from .orchestrator import OrchestrationService
 from .path_guard import safe_resolve
 from .task_models import (
@@ -30,6 +39,7 @@ from .task_models import (
     ErrorResponse,
     InvalidFactDecisionRequest,
     LLMSettingsRequest,
+    PlanningProfileRequest,
     RAGSettingsRequest,
     RetryRequest,
     ReviewDecisionRequest,
@@ -156,12 +166,15 @@ def _get_project_root() -> Path:
     return _project_root
 
 
-def _webnovel_dir() -> Path:
-    return _get_project_root() / '.webnovel'
+def _webnovel_dir(project_root: Path | None = None) -> Path:
+    return (project_root or _get_project_root()) / '.webnovel'
+
+def _project_env_path(project_root: Path | None = None) -> Path:
+    return (project_root or _get_project_root()) / '.env'
 
 
-def _project_env_path() -> Path:
-    return _get_project_root() / '.env'
+def _state_path(project_root: Path | None = None) -> Path:
+    return _webnovel_dir(project_root) / 'state.json'
 
 
 def create_app(project_root: str | Path | None = None) -> FastAPI:
@@ -172,10 +185,12 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
+        app.state.dashboard_loop = asyncio.get_running_loop()
+        app.state.orchestrators = {}
         webnovel = _webnovel_dir()
         if webnovel.is_dir():
-            _watcher.start(webnovel, asyncio.get_running_loop())
-        app.state.orchestrator = OrchestrationService(_get_project_root())
+            _watcher.start(webnovel, app.state.dashboard_loop)
+        app.state.orchestrator = _get_orchestrator_for_root(_get_project_root(), refresh=True)
         try:
             yield
         finally:
@@ -189,6 +204,35 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         allow_headers=['*'],
     )
     app.add_middleware(TimeoutMiddleware)
+
+    def _resolve_request_project_root(http_request: Request | None = None, *, explicit_root: Optional[str] = None) -> Path:
+        candidate = explicit_root or (http_request.query_params.get('project_root') if http_request else None)
+        if candidate:
+            return Path(candidate).resolve()
+        return _get_project_root()
+
+    def _ensure_project_watch(project_root_value: Path) -> None:
+        loop = getattr(app.state, 'dashboard_loop', None)
+        webnovel_dir = _webnovel_dir(project_root_value)
+        if loop is not None and webnovel_dir.is_dir():
+            _watcher.watch(webnovel_dir, loop)
+
+    def _get_orchestrator_for_root(project_root_value: Path, *, refresh: bool = False) -> OrchestrationService:
+        registry: dict[str, OrchestrationService] = getattr(app.state, 'orchestrators', {})
+        app.state.orchestrators = registry
+        root_key = str(project_root_value.resolve())
+        orchestrator = registry.get(root_key)
+        if refresh or orchestrator is None:
+            orchestrator = OrchestrationService(project_root_value)
+            registry[root_key] = orchestrator
+        _ensure_project_watch(project_root_value)
+        if root_key == str(_get_project_root()):
+            app.state.orchestrator = orchestrator
+        return orchestrator
+
+    def _get_request_orchestrator(http_request: Request | None = None, *, explicit_root: Optional[str] = None, refresh: bool = False) -> OrchestrationService:
+        project_root_value = _resolve_request_project_root(http_request, explicit_root=explicit_root)
+        return _get_orchestrator_for_root(project_root_value, refresh=refresh)
 
     def _looks_like_english_message(text: str) -> bool:
         return bool(text) and text.isascii()
@@ -389,7 +433,7 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             original_message=str(exc),
         )
 
-    def _get_db() -> sqlite3.Connection:
+    def _get_db(project_root_value: Path | None = None) -> sqlite3.Connection:
         """获取数据库连接
         
         创建并配置 SQLite 数据库连接，启用 WAL 模式以支持并发访问。
@@ -401,7 +445,7 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         Raises:
             HTTPException: 当数据库文件不存在时抛出 404 错误
         """
-        db_path = _webnovel_dir() / 'index.db'
+        db_path = _webnovel_dir(project_root_value) / 'index.db'
         if not db_path.is_file():
             raise HTTPException(404, '未找到 index.db。')
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
@@ -463,14 +507,78 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return '*' * len(value)
         return f'{value[:4]}***{value[-4:]}'
 
-    def _project_env_or_os() -> dict[str, str]:
-        values = _parse_env_values(_project_env_path())
+    def _project_env_or_os(project_root_value: Path | None = None) -> dict[str, str]:
+        values = _parse_env_values(_project_env_path(project_root_value))
         merged = dict(os.environ)
         merged.update(values)
         return merged
 
-    def _llm_settings_payload() -> dict[str, Any]:
-        env = _project_env_or_os()
+    def _read_state_data(project_root_value: Path | None = None) -> dict[str, Any]:
+        state_path = _state_path(project_root_value)
+        if not state_path.is_file():
+            raise HTTPException(404, '未找到 state.json。')
+        return json.loads(state_path.read_text(encoding='utf-8'))
+
+    def _write_state_data(state_data: dict[str, Any], project_root_value: Path | None = None) -> None:
+        state_path = _state_path(project_root_value)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    def _planning_profile_payload(state_data: dict[str, Any], project_root_value: Path) -> dict[str, Any]:
+        project_info = state_data.get('project_info') or {}
+        planning = state_data.setdefault('planning', {})
+        profile = normalize_planning_profile(
+            planning.get('profile'),
+            title=str(project_info.get('title') or '').strip(),
+            genre=str(project_info.get('genre') or '').strip(),
+        )
+        outline_path = project_root_value / '大纲' / '总纲.md'
+        outline_text = outline_path.read_text(encoding='utf-8') if outline_path.is_file() else ''
+        readiness = evaluate_planning_readiness(profile, outline_text=outline_text)
+        planning['profile'] = profile
+        planning['readiness'] = readiness
+        return {
+            'profile': profile,
+            'readiness': readiness,
+            'last_blocked': planning.get('last_blocked'),
+            'field_specs': get_planning_profile_field_specs(),
+            'fill_template': build_planning_fill_template(),
+            'outline_file': '大纲/总纲.md',
+        }
+
+    def _sync_planning_profile(state_data: dict[str, Any], profile_input: dict[str, Any], project_root_value: Path) -> dict[str, Any]:
+        project_info = state_data.setdefault('project_info', {})
+        title = str(project_info.get('title') or '').strip()
+        genre = str(project_info.get('genre') or '').strip()
+        target_chapters = int(project_info.get('target_chapters') or 600)
+        planning = state_data.setdefault('planning', {})
+        profile = normalize_planning_profile(profile_input, title=title, genre=genre)
+        outline_path = project_root_value / '大纲' / '总纲.md'
+        existing_outline = outline_path.read_text(encoding='utf-8') if outline_path.is_file() else ''
+        updated_outline = sync_master_outline_with_profile(
+            existing_outline,
+            title=title,
+            genre=genre,
+            target_chapters=target_chapters,
+            profile=profile,
+        )
+        outline_path.parent.mkdir(parents=True, exist_ok=True)
+        outline_path.write_text(updated_outline, encoding='utf-8')
+        readiness = evaluate_planning_readiness(profile, outline_text=updated_outline)
+        planning['profile'] = profile
+        planning['readiness'] = readiness
+        return {
+            'profile': profile,
+            'readiness': readiness,
+            'last_blocked': planning.get('last_blocked'),
+            'field_specs': get_planning_profile_field_specs(),
+            'fill_template': build_planning_fill_template(),
+            'outline_file': '大纲/总纲.md',
+            'saved': True,
+        }
+
+    def _llm_settings_payload(project_root_value: Path) -> dict[str, Any]:
+        env = _project_env_or_os(project_root_value)
         api_key = (env.get('WEBNOVEL_LLM_API_KEY') or env.get('OPENAI_API_KEY') or '').strip()
         provider = (env.get('WEBNOVEL_LLM_PROVIDER') or 'openai-compatible').strip() or 'openai-compatible'
         return {
@@ -481,8 +589,8 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'api_key_masked': _mask_secret(api_key),
         }
 
-    def _rag_settings_payload() -> dict[str, Any]:
-        env = _project_env_or_os()
+    def _rag_settings_payload(project_root_value: Path) -> dict[str, Any]:
+        env = _project_env_or_os(project_root_value)
         api_key = (env.get('WEBNOVEL_RAG_API_KEY') or '').strip()
         return {
             'base_url': (env.get('WEBNOVEL_RAG_BASE_URL') or 'https://api.siliconflow.cn/v1').strip(),
@@ -492,10 +600,10 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'api_key_masked': _mask_secret(api_key),
         }
 
-    def _refresh_runtime_settings(updates: dict[str, str]) -> None:
+    def _refresh_runtime_settings(project_root_value: Path, updates: dict[str, str]) -> None:
         for key, value in updates.items():
             os.environ[key] = value
-        app.state.orchestrator = OrchestrationService(_get_project_root())
+        _get_orchestrator_for_root(project_root_value, refresh=True)
 
     def _fetchall_safe(conn: sqlite3.Connection, query: str, params: tuple = ()) -> list[dict]:
         """
@@ -525,14 +633,43 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             raise
 
     @app.get('/api/project/info')
-    def project_info():
-        state_path = _webnovel_dir() / 'state.json'
-        if not state_path.is_file():
-            raise HTTPException(404, '未找到 state.json。')
-        return json.loads(state_path.read_text(encoding='utf-8'))
+    def project_info(request: Request):
+        project_root_value = _resolve_request_project_root(request)
+        _ensure_project_watch(project_root_value)
+        payload = _read_state_data(project_root_value)
+        if isinstance(payload, dict):
+            project_info_payload = dict(payload.get('project_info') or {})
+            dashboard_context = dict(payload.get('dashboard_context') or {})
+            dashboard_context.update(
+                {
+                    'project_root': str(project_root_value),
+                    'project_initialized': True,
+                    'title': str(project_info_payload.get('title') or payload.get('project_name') or '').strip(),
+                    'genre': str(project_info_payload.get('genre') or '').strip(),
+                }
+            )
+            payload = dict(payload)
+            payload['dashboard_context'] = dashboard_context
+        return payload
+
+    @app.get('/api/project/planning-profile')
+    def get_planning_profile(request: Request):
+        project_root_value = _resolve_request_project_root(request)
+        state_data = _read_state_data(project_root_value)
+        payload = _planning_profile_payload(state_data, project_root_value)
+        _write_state_data(state_data, project_root_value)
+        return payload
+
+    @app.post('/api/project/planning-profile')
+    async def save_planning_profile(http_request: Request, request: PlanningProfileRequest):
+        project_root_value = _resolve_request_project_root(http_request)
+        state_data = _read_state_data(project_root_value)
+        payload = _sync_planning_profile(state_data, request.model_dump(), project_root_value)
+        _write_state_data(state_data, project_root_value)
+        return payload
 
     @app.post('/api/project/bootstrap')
-    async def bootstrap_project(request: BootstrapProjectRequest):
+    async def bootstrap_project(http_request: Request, request: BootstrapProjectRequest):
         target_root = Path(request.project_root or _get_project_root()).resolve()
         state_path = target_root / '.webnovel' / 'state.json'
         if state_path.is_file():
@@ -565,33 +702,39 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
                 'stderr': completed.stderr,
                 'original_message': 'Project bootstrap did not create state.json',
             })
+        _ensure_project_watch(target_root)
+        current_root = _resolve_request_project_root(http_request)
         return {
             'created': True,
             'project_root': str(target_root),
             'title': title,
             'genre': genre,
             'state_file': str(state_path),
+            'project_switch_required': str(target_root) != str(current_root),
+            'suggested_dashboard_url': f"/?project_root={quote(str(target_root))}",
         }
 
     @app.get('/api/llm/status')
-    def llm_status():
-        return app.state.orchestrator.probe_llm()
+    def llm_status(request: Request):
+        return _get_request_orchestrator(request).probe_llm()
 
     @app.get('/api/codex/status')
-    def codex_status():
-        return app.state.orchestrator.probe_llm()
+    def codex_status(request: Request):
+        return _get_request_orchestrator(request).probe_llm()
 
     @app.get('/api/rag/status')
-    def rag_status():
-        return app.state.orchestrator.probe_rag()
+    def rag_status(request: Request):
+        return _get_request_orchestrator(request).probe_rag()
 
     @app.get('/api/settings/llm')
-    def llm_settings():
-        return _llm_settings_payload()
+    def llm_settings(request: Request):
+        project_root_value = _resolve_request_project_root(request)
+        return _llm_settings_payload(project_root_value)
 
     @app.post('/api/settings/llm')
-    async def save_llm_settings(request: LLMSettingsRequest):
-        current = _project_env_or_os()
+    async def save_llm_settings(http_request: Request, request: LLMSettingsRequest):
+        project_root_value = _resolve_request_project_root(http_request)
+        current = _project_env_or_os(project_root_value)
         provider = (request.provider or 'openai-compatible').strip() or 'openai-compatible'
         base_url = (request.base_url or current.get('WEBNOVEL_LLM_BASE_URL') or current.get('OPENAI_BASE_URL') or 'https://api.openai.com/v1').strip()
         model = (request.model or current.get('WEBNOVEL_LLM_MODEL') or current.get('OPENAI_MODEL') or '').strip()
@@ -608,21 +751,23 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'WEBNOVEL_LLM_MODEL': model,
             'WEBNOVEL_LLM_API_KEY': api_key,
         }
-        _write_env_updates(_project_env_path(), updates)
-        _refresh_runtime_settings(updates)
+        _write_env_updates(_project_env_path(project_root_value), updates)
+        _refresh_runtime_settings(project_root_value, updates)
         return {
             'saved': True,
-            'settings': _llm_settings_payload(),
-            'status': app.state.orchestrator.probe_llm(),
+            'settings': _llm_settings_payload(project_root_value),
+            'status': _get_orchestrator_for_root(project_root_value).probe_llm(),
         }
 
     @app.get('/api/settings/rag')
-    def rag_settings():
-        return _rag_settings_payload()
+    def rag_settings(request: Request):
+        project_root_value = _resolve_request_project_root(request)
+        return _rag_settings_payload(project_root_value)
 
     @app.post('/api/settings/rag')
-    async def save_rag_settings(request: RAGSettingsRequest):
-        current = _project_env_or_os()
+    async def save_rag_settings(http_request: Request, request: RAGSettingsRequest):
+        project_root_value = _resolve_request_project_root(http_request)
+        current = _project_env_or_os(project_root_value)
         base_url = (request.base_url or current.get('WEBNOVEL_RAG_BASE_URL') or 'https://api.siliconflow.cn/v1').strip()
         embed_model = (request.embed_model or current.get('WEBNOVEL_RAG_EMBED_MODEL') or '').strip()
         rerank_model = (request.rerank_model or current.get('WEBNOVEL_RAG_RERANK_MODEL') or '').strip()
@@ -641,83 +786,83 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'WEBNOVEL_RAG_RERANK_MODEL': rerank_model,
             'WEBNOVEL_RAG_API_KEY': api_key,
         }
-        _write_env_updates(_project_env_path(), updates)
-        _refresh_runtime_settings(updates)
+        _write_env_updates(_project_env_path(project_root_value), updates)
+        _refresh_runtime_settings(project_root_value, updates)
         return {
             'saved': True,
-            'settings': _rag_settings_payload(),
-            'status': app.state.orchestrator.probe_rag(),
+            'settings': _rag_settings_payload(project_root_value),
+            'status': _get_orchestrator_for_root(project_root_value).probe_rag(),
         }
 
     @app.get('/api/tasks')
-    def list_tasks(limit: int = 50):
-        return app.state.orchestrator.list_tasks(limit=limit)
+    def list_tasks(request: Request, limit: int = 50):
+        return _get_request_orchestrator(request).list_tasks(limit=limit)
 
-    def _create_task(task_type: str, request: TaskRequest):
-        project_root_value = request.project_root or str(_get_project_root())
+    def _create_task(task_type: str, request: TaskRequest, http_request: Request):
+        project_root_value = request.project_root or str(_resolve_request_project_root(http_request))
         payload = request.model_dump() if hasattr(request, 'model_dump') else request.dict()
         payload['project_root'] = project_root_value
-        return app.state.orchestrator.create_task(task_type, payload)
+        return _get_request_orchestrator(explicit_root=project_root_value).create_task(task_type, payload)
 
     @app.post('/api/tasks/init')
-    async def create_init_task(request: TaskRequest):
-        return _create_task('init', request)
+    async def create_init_task(http_request: Request, request: TaskRequest):
+        return _create_task('init', request, http_request)
 
     @app.post('/api/tasks/plan')
-    async def create_plan_task(request: TaskRequest):
-        return _create_task('plan', request)
+    async def create_plan_task(http_request: Request, request: TaskRequest):
+        return _create_task('plan', request, http_request)
 
     @app.post('/api/tasks/write')
-    async def create_write_task(request: TaskRequest):
-        return _create_task('write', request)
+    async def create_write_task(http_request: Request, request: TaskRequest):
+        return _create_task('write', request, http_request)
 
     @app.post('/api/tasks/review')
-    async def create_review_task(request: TaskRequest):
-        return _create_task('review', request)
+    async def create_review_task(http_request: Request, request: TaskRequest):
+        return _create_task('review', request, http_request)
 
     @app.post('/api/tasks/resume')
-    async def create_resume_task(request: TaskRequest):
-        return _create_task('resume', request)
+    async def create_resume_task(http_request: Request, request: TaskRequest):
+        return _create_task('resume', request, http_request)
 
     @app.get('/api/tasks/{task_id}')
-    def get_task(task_id: str):
-        task = app.state.orchestrator.get_task(task_id)
+    def get_task(task_id: str, request: Request):
+        task = _get_request_orchestrator(request).get_task(task_id)
         if not task:
             raise HTTPException(404, '未找到任务。')
         return task
 
     @app.get('/api/tasks/{task_id}/events')
-    def get_task_events(task_id: str, limit: int = 200):
-        return app.state.orchestrator.get_events(task_id, limit=limit)
+    def get_task_events(task_id: str, request: Request, limit: int = 200):
+        return _get_request_orchestrator(request).get_events(task_id, limit=limit)
 
     @app.post('/api/tasks/{task_id}/retry')
-    async def retry_task(task_id: str, request: RetryRequest | None = None):
+    async def retry_task(task_id: str, http_request: Request, request: RetryRequest | None = None):
         try:
-            return app.state.orchestrator.retry_task(task_id, resume_from_step=request.resume_from_step if request else None)
+            return _get_request_orchestrator(http_request).retry_task(task_id, resume_from_step=request.resume_from_step if request else None)
         except KeyError as exc:
             raise HTTPException(404, '未找到任务。') from exc
 
     @app.post('/api/review/approve')
-    async def approve_review(request: ReviewDecisionRequest):
+    async def approve_review(http_request: Request, request: ReviewDecisionRequest):
         try:
-            return app.state.orchestrator.approve_writeback(request.task_id, request.reason)
+            return _get_request_orchestrator(http_request).approve_writeback(request.task_id, request.reason)
         except KeyError as exc:
             raise HTTPException(404, '未找到任务。') from exc
 
     @app.post('/api/review/reject')
-    async def reject_review(request: ReviewDecisionRequest):
+    async def reject_review(http_request: Request, request: ReviewDecisionRequest):
         try:
-            return app.state.orchestrator.reject_writeback(request.task_id, request.reason)
+            return _get_request_orchestrator(http_request).reject_writeback(request.task_id, request.reason)
         except KeyError as exc:
             raise HTTPException(404, '未找到任务。') from exc
 
     @app.post('/api/review/confirm-invalid-facts')
-    async def confirm_invalid_facts(request: InvalidFactDecisionRequest):
-        return app.state.orchestrator.confirm_invalid_facts(request.ids, request.action)
+    async def confirm_invalid_facts(http_request: Request, request: InvalidFactDecisionRequest):
+        return _get_request_orchestrator(http_request).confirm_invalid_facts(request.ids, request.action)
 
     @app.get('/api/entities')
-    def list_entities(entity_type: Optional[str] = Query(None, alias='type'), include_archived: bool = False):
-        with closing(_get_db()) as conn:
+    def list_entities(request: Request, entity_type: Optional[str] = Query(None, alias='type'), include_archived: bool = False):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             q = 'SELECT * FROM entities'
             params: list = []
             clauses: list[str] = []
@@ -733,16 +878,16 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return [dict(r) for r in rows]
 
     @app.get('/api/entities/{entity_id}')
-    def get_entity(entity_id: str):
-        with closing(_get_db()) as conn:
+    def get_entity(entity_id: str, request: Request):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             row = conn.execute('SELECT * FROM entities WHERE id = ?', (entity_id,)).fetchone()
             if not row:
                 raise HTTPException(404, '未找到实体。')
             return dict(row)
 
     @app.get('/api/relationships')
-    def list_relationships(entity: Optional[str] = None, limit: int = 200):
-        with closing(_get_db()) as conn:
+    def list_relationships(request: Request, entity: Optional[str] = None, limit: int = 200):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if entity:
                 rows = conn.execute(
                     'SELECT * FROM relationships WHERE from_entity = ? OR to_entity = ? ORDER BY chapter DESC LIMIT ?',
@@ -753,8 +898,8 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return [dict(r) for r in rows]
 
     @app.get('/api/relationship-events')
-    def list_relationship_events(entity: Optional[str] = None, from_chapter: Optional[int] = None, to_chapter: Optional[int] = None, limit: int = 200):
-        with closing(_get_db()) as conn:
+    def list_relationship_events(request: Request, entity: Optional[str] = None, from_chapter: Optional[int] = None, to_chapter: Optional[int] = None, limit: int = 200):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             q = 'SELECT * FROM relationship_events'
             params: list = []
             clauses: list[str] = []
@@ -775,14 +920,14 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return [dict(r) for r in rows]
 
     @app.get('/api/chapters')
-    def list_chapters():
-        with closing(_get_db()) as conn:
+    def list_chapters(request: Request):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             rows = conn.execute('SELECT * FROM chapters ORDER BY chapter ASC').fetchall()
             return [dict(r) for r in rows]
 
     @app.get('/api/scenes')
-    def list_scenes(chapter: Optional[int] = None, limit: int = 500):
-        with closing(_get_db()) as conn:
+    def list_scenes(request: Request, chapter: Optional[int] = None, limit: int = 500):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if chapter is not None:
                 rows = conn.execute('SELECT * FROM scenes WHERE chapter = ? ORDER BY scene_index ASC', (chapter,)).fetchall()
             else:
@@ -790,20 +935,20 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return [dict(r) for r in rows]
 
     @app.get('/api/reading-power')
-    def list_reading_power(limit: int = 50):
-        with closing(_get_db()) as conn:
+    def list_reading_power(request: Request, limit: int = 50):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             rows = conn.execute('SELECT * FROM chapter_reading_power ORDER BY chapter DESC LIMIT ?', (limit,)).fetchall()
             return [dict(r) for r in rows]
 
     @app.get('/api/review-metrics')
-    def list_review_metrics(limit: int = 20):
-        with closing(_get_db()) as conn:
+    def list_review_metrics(request: Request, limit: int = 20):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             rows = conn.execute('SELECT * FROM review_metrics ORDER BY end_chapter DESC LIMIT ?', (limit,)).fetchall()
             return [dict(r) for r in rows]
 
     @app.get('/api/state-changes')
-    def list_state_changes(entity: Optional[str] = None, limit: int = 100):
-        with closing(_get_db()) as conn:
+    def list_state_changes(request: Request, entity: Optional[str] = None, limit: int = 100):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if entity:
                 rows = conn.execute('SELECT * FROM state_changes WHERE entity_id = ? ORDER BY chapter DESC LIMIT ?', (entity, limit)).fetchall()
             else:
@@ -811,8 +956,8 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return [dict(r) for r in rows]
 
     @app.get('/api/aliases')
-    def list_aliases(entity: Optional[str] = None):
-        with closing(_get_db()) as conn:
+    def list_aliases(request: Request, entity: Optional[str] = None):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if entity:
                 rows = conn.execute('SELECT * FROM aliases WHERE entity_id = ?', (entity,)).fetchall()
             else:
@@ -820,55 +965,55 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             return [dict(r) for r in rows]
 
     @app.get('/api/overrides')
-    def list_overrides(status: Optional[str] = None, limit: int = 100):
-        with closing(_get_db()) as conn:
+    def list_overrides(request: Request, status: Optional[str] = None, limit: int = 100):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if status:
                 return _fetchall_safe(conn, 'SELECT * FROM override_contracts WHERE status = ? ORDER BY chapter DESC LIMIT ?', (status, limit))
             return _fetchall_safe(conn, 'SELECT * FROM override_contracts ORDER BY chapter DESC LIMIT ?', (limit,))
 
     @app.get('/api/debts')
-    def list_debts(status: Optional[str] = None, limit: int = 100):
-        with closing(_get_db()) as conn:
+    def list_debts(request: Request, status: Optional[str] = None, limit: int = 100):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if status:
                 return _fetchall_safe(conn, 'SELECT * FROM chase_debt WHERE status = ? ORDER BY updated_at DESC LIMIT ?', (status, limit))
             return _fetchall_safe(conn, 'SELECT * FROM chase_debt ORDER BY updated_at DESC LIMIT ?', (limit,))
 
     @app.get('/api/debt-events')
-    def list_debt_events(debt_id: Optional[int] = None, limit: int = 200):
-        with closing(_get_db()) as conn:
+    def list_debt_events(request: Request, debt_id: Optional[int] = None, limit: int = 200):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if debt_id is not None:
                 return _fetchall_safe(conn, 'SELECT * FROM debt_events WHERE debt_id = ? ORDER BY chapter DESC, id DESC LIMIT ?', (debt_id, limit))
             return _fetchall_safe(conn, 'SELECT * FROM debt_events ORDER BY chapter DESC, id DESC LIMIT ?', (limit,))
 
     @app.get('/api/invalid-facts')
-    def list_invalid_facts(status: Optional[str] = None, limit: int = 100):
-        with closing(_get_db()) as conn:
+    def list_invalid_facts(request: Request, status: Optional[str] = None, limit: int = 100):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if status:
                 return _fetchall_safe(conn, 'SELECT * FROM invalid_facts WHERE status = ? ORDER BY marked_at DESC LIMIT ?', (status, limit))
             return _fetchall_safe(conn, 'SELECT * FROM invalid_facts ORDER BY marked_at DESC LIMIT ?', (limit,))
 
     @app.get('/api/rag-queries')
-    def list_rag_queries(query_type: Optional[str] = None, limit: int = 100):
-        with closing(_get_db()) as conn:
+    def list_rag_queries(request: Request, query_type: Optional[str] = None, limit: int = 100):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if query_type:
                 return _fetchall_safe(conn, 'SELECT * FROM rag_query_log WHERE query_type = ? ORDER BY created_at DESC LIMIT ?', (query_type, limit))
             return _fetchall_safe(conn, 'SELECT * FROM rag_query_log ORDER BY created_at DESC LIMIT ?', (limit,))
 
     @app.get('/api/tool-stats')
-    def list_tool_stats(tool_name: Optional[str] = None, limit: int = 200):
-        with closing(_get_db()) as conn:
+    def list_tool_stats(request: Request, tool_name: Optional[str] = None, limit: int = 200):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             if tool_name:
                 return _fetchall_safe(conn, 'SELECT * FROM tool_call_stats WHERE tool_name = ? ORDER BY created_at DESC LIMIT ?', (tool_name, limit))
             return _fetchall_safe(conn, 'SELECT * FROM tool_call_stats ORDER BY created_at DESC LIMIT ?', (limit,))
 
     @app.get('/api/checklist-scores')
-    def list_checklist_scores(limit: int = 100):
-        with closing(_get_db()) as conn:
+    def list_checklist_scores(request: Request, limit: int = 100):
+        with closing(_get_db(_resolve_request_project_root(request))) as conn:
             return _fetchall_safe(conn, 'SELECT * FROM writing_checklist_scores ORDER BY chapter DESC LIMIT ?', (limit,))
 
     @app.get('/api/files/tree')
-    def file_tree():
-        root = _get_project_root()
+    def file_tree(request: Request):
+        root = _resolve_request_project_root(request)
         result = {}
         for folder_name in FILE_TREE_FOLDERS:
             folder = root / folder_name
@@ -879,22 +1024,33 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         return result
 
     @app.get('/api/files/read')
-    def file_read(path: str):
-        root = _get_project_root()
+    def file_read(request: Request, path: str):
+        root = _resolve_request_project_root(request)
         resolved = safe_resolve(root, path)
         allowed_parents = [root / name for name in FILE_TREE_FOLDERS]
         if not any(_is_child(resolved, parent) for parent in allowed_parents):
             raise HTTPException(403, '只能读取正文、大纲、设定集目录下的文件。')
         if not resolved.is_file():
             raise HTTPException(404, '未找到文件。')
+        encoding = 'utf-8'
+        is_binary = False
         try:
-            content = resolved.read_text(encoding='utf-8')
+            content = resolved.read_text(encoding=encoding)
         except UnicodeDecodeError:
-            content = '【二进制文件或非 UTF-8 文件内容无法显示】'
-        return {'path': path, 'content': content}
+            content = ''
+            is_binary = True
+            encoding = 'binary'
+        return {
+            'path': path,
+            'content': content,
+            'exists': True,
+            'is_binary': is_binary,
+            'encoding': encoding,
+        }
 
     @app.get('/api/events')
-    async def sse():
+    async def sse(request: Request):
+        _ensure_project_watch(_resolve_request_project_root(request))
         q = _watcher.subscribe()
 
         async def _gen():

@@ -125,6 +125,13 @@ description: 设定一致性检查，输出结构化报告供润色步骤参考
    → VIOLATION: Time regression without flashback marker
 ```
 
+#### Additional clarity checks
+
+Treat the following as consistency issues even when they look subtle:
+- A memory-loss chapter makes objective facts appear to change when the text only means the protagonist forgot something.
+- Repeated warning signals drift between incompatible explanations without any explicit same-source, different-source, or undetermined judgment.
+- A world rule or institutional rule is introduced in narration but never becomes a stable, checkable fact in the chapter summary.
+
 ### Step 3: Entity Consistency Check
 
 **For all new entities detected in chapters**:

@@ -27,9 +27,18 @@ class IndexChapterMixin:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT OR REPLACE INTO chapters
-                (chapter, title, location, word_count, characters, summary)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO chapters
+                (chapter, title, location, word_count, characters, summary, file_path, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chapter)
+                DO UPDATE SET
+                    title = excluded.title,
+                    location = excluded.location,
+                    word_count = excluded.word_count,
+                    characters = excluded.characters,
+                    summary = excluded.summary,
+                    file_path = excluded.file_path,
+                    updated_at = CURRENT_TIMESTAMP
             """,
                 (
                     meta.chapter,
@@ -38,6 +47,7 @@ class IndexChapterMixin:
                     meta.word_count,
                     json.dumps(meta.characters, ensure_ascii=False),
                     meta.summary,
+                    meta.file_path,
                 ),
             )
             conn.commit()

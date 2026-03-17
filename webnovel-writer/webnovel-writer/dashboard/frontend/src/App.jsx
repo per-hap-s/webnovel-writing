@@ -4,6 +4,8 @@ import {
     ApiSettingsSection,
     DataPageSection,
     FilesPageSection,
+    PlanningProfileSection,
+    ProjectBootstrapSection,
     QualityPageSection,
     TaskCenterPageSection,
     TaskLauncherSection,
@@ -53,6 +55,7 @@ const STATUS_LABELS = {
     awaiting_writeback_approval: '\u7b49\u5f85\u56de\u5199\u5ba1\u6279',
     completed: '\u5df2\u5b8c\u6210',
     failed: '\u5931\u8d25',
+    interrupted: '\u5df2\u4e2d\u65ad',
     rejected: '\u5df2\u62d2\u7edd',
 }
 
@@ -123,7 +126,24 @@ const EXACT_EVENT_MESSAGES = {
     'Review summary persisted': '\u5ba1\u67e5\u6c47\u603b\u5df2\u5199\u5165',
     'Review gate blocked execution': '\u5ba1\u67e5\u95f8\u95e8\u963b\u6b62\u7ee7\u7eed\u6267\u884c',
     'Waiting for writeback approval': '\u7b49\u5f85\u56de\u5199\u5ba1\u6279',
+    plan_blocked: '\u89c4\u5212\u5f85\u8865\u4fe1\u606f',
 }
+
+Object.assign(EXACT_EVENT_MESSAGES, {
+    'Review summary prepared': '\u5ba1\u67e5\u6c47\u603b\u5df2\u751f\u6210',
+    'prompt_compiled': '\u63d0\u793a\u8bcd\u5df2\u7ec4\u88c5\u5b8c\u6210',
+    'request_dispatched': '\u5df2\u5411\u4e0a\u6e38\u53d1\u51fa\u8bf7\u6c42',
+    'awaiting_model_response': '\u6b63\u5728\u7b49\u5f85\u6a21\u578b\u54cd\u5e94',
+    'response_received': '\u5df2\u6536\u5230\u6a21\u578b\u54cd\u5e94',
+    'parsing_output': '\u6b63\u5728\u89e3\u6790\u8f93\u51fa',
+    'step_heartbeat': '\u6b65\u9aa4\u4ecd\u5728\u8fd0\u884c',
+    'step_retry_scheduled': '\u5df2\u5b89\u6392\u6b65\u9aa4\u91cd\u8bd5',
+    'step_retry_started': '\u6b65\u9aa4\u91cd\u8bd5\u5f00\u59cb',
+    'step_waiting_approval': '\u7b49\u5f85\u4eba\u5de5\u6279\u51c6\u56de\u5199',
+    'step_auto_retried': '\u6b65\u9aa4\u5df2\u81ea\u52a8\u91cd\u8bd5',
+    'raw_output_parse_failed': '\u539f\u59cb\u8f93\u51fa\u89e3\u6790\u5931\u8d25',
+    'json_extraction_recovered': '\u5df2\u4ece\u539f\u59cb\u8f93\u51fa\u4e2d\u6062\u590d JSON',
+})
 
 export default function App() {
     const [page, setPage] = useState('control')
@@ -167,7 +187,8 @@ export default function App() {
 
     const selectedTask = useMemo(() => tasks.find((item) => item.id === selectedTaskId) || null, [tasks, selectedTaskId])
     const projectMeta = projectInfo?.project_info || projectInfo || {}
-    const projectTitle = projectMeta?.project_name || projectMeta?.title || '\u672a\u52a0\u8f7d\u9879\u76ee'
+    const dashboardContext = projectInfo?.dashboard_context || {}
+    const projectTitle = projectMeta?.project_name || projectMeta?.title || dashboardContext?.title || '\u672a\u52a0\u8f7d\u9879\u76ee'
 
     return (
         <div className="shell">
@@ -205,17 +226,28 @@ export default function App() {
                             setPage('tasks')
                             setRefreshToken((value) => value + 1)
                         }}
-                        onProjectBootstrapped={() => {
+                        onProjectBootstrapped={(response) => {
+                            if (response?.project_switch_required && response?.project_root) {
+                                const nextUrl = response.suggested_dashboard_url || `/?project_root=${encodeURIComponent(response.project_root)}`
+                                window.location.assign(nextUrl)
+                                return
+                            }
                             setPage('control')
                             setRefreshToken((value) => value + 1)
                         }}
                     />
                 )}
                 {page === 'tasks' && (
-                    <TaskCenterPage tasks={tasks} selectedTask={selectedTask} onSelectTask={setSelectedTaskId} onMutated={() => setRefreshToken((value) => value + 1)} />
+                    <TaskCenterPage
+                        tasks={tasks}
+                        selectedTask={selectedTask}
+                        onSelectTask={setSelectedTaskId}
+                        onMutated={() => setRefreshToken((value) => value + 1)}
+                        onNavigateOverview={() => setPage('control')}
+                    />
                 )}
-                {page === 'data' && <DataPage />}
-                {page === 'files' && <FilesPage />}
+                {page === 'data' && <DataPage refreshToken={refreshToken} />}
+                {page === 'files' && <FilesPage refreshToken={refreshToken} />}
                 {page === 'quality' && <QualityPage refreshToken={refreshToken} onMutated={() => setRefreshToken((value) => value + 1)} />}
             </main>
         </div>
@@ -228,15 +260,19 @@ function StatusPill({ tone, label }) {
 
 function getWritingModelTone(llmStatus) {
     if (!llmStatus?.installed) return 'warning'
-    if (llmStatus?.connection_status === 'failed') return 'danger'
-    if (llmStatus?.connection_status === 'connected') return 'good'
+    const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
+    if (effectiveStatus === 'failed') return 'danger'
+    if (effectiveStatus === 'degraded') return 'warning'
+    if (effectiveStatus === 'connected') return 'good'
     return 'warning'
 }
 
 function formatWritingModelPill(llmStatus) {
     if (!llmStatus?.installed) return '\u672a\u914d\u7f6e\u53ef\u7528\u7684\u5199\u4f5c\u6a21\u578b'
-    if (llmStatus?.connection_status === 'failed') return `\u5199\u4f5c\u6a21\u578b\u8fde\u63a5\u5931\u8d25 ${formatWritingModelValue(llmStatus)}`
-    if (llmStatus?.connection_status === 'connected') return `\u5199\u4f5c\u6a21\u578b\u5df2\u8054\u901a ${formatWritingModelValue(llmStatus)}`
+    const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
+    if (effectiveStatus === 'failed') return `\u5199\u4f5c\u6a21\u578b\u8fde\u63a5\u5931\u8d25 ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'degraded') return `\u5199\u4f5c\u6a21\u578b\u63a2\u6d3b\u5f02\u5e38\uff0c\u6700\u8fd1\u6267\u884c\u6210\u529f ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'connected') return `\u5199\u4f5c\u6a21\u578b\u5df2\u8054\u901a ${formatWritingModelValue(llmStatus)}`
     return `\u5199\u4f5c\u6a21\u578b\u5df2\u914d\u7f6e ${formatWritingModelValue(llmStatus)}`
 }
 
@@ -257,9 +293,12 @@ function formatWritingModelValue(llmStatus) {
 
 function formatWritingModelDetail(llmStatus) {
     if (!llmStatus?.installed) return '\u672a\u914d\u7f6e'
-    const statusSuffix = llmStatus?.connection_status === 'connected'
+    const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
+    const statusSuffix = effectiveStatus === 'connected'
         ? '\uff08\u5df2\u8054\u901a\uff09'
-        : llmStatus?.connection_status === 'failed'
+        : effectiveStatus === 'degraded'
+            ? '\uff08\u63a2\u6d3b\u5f02\u5e38\uff0c\u6700\u8fd1\u6267\u884c\u6210\u529f\uff09'
+        : effectiveStatus === 'failed'
             ? '\uff08\u8fde\u63a5\u5931\u8d25\uff09'
             : '\uff08\u5df2\u914d\u7f6e\uff09'
     if (llmStatus.mode === 'cli') {
@@ -303,6 +342,7 @@ function formatRagErrorSummary(error) {
 
 function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProjectBootstrapped }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
+    const dashboardContext = projectInfo?.dashboard_context || {}
 
     return (
         <div className="page-grid">
@@ -321,7 +361,13 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProje
                 <div className="panel-title">{'\u9879\u76ee\u521b\u5efa'}</div>
                 <div className="empty-state">{'\u7528\u4e8e\u7a7a\u76ee\u5f55\u7684\u672c\u5730\u521d\u59cb\u5316\uff0c\u4e0d\u4f9d\u8d56\u5199\u4f5c\u6a21\u578b\u3002'}</div>
                 <div className="launcher-grid">
-                    <TaskLauncherSection template={PROJECT_BOOTSTRAP_TEMPLATE} onSuccess={onProjectBootstrapped} MODE_OPTIONS={MODE_OPTIONS} />
+                    <ProjectBootstrapSection
+                        currentProjectRoot={dashboardContext.project_root || ''}
+                        currentTitle={projectMeta?.title || projectMeta?.project_name || dashboardContext?.title || ''}
+                        currentGenre={projectMeta?.genre || dashboardContext?.genre || ''}
+                        projectInitialized={Boolean(dashboardContext.project_initialized)}
+                        onSuccess={onProjectBootstrapped}
+                    />
                 </div>
             </section>
             <section className="panel">
@@ -332,6 +378,11 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProje
                         <TaskLauncherSection key={template.key} template={template} onCreated={onTaskCreated} MODE_OPTIONS={MODE_OPTIONS} />
                     ))}
                 </div>
+            </section>
+            <section className="panel full-span">
+                <div className="panel-title">{'规划必填信息'}</div>
+                <div className="empty-state">{'补齐这里的最小规划信息后，plan 才会生成真实卷纲；信息不足时任务会显示为已完成 / 待补信息。'}</div>
+                <PlanningProfileSection onSaved={() => onProjectBootstrapped()} />
             </section>
             <section className="panel full-span">
                 <div className="panel-title">{'API \u63a5\u5165\u8bbe\u7f6e'}</div>
@@ -355,13 +406,14 @@ function MetricCard({ label, value }) {
     )
 }
 
-function TaskCenterPage({ tasks, selectedTask, onSelectTask, onMutated }) {
+function TaskCenterPage({ tasks, selectedTask, onSelectTask, onMutated, onNavigateOverview }) {
     return (
         <TaskCenterPageSection
             tasks={tasks}
             selectedTask={selectedTask}
             onSelectTask={onSelectTask}
             onMutated={onMutated}
+            onNavigateOverview={onNavigateOverview}
             MetricCard={MetricCard}
             translateTaskType={translateTaskType}
             translateTaskStatus={translateTaskStatus}
@@ -369,16 +421,18 @@ function TaskCenterPage({ tasks, selectedTask, onSelectTask, onMutated }) {
             translateStepName={translateStepName}
             translateEventLevel={translateEventLevel}
             translateEventMessage={translateEventMessage}
+            resolveTaskStatusLabel={resolveTaskStatusLabel}
+            resolveCurrentStepLabel={resolveCurrentStepLabel}
         />
     )
 }
 
-function DataPage() {
-    return <DataPageSection SimpleTable={SimpleTable} />
+function DataPage({ refreshToken }) {
+    return <DataPageSection SimpleTable={SimpleTable} refreshToken={refreshToken} />
 }
 
-function FilesPage() {
-    return <FilesPageSection />
+function FilesPage({ refreshToken }) {
+    return <FilesPageSection refreshToken={refreshToken} />
 }
 
 function QualityPage({ refreshToken, onMutated }) {
@@ -413,6 +467,20 @@ function translateTaskType(value) {
 
 function translateTaskStatus(value) {
     return STATUS_LABELS[value] || value || '-'
+}
+
+function isPlanBlockedTask(task) {
+    return Boolean(task?.task_type === 'plan' && task?.status === 'completed' && task?.artifacts?.plan_blocked)
+}
+
+function resolveTaskStatusLabel(task) {
+    if (isPlanBlockedTask(task)) return '已完成 / 待补信息'
+    return translateTaskStatus(task?.status)
+}
+
+function resolveCurrentStepLabel(task) {
+    if (isPlanBlockedTask(task)) return '待补信息'
+    return translateStepName(task?.current_step || 'idle')
 }
 
 function translateApprovalStatus(value) {
@@ -475,7 +543,29 @@ function formatCell(value, column) {
     if (typeof value === 'boolean') return value ? '\u662f' : '\u5426'
     if (typeof value === 'object') return JSON.stringify(value)
     if (column === 'chapter') return String(value)
+    if (isDateTimeColumn(column)) return formatTimestampShort(value)
     return String(translateKnownValue(value))
+}
+
+function isDateTimeColumn(column) {
+    return ['created_at', 'updated_at', 'last_event_at', 'last_activity_at'].includes(column)
+}
+
+function formatTimestampShort(value) {
+    if (!value) return '-'
+    const text = String(value)
+    const normalized = text.endsWith('Z') ? text : `${text.replace(' ', 'T')}`
+    const parsed = new Date(normalized)
+    if (Number.isNaN(parsed.getTime())) {
+        return text.replace('T', ' ').replace(/\.\d+/, '')
+    }
+    const year = parsed.getFullYear()
+    const month = String(parsed.getMonth() + 1).padStart(2, '0')
+    const day = String(parsed.getDate()).padStart(2, '0')
+    const hour = String(parsed.getHours()).padStart(2, '0')
+    const minute = String(parsed.getMinutes()).padStart(2, '0')
+    const second = String(parsed.getSeconds()).padStart(2, '0')
+    return `${year}-${month}-${day} ${hour}:${minute}:${second}`
 }
 
 function formatNumber(value) {

@@ -43,6 +43,7 @@ class FileWatcher:
         self._observer: Observer | None = None
         self._subscribers: list[asyncio.Queue] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._watched_dirs: set[str] = set()
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=128)
@@ -71,15 +72,28 @@ class FileWatcher:
             self.unsubscribe(dq)
 
     def start(self, watch_dir: Path, loop: asyncio.AbstractEventLoop):
+        self.watch(watch_dir, loop)
+
+    def watch(self, watch_dir: Path, loop: asyncio.AbstractEventLoop):
+        resolved = str(Path(watch_dir).resolve())
         self._loop = loop
+        if self._observer is None:
+            handler = _WebnovelFileHandler(self._on_change)
+            self._observer = Observer()
+            self._observer.daemon = True
+            self._observer.schedule(handler, resolved, recursive=True)
+            self._observer.start()
+            self._watched_dirs.add(resolved)
+            return
+        if resolved in self._watched_dirs:
+            return
         handler = _WebnovelFileHandler(self._on_change)
-        self._observer = Observer()
-        self._observer.schedule(handler, str(watch_dir), recursive=True)
-        self._observer.daemon = True
-        self._observer.start()
+        self._observer.schedule(handler, resolved, recursive=True)
+        self._watched_dirs.add(resolved)
 
     def stop(self):
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=3)
             self._observer = None
+        self._watched_dirs.clear()

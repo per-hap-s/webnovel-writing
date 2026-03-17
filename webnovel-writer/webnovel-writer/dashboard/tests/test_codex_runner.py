@@ -1,7 +1,8 @@
 ﻿import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import dashboard.llm_runner as llm_runner_module
 from dashboard.llm_runner import CodexCliRunner, MockRunner, OpenAICompatibleRunner, create_default_runner
@@ -146,3 +147,114 @@ def test_api_runner_probe_reports_connectivity_failure(tmp_path: Path, monkeypat
     assert probe['connection_status'] == 'failed'
     assert probe['connection_error']['code'] == 'LLM_HTTP_ERROR'
     assert probe['connection_error']['message'] == '写作模型健康检查失败。'
+
+
+def test_api_runner_recovers_json_wrapped_in_text(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '0')
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"Here is the result:\\n```json\\n{\\"volume_plan\\": {\\"title\\": \\"Vol 1\\"}, \\"chapters\\": []}\\n```"}}]}'
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', lambda req, timeout=0: FakeResponse())
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'plan', 'instructions': 'do', 'required_output_keys': ['volume_plan', 'chapters'], 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert result.structured_output['volume_plan']['title'] == 'Vol 1'
+    assert result.metadata['json_extraction_recovered'] is True
+    run_dir = project_root / '.webnovel' / 'observability' / 'llm-runs' / 'task-1-plan'
+    assert json.loads((run_dir / 'request.json').read_text(encoding='utf-8'))['step_name'] == 'plan'
+    assert json.loads((run_dir / 'result.json').read_text(encoding='utf-8'))['success'] is True
+    assert not (run_dir / 'error.json').exists()
+
+
+def test_api_runner_classifies_timeout_and_connection_errors(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '0')
+
+    runner = OpenAICompatibleRunner(project_root)
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', lambda req, timeout=0: (_ for _ in ()).throw(TimeoutError('request timed out')))
+    timeout_result = runner.run(
+        {'name': 'polish', 'instructions': 'do', 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+    assert timeout_result.error['code'] == 'LLM_TIMEOUT'
+    timeout_run_dir = project_root / '.webnovel' / 'observability' / 'llm-runs' / 'task-1-polish'
+    timeout_error = json.loads((timeout_run_dir / 'error.json').read_text(encoding='utf-8'))
+    assert timeout_error['error']['code'] == 'LLM_TIMEOUT'
+    assert (timeout_run_dir / 'request.json').is_file()
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', lambda req, timeout=0: (_ for _ in ()).throw(URLError('connection refused')))
+    connection_result = runner.run(
+        {'name': 'data-sync', 'instructions': 'do', 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-2', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+    assert connection_result.error['code'] == 'LLM_CONNECTION_ERROR'
+    connection_run_dir = project_root / '.webnovel' / 'observability' / 'llm-runs' / 'task-2-data-sync'
+    connection_error = json.loads((connection_run_dir / 'error.json').read_text(encoding='utf-8'))
+    assert connection_error['error']['code'] == 'LLM_CONNECTION_ERROR'
+
+
+def test_api_runner_retries_retryable_http_5xx(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '1')
+    monkeypatch.setattr(llm_runner_module.time, 'sleep', lambda _: None)
+
+    calls = {'count': 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return '{"choices":[{"message":{"content":"{\\"chapter_file\\": \\"正文/ch0001.md\\", \\"content\\": \\"text\\", \\"anti_ai_force_check\\": \\"pass\\", \\"change_summary\\": []}"}}]}'.encode('utf-8')
+
+    def fake_urlopen(req, timeout=0):
+        calls['count'] += 1
+        if calls['count'] == 1:
+            raise HTTPError(req.full_url, 503, 'Service Unavailable', hdrs=None, fp=io.BytesIO(b'upstream down'))
+        return FakeResponse()
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', fake_urlopen)
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'polish', 'instructions': 'do', 'required_output_keys': ['chapter_file', 'content', 'anti_ai_force_check', 'change_summary'], 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert calls['count'] == 2
+    assert result.metadata['retry_count'] == 1
