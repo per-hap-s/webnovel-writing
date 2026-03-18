@@ -100,6 +100,67 @@ def test_codex_cli_runner_prefers_cmd_binary_on_windows(tmp_path: Path, monkeypa
     assert probe['resolved_binary'] == r'C:\Tools\codex.cmd'
 
 
+def test_codex_cli_runner_recovers_fenced_json_and_records_parse_metadata(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setattr(llm_runner_module.shutil, 'which', lambda _: r'C:\Tools\codex.cmd')
+
+    def fake_run(args, **kwargs):
+        Path(args[3]).write_text(
+            '```json\n{"task_brief": {}, "contract_v2": {}, "draft_prompt": "short prompt"}\n```',
+            encoding='utf-8',
+        )
+        return SimpleNamespace(returncode=0, stdout='wrapped json', stderr='')
+
+    monkeypatch.setattr(llm_runner_module.subprocess, 'run', fake_run)
+    runner = CodexCliRunner(project_root)
+    result = runner.run(
+        {
+            'name': 'context',
+            'instructions': 'do',
+            'required_output_keys': ['task_brief', 'contract_v2', 'draft_prompt'],
+            'output_schema': {},
+        },
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert result.structured_output['draft_prompt'] == 'short prompt'
+    assert result.metadata['parse_stage'] == 'json_fence'
+    assert result.metadata['json_extraction_recovered'] is True
+    assert result.metadata['missing_required_keys'] == []
+
+
+def test_codex_cli_runner_repairs_truncated_string_json_and_reports_missing_keys(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setattr(llm_runner_module.shutil, 'which', lambda _: r'C:\Tools\codex.cmd')
+
+    def fake_run(args, **kwargs):
+        Path(args[3]).write_text('{"task_brief": {"chapter": "unfinished}', encoding='utf-8')
+        return SimpleNamespace(returncode=0, stdout='partial json', stderr='')
+
+    monkeypatch.setattr(llm_runner_module.subprocess, 'run', fake_run)
+    runner = CodexCliRunner(project_root)
+    result = runner.run(
+        {
+            'name': 'context',
+            'instructions': 'do',
+            'required_output_keys': ['task_brief', 'contract_v2', 'draft_prompt'],
+            'output_schema': {},
+        },
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert result.structured_output['task_brief']['chapter'] == 'unfinished'
+    assert result.metadata['parse_stage'] == 'json_truncated_repaired'
+    assert result.metadata['json_extraction_recovered'] is True
+    assert result.metadata['missing_required_keys'] == ['contract_v2', 'draft_prompt']
+
+
 def test_api_runner_probe_checks_connectivity(tmp_path: Path, monkeypatch):
     project_root = tmp_path / 'novel'
     project_root.mkdir()
@@ -183,6 +244,105 @@ def test_api_runner_recovers_json_wrapped_in_text(tmp_path: Path, monkeypatch):
     assert json.loads((run_dir / 'request.json').read_text(encoding='utf-8'))['step_name'] == 'plan'
     assert json.loads((run_dir / 'result.json').read_text(encoding='utf-8'))['success'] is True
     assert not (run_dir / 'error.json').exists()
+
+
+def test_api_runner_extracts_text_from_content_parts(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '0')
+
+    payload = {'volume_plan': {'title': '卷一'}, 'chapters': []}
+    response_body = json.dumps(
+        {
+            'choices': [
+                {
+                    'message': {
+                        'content': [
+                            {'type': 'text', 'text': json.dumps(payload, ensure_ascii=False)},
+                        ],
+                    }
+                }
+            ]
+        },
+        ensure_ascii=False,
+    ).encode('utf-8')
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return response_body
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', lambda req, timeout=0: FakeResponse())
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'plan', 'instructions': 'do', 'required_output_keys': ['volume_plan', 'chapters'], 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert result.structured_output['volume_plan']['title'] == '卷一'
+
+
+def test_api_runner_recovers_single_missing_closing_brace_in_content(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '0')
+
+    payload = {
+        'volume_plan': {'title': '卷一', 'chapter_range': '1-50'},
+        'chapters': [{'chapter': 1, 'title': '雨夜预警'}],
+    }
+    truncated_content = json.dumps(payload, ensure_ascii=False)[:-1]
+    response_body = json.dumps(
+        {
+            'choices': [
+                {
+                    'message': {
+                        'content': truncated_content,
+                        'reasoning_content': 'structured plan reasoning',
+                    }
+                }
+            ]
+        },
+        ensure_ascii=False,
+    ).encode('utf-8')
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return response_body
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', lambda req, timeout=0: FakeResponse())
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'plan', 'instructions': 'do', 'required_output_keys': ['volume_plan', 'chapters'], 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert result.structured_output['volume_plan']['title'] == '卷一'
+    assert result.metadata['parse_stage'] == 'json_truncated_repaired'
+    assert result.metadata['json_extraction_recovered'] is True
 
 
 def test_api_runner_classifies_timeout_and_connection_errors(tmp_path: Path, monkeypatch):

@@ -237,6 +237,18 @@ class TestTaskStatusUpdate:
         assert updated["current_step"] == "approval-gate"
         assert updated["artifacts"]["approval"]["summary"]["overall_score"] == 85
 
+    def test_mark_cancelled(self, task_store: TaskStore, sample_workflow: dict):
+        task = task_store.create_task("write", {"chapter": 1}, sample_workflow)
+        task_store.mark_running(task["id"], "draft")
+
+        updated = task_store.mark_cancelled(task["id"], "draft", "任务已由用户停止。")
+
+        assert updated["status"] == "interrupted"
+        assert updated["current_step"] == "draft"
+        assert updated["error"]["code"] == "TASK_CANCELLED"
+        assert updated["error"]["retryable"] is False
+        assert updated["finished_at"] is not None
+
 
 class TestEventAppend:
     """
@@ -405,6 +417,18 @@ class TestTaskRetrieval:
         assert tasks[0]["id"] == task3["id"]
         assert tasks[1]["id"] == task2["id"]
         assert tasks[2]["id"] == task1["id"]
+
+    def test_list_tasks_sorts_mixed_legacy_and_utc_timestamps(self, task_store: TaskStore, sample_workflow: dict):
+        legacy = task_store.create_task("plan", {"volume": "1"}, sample_workflow)
+        utc_task = task_store.create_task("write", {"chapter": 1}, sample_workflow)
+
+        task_store.update_task(legacy["id"], created_at="2026-03-18T17:47:59", updated_at="2026-03-18T17:47:59")
+        task_store.update_task(utc_task["id"], created_at="2026-03-18T09:53:14+00:00", updated_at="2026-03-18T09:53:14+00:00")
+
+        tasks = task_store.list_tasks()
+
+        assert tasks[0]["id"] == utc_task["id"]
+        assert tasks[1]["id"] == legacy["id"]
 
     def test_list_tasks_with_limit(self, task_store: TaskStore, sample_workflow: dict):
         """

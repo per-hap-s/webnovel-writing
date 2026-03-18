@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,7 +20,9 @@ from scripts.init_project import (
 from scripts.data_modules.api_client import get_client
 from scripts.data_modules.config import get_config
 from scripts.data_modules.index_manager import ChapterMeta, EntityMeta, IndexManager, RelationshipMeta, ReviewMetrics
+from scripts.data_modules.narrative_graph import NarrativeGraph
 from scripts.data_modules.state_manager import StateManager
+from scripts.data_modules.state_validator import get_chapter_meta_entry
 
 from .llm_runner import LLMRunner, StepResult, create_default_runner
 from .task_store import TaskStore
@@ -30,6 +33,7 @@ REVIEW_REPORT_DIR_NAME = "\u5ba1\u67e5\u62a5\u544a"
 BODY_DIR_NAME = "正文"
 OUTLINE_DIR_NAME = "大纲"
 OUTLINE_SUMMARY_FILE = "总纲.md"
+DIRECTOR_DIR_NAME = ".webnovel/director"
 SUMMARY_SECTION_PLOT = "## 剧情摘要"
 SUMMARY_SECTION_REVIEW = "## 审查结果"
 SUMMARY_SECTION_ISSUES = "## 主要问题"
@@ -49,6 +53,13 @@ PLAN_OUTLINE_SIGNAL_PHRASES = (
     "主要角色",
     "关键伏笔",
 )
+
+SETTING_DOC_PATHS = {
+    "worldview": f"{SETTINGS_DIR_NAME}/世界观.md",
+    "power_system": f"{SETTINGS_DIR_NAME}/力量体系.md",
+    "protagonist": f"{SETTINGS_DIR_NAME}/主角卡.md",
+    "golden_finger": f"{SETTINGS_DIR_NAME}/金手指设计.md",
+}
 
 
 RUNTIME_PHASE_LABELS = {
@@ -86,6 +97,8 @@ RUNTIME_EVENT_LABELS = {
     "Writeback rejected": "已拒绝回写",
     "Task completed": "任务已完成",
     "plan_blocked": "规划待补信息",
+    "writeback_rollback_started": "开始回滚失败写回",
+    "writeback_rollback_finished": "失败写回已回滚",
 }
 
 ACTIVE_RUNTIME_STATES = {"running", "retrying"}
@@ -104,6 +117,10 @@ EXTERNAL_WORKFLOW_STEPS = {
 }
 
 
+class WritebackConsistencyError(ValueError):
+    """Raised when writeback artifacts do not match the requested chapter target."""
+
+
 class OrchestrationService:
     def __init__(self, project_root: Path, runner: Optional[LLMRunner] = None):
         self.project_root = Path(project_root).resolve()
@@ -114,8 +131,10 @@ class OrchestrationService:
         self.config = get_config(project_root=self.project_root)
         self.rag_client = get_client(self.config)
         self.index_manager = IndexManager(self.config)
+        self.narrative_graph = NarrativeGraph(config=self.config, manager=self.index_manager)
         self._jobs: dict[str, asyncio.Task] = {}
-        self.store.mark_stale_running_tasks(set())
+        self._repair_project_layout()
+        self._recover_or_mark_stale_running_tasks()
 
     def list_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [self._with_runtime_status(task) for task in self.store.list_tasks(limit=limit)]
@@ -137,58 +156,62 @@ class OrchestrationService:
 
     def _build_runtime_status(self, task: Dict[str, Any], events: List[Dict[str, Any]]) -> Dict[str, Any]:
         step_key = self._resolve_runtime_step_key(task, events)
+        runtime_events = self._slice_runtime_events(task, events, step_key)
         step_result = ((task.get("artifacts") or {}).get("step_results") or {}).get(step_key or "", {})
-        last_event = events[-1] if events else None
+        last_event = runtime_events[-1] if runtime_events else (events[-1] if events else None)
         attempt = self._resolve_runtime_value(
             task,
             step_key,
-            events,
+            runtime_events,
             "attempt",
             fallback=((step_result.get("metadata") or {}).get("attempt") or (step_result.get("error") or {}).get("attempt") or 1),
         )
         retry_count = self._resolve_runtime_value(
             task,
             step_key,
-            events,
+            runtime_events,
             "retry_count",
             fallback=max(0, int(attempt or 1) - 1),
         )
         timeout_seconds = self._resolve_runtime_value(
             task,
             step_key,
-            events,
+            runtime_events,
             "timeout_seconds",
             fallback=self._runner_timeout_seconds(step_key) if step_key else None,
         )
         retryable = self._resolve_runtime_value(
             task,
             step_key,
-            events,
+            runtime_events,
             "retryable",
             fallback=(task.get("error") or {}).get("retryable", (step_result.get("error") or {}).get("retryable")),
         )
         error_code = self._resolve_runtime_value(
             task,
             step_key,
-            events,
+            runtime_events,
             "error_code",
             fallback=(task.get("error") or {}).get("code") or (step_result.get("error") or {}).get("code"),
         )
         http_status = self._resolve_runtime_value(
             task,
             step_key,
-            events,
+            runtime_events,
             "http_status",
             fallback=(task.get("error") or {}).get("http_status") or (step_result.get("error") or {}).get("http_status"),
         )
         step_state = self._resolve_runtime_step_state(task, last_event, attempt=attempt)
         if task.get("task_type") == "plan" and (task.get("artifacts") or {}).get("plan_blocked"):
             step_state = "completed"
-        running_seconds = self._resolve_runtime_seconds(task, events, step_key, step_state)
-        waiting_seconds = self._resolve_waiting_seconds(task, events, step_key, step_state)
+        step_started_at = self._resolve_step_started_at(task, runtime_events, step_key)
+        waiting_since = self._resolve_waiting_since(task, runtime_events, step_key, step_state)
+        last_non_heartbeat_activity_at = self._resolve_last_non_heartbeat_activity_at(task, runtime_events, step_key)
+        running_seconds = self._resolve_runtime_seconds(task, runtime_events, step_key, step_state)
+        waiting_seconds = self._resolve_waiting_seconds(task, runtime_events, step_key, step_state)
         phase_label = self._resolve_phase_label(task, step_key)
         last_event_label = self._translate_runtime_event(last_event)
-        last_activity_at = self._resolve_last_activity_at(task, last_event)
+        last_activity_at = self._resolve_last_activity_at(task, last_event, last_non_heartbeat_activity_at)
         error_code, http_status, retryable = self._resolve_runtime_error_fields(
             task,
             step_state,
@@ -198,6 +221,7 @@ class OrchestrationService:
         )
         return {
             "phase_label": phase_label,
+            "target_label": self._build_runtime_target_label(task),
             "phase_detail": self._resolve_phase_detail(task, step_key, step_state, last_event, running_seconds, waiting_seconds),
             "step_key": step_key,
             "step_state": step_state,
@@ -211,9 +235,37 @@ class OrchestrationService:
             "last_event_message": last_event.get("message") if last_event else None,
             "last_event_at": last_event.get("timestamp") if last_event else task.get("updated_at"),
             "last_activity_at": last_activity_at,
+            "last_non_heartbeat_activity_at": last_non_heartbeat_activity_at,
+            "step_started_at": self._format_runtime_datetime(step_started_at),
+            "waiting_since": self._format_runtime_datetime(waiting_since),
             "error_code": error_code,
             "http_status": http_status,
         }
+
+    def _build_runtime_target_label(self, task: Dict[str, Any]) -> Optional[str]:
+        request = task.get("request") or {}
+        task_type = str(task.get("task_type") or "")
+        if task_type == "plan":
+            volume = str(request.get("volume") or "1").strip() or "1"
+            return f"第 {volume} 卷"
+        if task_type == "write":
+            chapter = int(request.get("chapter") or 0)
+            if chapter > 0:
+                volume = self._resolve_volume_for_chapter(chapter)
+                return f"第 {volume} 卷 · 第 {chapter} 章"
+            return "目标章节未指定"
+        if task_type == "review":
+            chapter_range = str(request.get("chapter_range") or "").strip()
+            if chapter_range:
+                return f"第 {chapter_range} 章"
+            chapter = int(request.get("chapter") or 0)
+            return f"第 {chapter} 章" if chapter > 0 else "目标范围未指定"
+        if task_type == "resume":
+            chapter = int(request.get("chapter") or 0)
+            return f"恢复第 {chapter} 章" if chapter > 0 else "恢复最近中断任务"
+        if task_type == "init":
+            return "补种当前项目骨架"
+        return None
 
     def _resolve_runtime_step_key(self, task: Dict[str, Any], events: List[Dict[str, Any]]) -> Optional[str]:
         current_step = task.get("current_step")
@@ -234,6 +286,8 @@ class OrchestrationService:
     def _resolve_phase_label(self, task: Dict[str, Any], step_key: Optional[str]) -> str:
         if task.get("task_type") == "plan" and (task.get("artifacts") or {}).get("plan_blocked"):
             return "待补信息"
+        if task.get("status") == "completed" and step_key and step_key in RUNTIME_PHASE_LABELS:
+            return f"{RUNTIME_PHASE_LABELS[step_key]}已完成"
         if step_key and step_key in RUNTIME_PHASE_LABELS:
             return RUNTIME_PHASE_LABELS[step_key]
         if task.get("status") == "completed":
@@ -254,7 +308,11 @@ class OrchestrationService:
         status = str(task.get("status") or "")
         if status == "awaiting_writeback_approval" or task.get("approval_status") == "pending":
             return "waiting_approval"
-        if status in {"failed", "rejected", "interrupted"}:
+        if status == "interrupted":
+            return "cancelled" if str((task.get("error") or {}).get("code") or "") == "TASK_CANCELLED" else "interrupted"
+        if status == "rejected":
+            return "rejected"
+        if status == "failed":
             return "failed"
         if status == "completed":
             return "completed"
@@ -266,6 +324,26 @@ class OrchestrationService:
             return "retrying" if int(attempt or 1) > 1 else "running"
         except (TypeError, ValueError):
             return "running"
+
+    def _slice_runtime_events(
+        self,
+        task: Dict[str, Any],
+        events: List[Dict[str, Any]],
+        step_key: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not events or not step_key:
+            return events
+        boundary_messages = {f"Step started: {step_key}", "step_retry_started"}
+        if str(task.get("status") or "") == "awaiting_writeback_approval" or task.get("approval_status") == "pending":
+            boundary_messages.update({"step_waiting_approval", "Waiting for writeback approval"})
+
+        start_index = 0
+        for index, event in enumerate(events):
+            if str(event.get("step_name") or "") != str(step_key):
+                continue
+            if str(event.get("message") or "") in boundary_messages:
+                start_index = index
+        return events[start_index:]
 
     def _resolve_runtime_value(
         self,
@@ -293,9 +371,27 @@ class OrchestrationService:
         self,
         task: Dict[str, Any],
         last_event: Optional[Dict[str, Any]],
+        last_non_heartbeat_activity_at: Optional[str] = None,
     ) -> Optional[str]:
         if last_event and last_event.get("timestamp"):
             return str(last_event.get("timestamp"))
+        if last_non_heartbeat_activity_at:
+            return last_non_heartbeat_activity_at
+        return task.get("updated_at")
+
+    def _resolve_last_non_heartbeat_activity_at(
+        self,
+        task: Dict[str, Any],
+        events: List[Dict[str, Any]],
+        step_key: Optional[str],
+    ) -> Optional[str]:
+        for event in reversed(events):
+            if step_key and str(event.get("step_name") or "") != str(step_key):
+                continue
+            if str(event.get("message") or "") == "step_heartbeat":
+                continue
+            if event.get("timestamp"):
+                return str(event.get("timestamp"))
         return task.get("updated_at")
 
     def _resolve_runtime_seconds(
@@ -305,7 +401,7 @@ class OrchestrationService:
         step_key: Optional[str],
         step_state: str,
     ) -> int:
-        if step_state in {"completed", "failed"}:
+        if step_state in {"completed", "failed", "interrupted", "cancelled", "rejected"}:
             start_dt = self._resolve_step_started_at(task, events, step_key)
             end_dt = self._resolve_latest_step_event_time(
                 events,
@@ -321,7 +417,7 @@ class OrchestrationService:
                 },
             )
             if end_dt is None:
-                end_dt = self._parse_iso_datetime(task.get("finished_at") or task.get("updated_at"))
+                end_dt = self._parse_iso_datetime(task.get("finished_at") or task.get("interrupted_at") or task.get("updated_at"))
             return self._seconds_between(start_dt, end_dt)
 
         start_dt = self._resolve_step_started_at(task, events, step_key)
@@ -341,29 +437,39 @@ class OrchestrationService:
         step_key: Optional[str],
         step_state: str,
     ) -> int:
-        if step_state not in ACTIVE_RUNTIME_STATES:
-            return 0
-        latest_wait_event = self._resolve_latest_matching_step_event(
-            events,
-            step_key,
-            {"llm_request_started", "request_dispatched", "awaiting_model_response", "step_heartbeat"},
-        )
-        if latest_wait_event is None:
-            return 0
-        latest_wait_dt = self._parse_iso_datetime(latest_wait_event.get("timestamp"))
-        if latest_wait_dt is None:
-            return 0
-        response_dt = self._resolve_latest_step_event_time(
-            events,
-            step_key,
-            {"response_received", "parsing_output", "llm_request_finished", "llm_request_failed", "llm_request_timed_out"},
-        )
-        if response_dt is not None and response_dt >= latest_wait_dt:
+        waiting_since = self._resolve_waiting_since(task, events, step_key, step_state)
+        if waiting_since is None:
             return 0
         end_dt = datetime.now(timezone.utc)
         if step_state == "waiting_approval":
             end_dt = self._parse_iso_datetime(task.get("updated_at")) or end_dt
-        return self._seconds_between(latest_wait_dt, end_dt)
+        return self._seconds_between(waiting_since, end_dt)
+
+    def _resolve_waiting_since(
+        self,
+        task: Dict[str, Any],
+        events: List[Dict[str, Any]],
+        step_key: Optional[str],
+        step_state: str,
+    ) -> Optional[datetime]:
+        if step_state not in ACTIVE_RUNTIME_STATES:
+            return None
+        wait_start_messages = {"llm_request_started", "request_dispatched", "awaiting_model_response"}
+        wait_end_messages = {"response_received", "parsing_output", "llm_request_finished", "llm_request_failed", "llm_request_timed_out"}
+        waiting_since: Optional[datetime] = None
+        for event in events:
+            if step_key and str(event.get("step_name") or "") != str(step_key):
+                continue
+            message = str(event.get("message") or "")
+            timestamp = self._parse_iso_datetime(event.get("timestamp"))
+            if timestamp is None:
+                continue
+            if message in wait_end_messages:
+                waiting_since = None
+                continue
+            if message in wait_start_messages and waiting_since is None:
+                waiting_since = timestamp
+        return waiting_since
 
     def _resolve_runtime_error_fields(
         self,
@@ -374,11 +480,58 @@ class OrchestrationService:
         http_status: Any,
         retryable: Any,
     ) -> tuple[Any, Any, Any]:
-        if step_state in {"completed", "waiting_approval"} and not task.get("error"):
+        if step_state in {"completed", "waiting_approval", "running", "retrying", "idle"}:
             return None, None, None
-        if step_state == "idle":
-            return None, None, None
-        return error_code, http_status, retryable
+        task_error = task.get("error") or {}
+        return (
+            task_error.get("code", error_code),
+            task_error.get("http_status", http_status),
+            task_error.get("retryable", retryable),
+        )
+
+    def _recover_or_mark_stale_running_tasks(self) -> int:
+        updated = 0
+        for task in self.store.list_tasks(limit=1000):
+            task_id = task.get("id")
+            if not task_id or task.get("status") != "running":
+                continue
+            current_step = task.get("current_step")
+            if self._should_complete_stale_task_after_restart(task):
+                self.store.mark_completed(task_id)
+                self.store.append_event(
+                    task_id,
+                    "warning",
+                    "服务重启后检测到写回已完成，任务已自动收口",
+                    step_name=current_step,
+                    payload={"recovered": True, "resume_hint": current_step},
+                )
+            else:
+                self.store.mark_interrupted(
+                    task_id,
+                    current_step,
+                    "服务重启前任务未完成，已中断，可从当前步骤继续处理。",
+                )
+                self.store.append_event(
+                    task_id,
+                    "warning",
+                    "服务重启后检测到未完成任务，已标记为中断",
+                    step_name=current_step,
+                    payload={"recovered": False, "resume_hint": current_step},
+                )
+            updated += 1
+        return updated
+
+    def _should_complete_stale_task_after_restart(self, task: Dict[str, Any]) -> bool:
+        current_step = str(task.get("current_step") or "")
+        if task.get("task_type") == "write" and current_step == "data-sync":
+            try:
+                return self._writeback_is_complete(task)
+            except Exception:
+                return False
+        if task.get("task_type") == "plan" and current_step == "plan":
+            events = self.store.get_events(task.get("id"), limit=50)
+            return any(str(event.get("message") or "") == "Plan writeback completed" for event in events)
+        return False
 
     def _resolve_phase_detail(
         self,
@@ -393,10 +546,18 @@ class OrchestrationService:
             return "当前规划信息不足，需要先回总览页补录后再运行 plan。"
         if step_state == "waiting_approval":
             return "已进入回写审批点，等待人工确认。"
+        if step_state == "interrupted":
+            return "任务在服务重启或执行中断后暂停，可重试或恢复。"
+        if step_state == "cancelled":
+            return "任务已被手动停止。"
+        if step_state == "rejected":
+            return "任务已被拒绝，不会继续执行回写。"
         if step_state == "failed":
             error_code = (task.get("error") or {}).get("code")
             return f"当前步骤执行失败{f'：{error_code}' if error_code else ''}"
         if step_state == "completed":
+            if step_key and step_key in RUNTIME_PHASE_LABELS:
+                return f"{RUNTIME_PHASE_LABELS[step_key]}已完成。"
             return "当前步骤已完成。"
         if not last_event:
             return f"正在执行{self._resolve_phase_label(task, step_key)}"
@@ -408,20 +569,36 @@ class OrchestrationService:
         if message == "request_dispatched":
             return "请求已发出，正在等待上游模型受理。"
         if message == "awaiting_model_response":
+            if waiting_seconds >= 900:
+                return "等待上游模型响应时间过长，可能已卡住，可稍后重试或停止任务。"
+            if waiting_seconds >= 180:
+                return "仍在等待上游模型响应。"
             return "已连接上游模型，正在等待返回结果。"
         if message == "step_heartbeat":
-            elapsed = payload.get("elapsed_seconds", running_seconds)
-            return f"当前仍在等待上游响应，已运行 {elapsed} 秒。"
+            if waiting_seconds > 0:
+                if waiting_seconds >= 900:
+                    return "当前等待上游响应时间过长，可能已卡住，可稍后重试或停止任务。"
+                return "当前仍在等待上游响应。"
+            return f"{self._resolve_phase_label(task, step_key)}仍在执行。"
         if message == "response_received":
             return "已收到模型响应，正在处理结果。"
         if message == "parsing_output":
+            if step_key == "data-sync":
+                return "正在校验写回结果并同步项目数据。"
             return "正在校验并解析结构化输出。"
         if message == "step_retry_scheduled":
-            attempt = payload.get("attempt")
-            return f"已安排重试，准备进入第 {attempt} 次尝试。" if attempt else "已安排步骤重试。"
+            return "已安排步骤重试。"
         if message == "step_retry_started":
             attempt = payload.get("attempt")
-            return f"正在进行第 {attempt} 次尝试。" if attempt else "步骤重试已开始。"
+            if attempt:
+                return f"正在进行第 {attempt} 次尝试。"
+            return "步骤重试已开始。"
+        if message == "Resume target scheduled":
+            return "已提交恢复执行，目标任务正在继续推进。"
+        if message == "Resume target already running":
+            return "恢复目标仍在运行，不能重复恢复。"
+        if message == "Resume schedule failed":
+            return "恢复任务调度失败。"
         return f"正在执行{self._resolve_phase_label(task, step_key)}"
 
     def _resolve_step_started_at(
@@ -435,9 +612,20 @@ class OrchestrationService:
                 message = str(event.get("message") or "")
                 if str(event.get("step_name") or "") != str(step_key):
                     continue
-                if message == "llm_request_started" or message == "step_retry_started" or message == f"Step started: {step_key}":
+                if message in {
+                    "llm_request_started",
+                    "step_retry_started",
+                    "step_waiting_approval",
+                    "Waiting for writeback approval",
+                    f"Step started: {step_key}",
+                }:
                     return self._parse_iso_datetime(event.get("timestamp"))
         return self._parse_iso_datetime(task.get("started_at"))
+
+    def _format_runtime_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).isoformat()
 
     def _resolve_latest_step_event_time(
         self,
@@ -495,7 +683,8 @@ class OrchestrationService:
         except ValueError:
             return None
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
+            local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+            return parsed.replace(tzinfo=local_tz).astimezone(timezone.utc)
         return parsed.astimezone(timezone.utc)
 
     def _seconds_between(self, start_dt: Optional[datetime], end_dt: Optional[datetime]) -> int:
@@ -507,11 +696,11 @@ class OrchestrationService:
         probe = dict(self.runner.probe())
         probe_status = str(probe.get("connection_status") or "not_checked")
         probe_error = probe.get("connection_error")
+        current_signature = self._current_llm_config_signature()
+        last_success = self._find_recent_llm_success(current_signature)
+        last_failure = self._find_recent_llm_failure(current_signature)
         effective_status = probe_status
         status_source = "probe"
-        last_success = self._find_recent_llm_success()
-        last_failure = self._find_recent_llm_failure()
-
         if probe_status == "failed" and self._is_recent_execution_success_fresh(last_success):
             effective_status = "degraded"
             status_source = "recent_task_success"
@@ -519,7 +708,7 @@ class OrchestrationService:
             status_source = "probe"
         elif probe_status == "not_configured":
             status_source = "configuration"
-        elif last_failure and not last_success:
+        elif last_failure:
             status_source = "recent_task_failure"
 
         probe["probe_status"] = probe_status
@@ -531,37 +720,49 @@ class OrchestrationService:
         probe["last_successful_task_type"] = last_success.get("task_type") if last_success else None
         probe["last_failed_request_at"] = last_failure.get("timestamp") if last_failure else None
         probe["last_failed_task_type"] = last_failure.get("task_type") if last_failure else None
+        probe["config_signature"] = current_signature
         probe["connection_status"] = effective_status
-        if effective_status != "failed":
-            probe["connection_error"] = None
+        if effective_status == "failed" or probe_status == "failed":
+            probe["connection_error"] = probe_error
         return probe
 
-    def _find_recent_llm_success(self) -> Optional[Dict[str, Any]]:
+    def _find_recent_llm_success(self, config_signature: Optional[str] = None) -> Optional[Dict[str, Any]]:
         latest: Optional[Dict[str, Any]] = None
         for task in self.store.list_tasks(limit=200):
             task_type = str(task.get("task_type") or "")
             step_results = ((task.get("artifacts") or {}).get("step_results") or {})
             if not any(step_name in EXTERNAL_WORKFLOW_STEPS and bool((result or {}).get("success")) for step_name, result in step_results.items()):
                 continue
+            task_signature = self._task_step_config_signature(task, success=True)
+            if config_signature and task_signature != config_signature:
+                continue
             timestamp = str(task.get("finished_at") or task.get("updated_at") or "")
             if not timestamp:
                 continue
-            candidate = {"timestamp": timestamp, "task_type": task_type}
+            candidate = {"timestamp": timestamp, "task_type": task_type, "config_signature": task_signature}
             if latest is None or candidate["timestamp"] > latest["timestamp"]:
                 latest = candidate
         return latest
 
-    def _find_recent_llm_failure(self) -> Optional[Dict[str, Any]]:
+    def _find_recent_llm_failure(self, config_signature: Optional[str] = None) -> Optional[Dict[str, Any]]:
         latest: Optional[Dict[str, Any]] = None
         for task in self.store.list_tasks(limit=200):
             error = task.get("error") or {}
             code = str(error.get("code") or "")
             if not code.startswith("LLM_"):
                 continue
+            task_signature = self._task_step_config_signature(task, success=False)
+            if config_signature and task_signature != config_signature:
+                continue
             timestamp = str(task.get("finished_at") or task.get("updated_at") or "")
             if not timestamp:
                 continue
-            candidate = {"timestamp": timestamp, "task_type": str(task.get("task_type") or ""), "error_code": code}
+            candidate = {
+                "timestamp": timestamp,
+                "task_type": str(task.get("task_type") or ""),
+                "error_code": code,
+                "config_signature": task_signature,
+            }
             if latest is None or candidate["timestamp"] > latest["timestamp"]:
                 latest = candidate
         return latest
@@ -612,6 +813,27 @@ class OrchestrationService:
             payload={"resume_from_step": target_step, "preserve_approval": preserve_approval},
         )
         self._schedule(task_id, resume_from_step=target_step)
+        return self.store.get_task(task_id)
+
+    def cancel_task(self, task_id: str, reason: str = "") -> Dict[str, Any]:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if str(task.get("status") or "") in {"completed", "failed", "rejected", "interrupted"}:
+            return task
+        current_step = task.get("current_step")
+        message = str(reason or "").strip() or "任务已由用户停止。"
+        self.store.mark_cancelled(task_id, current_step, message)
+        self.store.append_event(
+            task_id,
+            "warning",
+            "任务已手动停止",
+            step_name=current_step,
+            payload={"reason": message},
+        )
+        job = self._jobs.get(task_id)
+        if job and not job.done():
+            job.cancel()
         return self.store.get_task(task_id)
 
     def approve_writeback(self, task_id: str, reason: str = "") -> Dict[str, Any]:
@@ -712,7 +934,7 @@ class OrchestrationService:
 
                 validation_error = self._validate_output(step, result.structured_output or {})
                 if validation_error:
-                    retried_result = await self._maybe_retry_invalid_plan_step(task_id, current_task, step, validation_error, result=result)
+                    retried_result = await self._maybe_retry_invalid_output_step(task_id, current_task, step, validation_error, result=result)
                     if retried_result is not None:
                         if not retried_result.success:
                             self.store.mark_failed(task_id, current_step_name, retried_result.error or validation_error)
@@ -746,6 +968,23 @@ class OrchestrationService:
 
             self.store.mark_completed(task_id)
             self.store.append_event(task_id, "info", "Task completed")
+        except asyncio.CancelledError:
+            cancelled = self.store.get_task(task_id)
+            if cancelled and str((cancelled.get("error") or {}).get("code") or "") == "TASK_CANCELLED":
+                return
+            self.store.mark_interrupted(
+                task_id,
+                current_step_name or (task.get("current_step") if task else None),
+                "任务在执行过程中被中止，可从当前步骤继续处理。",
+            )
+            self.store.append_event(
+                task_id,
+                "warning",
+                "任务执行被中止",
+                step_name=current_step_name,
+                payload={"resume_hint": current_step_name},
+            )
+            raise
         except FileNotFoundError as exc:
             error_info = {"code": "WORKFLOW_NOT_FOUND", "message": f"未找到工作流定义文件：{exc}"}
             logger.error("Task %s workflow spec not found: %s", task_id, exc, exc_info=True)
@@ -766,6 +1005,8 @@ class OrchestrationService:
             logger.critical("Task %s raised an unexpected error: %s", task_id, exc, exc_info=True)
             self.store.mark_failed(task_id, current_step_name or "init", error_info)
             self.store.append_event(task_id, "error", "Task execution failed", step_name=current_step_name, payload=error_info)
+        finally:
+            self._jobs.pop(task_id, None)
 
     async def _run_resume_task(self, task_id: str, task: Dict[str, Any]) -> None:
         step_name = "resume"
@@ -801,6 +1042,15 @@ class OrchestrationService:
             return
 
         resume_step = decision.get("resume_from_step")
+        active_target_job = self._jobs.get(target["id"])
+        if active_target_job and not active_target_job.done():
+            error_info = {
+                "code": "RESUME_TARGET_ALREADY_RUNNING",
+                "message": "Resume target task is still running",
+            }
+            self.store.mark_failed(task_id, step_name, error_info)
+            self.store.append_event(task_id, "error", "Resume target already running", step_name=step_name, payload={"target_task_id": target["id"]})
+            return
         self.store.prepare_for_resume(target["id"], resume_from_step=resume_step, reason=decision["reason"])
         self.store.append_event(
             target["id"],
@@ -809,6 +1059,25 @@ class OrchestrationService:
             step_name=resume_step,
             payload={"trigger_task_id": task_id},
         )
+        if task_id in self._jobs:
+            if not self._schedule(target["id"], resume_from_step=resume_step):
+                error_info = {
+                    "code": "RESUME_SCHEDULE_FAILED",
+                    "message": "Resume target could not be scheduled",
+                }
+                self.store.mark_failed(task_id, step_name, error_info)
+                self.store.append_event(task_id, "error", "Resume schedule failed", step_name=step_name, payload={"target_task_id": target["id"]})
+                return
+            self.store.mark_completed(task_id)
+            self.store.append_event(
+                task_id,
+                "info",
+                "Resume target scheduled",
+                step_name=step_name,
+                payload={"target_task_id": target["id"], "resume_from_step": resume_step},
+            )
+            return
+
         await self._run_task(target["id"], resume_from_step=resume_step)
         refreshed_target = self.store.get_task(target["id"]) or {}
         if refreshed_target.get("status") == "completed":
@@ -832,6 +1101,13 @@ class OrchestrationService:
         index: int,
     ) -> str:
         step_name = step["name"]
+        if step_name == "chapter-director":
+            brief = self._build_chapter_director_brief(task)
+            self._write_director_brief(int(brief.get("chapter") or 0), brief)
+            self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": brief})
+            self.store.append_event(task_id, "info", "Chapter director prepared", step_name=step_name, payload={"chapter": brief.get("chapter")})
+            return "ok"
+
         if step_name == "review-summary":
             summary = self._aggregate_review(task)
             self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": summary})
@@ -901,7 +1177,7 @@ class OrchestrationService:
         if result.success:
             return result
 
-        retried_result = await self._maybe_retry_invalid_plan_step(task_id, task, step, result.error or {}, result=result)
+        retried_result = await self._maybe_retry_invalid_output_step(task_id, task, step, result.error or {}, result=result)
         if retried_result is not None:
             if retried_result.success:
                 return retried_result
@@ -992,6 +1268,9 @@ class OrchestrationService:
         if result.metadata is None:
             result.metadata = {}
         result.metadata["attempt"] = max(int(result.metadata.get("attempt", 1)), attempt)
+        config_signature = self._current_llm_config_signature()
+        if config_signature:
+            result.metadata["llm_config_signature"] = config_signature
         self._record_step_result(task_id, step_name, result)
         return result
 
@@ -1170,9 +1449,16 @@ class OrchestrationService:
         return True
 
     def _record_step_result(self, task_id: str, step_name: str, result: StepResult) -> None:
+        config_signature = self._current_llm_config_signature()
+        if result.metadata is None:
+            result.metadata = {}
+        if config_signature:
+            result.metadata["llm_config_signature"] = config_signature
         result_dict = result.to_dict()
         self.store.save_step_result(task_id, step_name, result_dict)
         payload = self._build_step_event_payload(result)
+        if config_signature and "llm_config_signature" not in payload:
+            payload["llm_config_signature"] = config_signature
         if result.success:
             self.store.append_event(
                 task_id,
@@ -1222,6 +1508,40 @@ class OrchestrationService:
                 },
             )
 
+    def _current_llm_config_signature(self) -> Optional[str]:
+        fingerprint = {
+            "provider": str(getattr(self.runner, "provider", None) or os.environ.get("WEBNOVEL_LLM_PROVIDER") or "").strip().lower(),
+            "base_url": str(
+                getattr(self.runner, "base_url", None)
+                or os.environ.get("WEBNOVEL_LLM_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL")
+                or ""
+            ).strip().rstrip("/").lower(),
+            "model": str(
+                getattr(self.runner, "model", None)
+                or os.environ.get("WEBNOVEL_LLM_MODEL")
+                or os.environ.get("OPENAI_MODEL")
+                or ""
+            ).strip(),
+            "mode": str(getattr(self.runner, "mode", None) or os.environ.get("WEBNOVEL_LLM_MODE") or "").strip().lower(),
+        }
+        if not any(fingerprint.values()):
+            return None
+        return json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
+
+    def _task_step_config_signature(self, task: Dict[str, Any], *, success: bool | None = None) -> Optional[str]:
+        step_results = ((task.get("artifacts") or {}).get("step_results") or {})
+        for step_name, result in reversed(list(step_results.items())):
+            if step_name not in EXTERNAL_WORKFLOW_STEPS:
+                continue
+            if success is not None and bool((result or {}).get("success")) is not success:
+                continue
+            metadata = (result or {}).get("metadata") or {}
+            signature = metadata.get("llm_config_signature")
+            if signature:
+                return str(signature)
+        return None
+
     def _build_step_event_payload(self, result: StepResult) -> Dict[str, Any]:
         metadata = result.metadata or {}
         error = result.error or {}
@@ -1231,7 +1551,7 @@ class OrchestrationService:
             "timeout_seconds": metadata.get("timeout_seconds", error.get("timeout_seconds")),
             "error": result.error,
         }
-        for key in ("error_code", "retryable", "http_status", "retry_count", "parse_stage", "watchdog_timeout_seconds"):
+        for key in ("error_code", "retryable", "http_status", "retry_count", "parse_stage", "watchdog_timeout_seconds", "llm_config_signature"):
             if key == "error_code":
                 value = error.get("code")
             else:
@@ -1305,7 +1625,7 @@ class OrchestrationService:
         }
         self._write_state_data(state_data)
 
-    async def _maybe_retry_invalid_plan_step(
+    async def _maybe_retry_invalid_output_step(
         self,
         task_id: str,
         task: Dict[str, Any],
@@ -1314,9 +1634,7 @@ class OrchestrationService:
         *,
         result: Optional[StepResult] = None,
     ) -> Optional[StepResult]:
-        if task.get("task_type") != "plan" or step.get("name") != "plan":
-            return None
-        if not self._should_auto_retry_plan_step(task, error_info, result=result):
+        if not self._should_auto_retry_invalid_output_step(task, step, error_info, result=result):
             return None
 
         attempt = int(((result.metadata or {}) if result else {}).get("attempt", 1))
@@ -1349,7 +1667,8 @@ class OrchestrationService:
             },
         )
         refreshed_task = self.store.get_task(task_id) or task
-        prompt_bundle = self._build_prompt_bundle(refreshed_task, step)
+        retry_note = self._build_invalid_output_retry_note(task=refreshed_task, step=step, error_info=error_info, result=result)
+        prompt_bundle = self._build_prompt_bundle(refreshed_task, step, retry_note=retry_note)
         self.store.append_event(
             task_id,
             "info",
@@ -1364,14 +1683,22 @@ class OrchestrationService:
         retried_result = await self._execute_runner_step(task_id, step["name"], prompt_bundle, attempt=attempt + 1)
         return retried_result
 
-    def _should_auto_retry_plan_step(
+    def _should_auto_retry_invalid_output_step(
         self,
         task: Dict[str, Any],
+        step: Dict[str, Any],
         error_info: Dict[str, Any],
         *,
         result: Optional[StepResult] = None,
     ) -> bool:
-        if task.get("task_type") != "plan":
+        task_type = str(task.get("task_type") or "").strip().lower()
+        step_name = str(step.get("name") or "").strip().lower()
+        if (task_type, step_name) not in {
+            ("plan", "plan"),
+            ("write", "context"),
+            ("write", "draft"),
+            ("write", "polish"),
+        }:
             return False
         if str(error_info.get("code") or "") != "INVALID_STEP_OUTPUT":
             return False
@@ -1382,16 +1709,44 @@ class OrchestrationService:
             return True
         return bool(error_info.get("raw_output_present") or error_info.get("message"))
 
-    def _build_prompt_bundle(self, task: Dict[str, Any], step: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_invalid_output_retry_note(
+        self,
+        *,
+        task: Dict[str, Any],
+        step: Dict[str, Any],
+        error_info: Dict[str, Any],
+        result: Optional[StepResult] = None,
+    ) -> str:
+        task_type = str(task.get("task_type") or "").strip().lower()
+        step_name = str(step.get("name") or "").strip().lower()
+        parse_stage = str(error_info.get("parse_stage") or ((result.metadata or {}) if result else {}).get("parse_stage") or "").strip()
+        common = (
+            "Previous attempt failed because the response was not valid JSON. "
+            "Return exactly one valid JSON object with no prose, no markdown fences, and no trailing commentary."
+        )
+        if task_type == "write" and step_name == "context":
+            return (
+                f"{common}\n"
+                f"Failure stage: {parse_stage or 'invalid_json'}.\n"
+                "Keep `task_brief` and `contract_v2` concise and structured. "
+                "`draft_prompt` must be a short plain-text string, not a full design document. "
+                "Use escaped \\n inside the JSON string if line breaks are needed, and keep `draft_prompt` under 2400 characters."
+            )
+        return f"{common}\nFailure stage: {parse_stage or 'invalid_json'}."
+
+    def _build_prompt_bundle(self, task: Dict[str, Any], step: Dict[str, Any], *, retry_note: Optional[str] = None) -> Dict[str, Any]:
         reference_paths: List[Path] = []
         for rel_path in step.get("references", []):
             reference_paths.append((Path(__file__).resolve().parent.parent / rel_path).resolve())
 
         instructions = self._load_template(step.get("template"))
+        if retry_note:
+            instructions = f"{instructions.rstrip()}\n\n# Retry Correction\n{retry_note.strip()}"
         step_spec = dict(step)
         step_spec["instructions"] = instructions
         reference_documents = self._load_reference_documents(reference_paths, step_name=step.get("name"))
         project_context = self._collect_project_context(task, step)
+        self._append_context_execution_package(project_context, task, step)
         task_input = {
             "request": task.get("request", {}),
             "project_root": task.get("project_root"),
@@ -1473,6 +1828,12 @@ class OrchestrationService:
         self._append_setting_snapshots(project_docs)
         if task_type == "write" and chapter > 0:
             self._append_context_contract_snapshot(project_docs, chapter)
+            self._append_snapshot(
+                project_docs,
+                self._director_brief_path(chapter),
+                f"{DIRECTOR_DIR_NAME}/ch{chapter:04d}.json",
+                12000,
+            )
 
         outline_dir = self.project_root / OUTLINE_DIR_NAME
         if outline_dir.is_dir():
@@ -1561,12 +1922,76 @@ class OrchestrationService:
         for step_name, result in (step_results or {}).items():
             if not isinstance(result, dict):
                 continue
+            structured_output = result.get("structured_output")
+            if str(step_name or "").strip().lower() == "context":
+                structured_output = self._compact_context_structured_output(structured_output)
             compact[step_name] = {
                 "success": bool(result.get("success", False)),
-                "structured_output": result.get("structured_output"),
+                "structured_output": structured_output,
                 "error": result.get("error"),
             }
         return compact
+
+    def _compact_context_structured_output(self, structured_output: Any) -> Any:
+        if not isinstance(structured_output, dict):
+            return structured_output
+        compact_output = dict(structured_output)
+        draft_prompt = compact_output.get("draft_prompt")
+        if isinstance(draft_prompt, str) and draft_prompt.strip():
+            preview = draft_prompt.strip().replace("\r\n", "\n")
+            preview = preview[:400] + ("..." if len(preview) > 400 else "")
+            compact_output["draft_prompt_preview"] = preview
+            compact_output["draft_prompt_ref"] = ".webnovel/context/current-draft-prompt.txt"
+            compact_output["draft_prompt"] = "[stored separately in project context]"
+        contract_v2 = compact_output.get("contract_v2")
+        if isinstance(contract_v2, dict):
+            allowed_keys = (
+                "目标",
+                "阻力",
+                "代价",
+                "本章变化",
+                "未闭合问题",
+                "核心冲突一句话",
+                "开头类型",
+                "情绪节奏",
+                "信息密度",
+                "是否过渡章",
+            )
+            compact_output["contract_v2"] = {key: contract_v2.get(key) for key in allowed_keys if key in contract_v2}
+        return compact_output
+
+    def _append_context_execution_package(self, documents: List[Dict[str, str]], task: Dict[str, Any], step: Dict[str, Any]) -> None:
+        task_type = str(task.get("task_type") or "").strip().lower()
+        step_name = str(step.get("name") or "").strip().lower()
+        if task_type != "write" or step_name not in {"draft", "consistency-review", "continuity-review", "ooc-review", "polish"}:
+            return
+        context_output = (((task.get("artifacts") or {}).get("step_results") or {}).get("context") or {}).get("structured_output") or {}
+        if not isinstance(context_output, dict) or not context_output:
+            return
+        draft_prompt = str(context_output.get("draft_prompt") or "").strip()
+        compact_payload = dict(context_output)
+        if draft_prompt:
+            compact_payload["draft_prompt"] = "[see attached draft prompt text]"
+            documents.append(
+                {
+                    "path": ".webnovel/context/current-draft-prompt.txt",
+                    "content": draft_prompt[:12000],
+                }
+            )
+        documents.append(
+            {
+                "path": ".webnovel/context/current-context-package.json",
+                "content": json.dumps(compact_payload, ensure_ascii=False, indent=2)[:12000],
+            }
+        )
+        chapter = int(((task.get("request") or {}).get("chapter") or 0))
+        if chapter > 0:
+            self._append_snapshot(
+                documents,
+                self._director_brief_path(chapter),
+                ".webnovel/director/current-director-brief.json",
+                12000,
+            )
 
     def _append_snapshot(self, documents: List[Dict[str, str]], path: Path, label: str, max_chars: Optional[int]) -> None:
         if not path.is_file():
@@ -1613,8 +2038,9 @@ class OrchestrationService:
         if not base_dir.is_dir():
             return
         for pattern in patterns:
-            for candidate in sorted(base_dir.glob(pattern)):
-                self._append_snapshot(documents, candidate, f"{BODY_DIR_NAME}/{candidate.name}", max_chars)
+            for candidate in sorted(base_dir.rglob(pattern)):
+                label = str(candidate.relative_to(self.project_root)).replace("\\", "/")
+                self._append_snapshot(documents, candidate, label, max_chars)
                 return
 
     def _append_chapter_context(
@@ -1626,7 +2052,33 @@ class OrchestrationService:
         summary_max_chars: Optional[int],
     ) -> None:
         padded = f"{chapter:04d}"
-        self._append_glob_snapshot(documents, self.project_root / BODY_DIR_NAME, [f"*{padded}*.md", f"*{chapter}*.md"], body_max_chars)
+        body_dir = self.project_root / BODY_DIR_NAME
+        if body_dir.is_dir():
+            seen_paths: set[str] = set()
+            preferred_paths = [
+                self._resolve_project_path(self._default_chapter_file(chapter)),
+                body_dir / f"第{padded}章.md",
+            ]
+            for candidate in preferred_paths:
+                if candidate.is_file():
+                    label = self._relative_project_path(candidate)
+                    if label not in seen_paths:
+                        self._append_snapshot(documents, candidate, label, body_max_chars)
+                        seen_paths.add(label)
+                        break
+            if not seen_paths:
+                for pattern in [f"*{padded}*.md", f"*{chapter}*.md"]:
+                    for candidate in sorted(body_dir.rglob(pattern)):
+                        if not candidate.is_file():
+                            continue
+                        label = self._relative_project_path(candidate)
+                        if label in seen_paths:
+                            continue
+                        self._append_snapshot(documents, candidate, label, body_max_chars)
+                        seen_paths.add(label)
+                        break
+                    if seen_paths:
+                        break
         self._append_snapshot(
             documents,
             self.project_root / ".webnovel" / "summaries" / f"ch{padded}.md",
@@ -1640,10 +2092,17 @@ class OrchestrationService:
             return {"code": "TASK_NOT_FOUND", "message": f"未找到任务：{task_id}"}
         step_name = step.get("name", "unknown")
         try:
-            if task.get("task_type") == "write" and step_name == "data-sync":
-                self._apply_write_data_sync(task_id, task, payload)
+            if task.get("task_type") == "write":
+                if step_name == "context":
+                    self._sync_context_director_brief(task_id, task, payload)
+                elif step_name == "data-sync":
+                    self._apply_write_data_sync(task_id, task, payload)
             elif task.get("task_type") == "plan" and step_name == "plan":
                 self._apply_plan_writeback(task_id, task, payload)
+        except WritebackConsistencyError as exc:
+            error_msg = f"步骤 {step_name} 写回一致性校验失败：{exc}"
+            logger.error("Task %s step %s writeback consistency failed: %s", task_id, step_name, exc, exc_info=True)
+            return {"code": "WRITEBACK_CONSISTENCY_ERROR", "message": error_msg}
         except (ValueError, KeyError) as exc:
             error_msg = f"步骤 {step_name} 校验失败：{exc}"
             logger.error("Task %s step %s validation failed: %s", task_id, step_name, exc, exc_info=True)
@@ -1657,20 +2116,361 @@ class OrchestrationService:
             logger.critical("Task %s step %s raised an unexpected error: %s", task_id, step_name, exc, exc_info=True)
             return {"code": "WRITEBACK_FAILED", "message": error_msg}
         return None
+
     def _write_polished_chapter(self, task_id: str, payload: Dict[str, Any]) -> Path:
-        chapter_file = str(payload.get("chapter_file") or "").strip()
-        content = payload.get("content")
-        if not chapter_file or not isinstance(content, str) or not content.strip():
-            raise ValueError("polish 步骤缺少有效的 chapter_file 或 content")
-        written_path = self._write_project_text(chapter_file, content)
-        self.store.append_event(
-            task_id,
-            "info",
-            "Chapter body written",
-            step_name="polish",
-            payload={"path": self._relative_project_path(written_path)},
+        raise RuntimeError("旧的 polished chapter 直写入口已禁用，请统一走 data-sync 写回。")
+
+    def _build_chapter_director_brief(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        request = task.get("request") or {}
+        chapter = int(request.get("chapter") or 0)
+        fallback = self._build_fallback_director_brief(chapter)
+        if chapter <= 0:
+            return fallback
+
+        try:
+            from scripts.extract_chapter_context import build_chapter_context_payload
+
+            context_payload = build_chapter_context_payload(self.project_root, chapter)
+        except Exception as exc:
+            logger.warning("Failed to build chapter director context for chapter %s: %s", chapter, exc, exc_info=True)
+            return fallback
+
+        narrative_state = context_payload.get("narrative_state") or {}
+        active_foreshadowing = narrative_state.get("active_foreshadowing") or []
+        recent_timeline_events = narrative_state.get("recent_timeline_events") or []
+        core_character_arcs = narrative_state.get("core_character_arcs") or []
+        knowledge_conflicts = narrative_state.get("knowledge_conflicts") or []
+        writing_guidance = context_payload.get("writing_guidance") or {}
+        genre_profile = context_payload.get("genre_profile") or {}
+        outline = str(context_payload.get("outline") or "").strip()
+        previous_summaries = [str(item).strip() for item in (context_payload.get("previous_summaries") or []) if str(item).strip()]
+
+        must_advance_threads = [
+            str(item.get("name") or "").strip()
+            for item in active_foreshadowing[:3]
+            if str(item.get("name") or "").strip()
+        ]
+        if not must_advance_threads:
+            must_advance_threads = [
+                str(item.get("topic") or "").strip()
+                for item in knowledge_conflicts[:2]
+                if str(item.get("topic") or "").strip()
+            ]
+        if not must_advance_threads and outline:
+            must_advance_threads = ["推进本章主线目标"]
+
+        payoff_targets = [
+            str(item.get("name") or "").strip()
+            for item in active_foreshadowing
+            if str(item.get("name") or "").strip()
+            and int(item.get("planned_payoff_chapter") or 0) > 0
+            and int(item.get("planned_payoff_chapter") or 0) <= chapter + 1
+        ][:2]
+
+        setup_targets = [
+            str(item.get("name") or "").strip()
+            for item in active_foreshadowing
+            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() not in payoff_targets
+        ][:2]
+        if not setup_targets:
+            setup_targets = [
+                f"为“{str(item.get('topic') or '').strip()}”补一层可回收线索"
+                for item in knowledge_conflicts[:2]
+                if str(item.get("topic") or "").strip()
+            ]
+
+        must_use_entities = self._derive_director_entities(core_character_arcs, recent_timeline_events)
+        relationship_moves = self._derive_director_relationship_moves(core_character_arcs)
+        knowledge_reveals = [
+            str(item.get("topic") or "").strip()
+            for item in knowledge_conflicts[:3]
+            if str(item.get("topic") or "").strip()
+        ]
+
+        forbidden_resolutions = [
+            f"不要在本章彻底回收 {name}"
+            for name in must_advance_threads
+            if name and name not in payoff_targets
+        ][:3]
+        if not forbidden_resolutions and active_foreshadowing:
+            forbidden_resolutions = [
+                f"不要一次性解释完 {str(active_foreshadowing[0].get('name') or '').strip()}"
+            ]
+
+        chapter_goal = self._build_director_goal(
+            chapter=chapter,
+            payoff_targets=payoff_targets,
+            setup_targets=setup_targets,
+            knowledge_reveals=knowledge_reveals,
+            outline=outline,
         )
-        return written_path
+        primary_conflict = self._build_director_primary_conflict(core_character_arcs, knowledge_conflicts, outline)
+        ending_hook_target = self._build_director_hook_target(payoff_targets, setup_targets, knowledge_reveals, must_advance_threads)
+        tempo = self._build_director_tempo(writing_guidance, genre_profile)
+        review_focus = self._build_director_review_focus(payoff_targets, must_use_entities, knowledge_reveals, forbidden_resolutions)
+        rationale = self._build_director_rationale(chapter, previous_summaries, must_advance_threads, knowledge_reveals)
+
+        brief = {
+            "chapter": chapter,
+            "chapter_goal": chapter_goal,
+            "primary_conflict": primary_conflict,
+            "must_advance_threads": must_advance_threads,
+            "payoff_targets": payoff_targets,
+            "setup_targets": setup_targets,
+            "must_use_entities": must_use_entities,
+            "relationship_moves": relationship_moves,
+            "knowledge_reveals": knowledge_reveals,
+            "forbidden_resolutions": forbidden_resolutions,
+            "ending_hook_target": ending_hook_target,
+            "tempo": tempo,
+            "review_focus": review_focus,
+            "rationale": rationale,
+        }
+        return self._normalize_director_brief(brief, chapter=chapter)
+
+    def _build_fallback_director_brief(self, chapter: int) -> Dict[str, Any]:
+        brief = {
+            "chapter": chapter,
+            "chapter_goal": "推进当前章节的核心冲突，并在章末留下明确的下一步压力。",
+            "primary_conflict": "主角必须在有限信息下先行动，再承担行动代价。",
+            "must_advance_threads": ["推进本章主冲突"],
+            "payoff_targets": [],
+            "setup_targets": ["补一条可回收的新线索"],
+            "must_use_entities": [],
+            "relationship_moves": [],
+            "knowledge_reveals": [],
+            "forbidden_resolutions": ["不要一次性解释完所有疑点"],
+            "ending_hook_target": "章末留下下一步行动目标或更高代价。",
+            "tempo": "中速推进，后半章抬升压力。",
+            "review_focus": ["检查本章目标是否清晰推进", "检查章末钩子是否形成下一步驱动力"],
+            "rationale": "当前缺少足够稳定的导演输入，使用最小保底 brief 保持写作链路继续运行。",
+        }
+        return self._normalize_director_brief(brief, chapter=chapter)
+
+    def _normalize_director_brief(self, brief: Dict[str, Any], *, chapter: int) -> Dict[str, Any]:
+        normalized = {
+            "chapter": int(brief.get("chapter") or chapter),
+            "chapter_goal": str(brief.get("chapter_goal") or "").strip() or "推进当前章节主冲突。",
+            "primary_conflict": str(brief.get("primary_conflict") or "").strip() or "主角在信息不足下推进目标并承担代价。",
+            "must_advance_threads": self._normalize_director_text_list(brief.get("must_advance_threads")),
+            "payoff_targets": self._normalize_director_text_list(brief.get("payoff_targets")),
+            "setup_targets": self._normalize_director_text_list(brief.get("setup_targets")),
+            "must_use_entities": self._normalize_director_text_list(brief.get("must_use_entities")),
+            "relationship_moves": self._normalize_director_text_list(brief.get("relationship_moves")),
+            "knowledge_reveals": self._normalize_director_text_list(brief.get("knowledge_reveals")),
+            "forbidden_resolutions": self._normalize_director_text_list(brief.get("forbidden_resolutions")),
+            "ending_hook_target": str(brief.get("ending_hook_target") or "").strip() or "章末留下明确的下一步压力。",
+            "tempo": str(brief.get("tempo") or "").strip() or "中速推进，章末抬升压力。",
+            "review_focus": self._normalize_director_text_list(brief.get("review_focus")),
+            "rationale": str(brief.get("rationale") or "").strip() or "根据当前章节上下文生成的执行简报。",
+        }
+        if not normalized["must_advance_threads"]:
+            normalized["must_advance_threads"] = ["推进本章主冲突"]
+        if not normalized["setup_targets"]:
+            normalized["setup_targets"] = ["补一条可回收的新线索"]
+        if not normalized["review_focus"]:
+            normalized["review_focus"] = ["检查本章是否完成 director brief 的核心目标"]
+        return normalized
+
+    def _normalize_director_text_list(self, value: Any, limit: int = 5) -> List[str]:
+        items: List[str] = []
+        if isinstance(value, (list, tuple)):
+            candidates = value
+        elif value is None:
+            candidates = []
+        else:
+            candidates = [value]
+        seen: set[str] = set()
+        for item in candidates:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(text)
+            if len(items) >= limit:
+                break
+        return items
+
+    def _derive_director_entities(self, core_character_arcs: List[Dict[str, Any]], recent_timeline_events: List[Dict[str, Any]]) -> List[str]:
+        entities: List[str] = []
+        for item in core_character_arcs:
+            entity_id = str(item.get("entity_id") or "").strip()
+            if entity_id:
+                entities.append(self._resolve_director_entity_label(entity_id))
+        for item in recent_timeline_events:
+            for participant in item.get("participants") or []:
+                participant_id = str(participant or "").strip()
+                if participant_id:
+                    entities.append(self._resolve_director_entity_label(participant_id))
+        return self._normalize_director_text_list(entities, limit=4)
+
+    def _derive_director_relationship_moves(self, core_character_arcs: List[Dict[str, Any]]) -> List[str]:
+        moves: List[str] = []
+        for item in core_character_arcs:
+            source = self._resolve_director_entity_label(str(item.get("entity_id") or "").strip())
+            relation_state = item.get("relationship_state") or item.get("relationship_state_json") or {}
+            if not isinstance(relation_state, dict):
+                continue
+            for target_id, state in relation_state.items():
+                target = self._resolve_director_entity_label(str(target_id or "").strip())
+                state_text = str(state or "").strip()
+                if source and target and state_text:
+                    moves.append(f"{source} 与 {target} 的关系推进到：{state_text}")
+        return self._normalize_director_text_list(moves, limit=4)
+
+    def _resolve_director_entity_label(self, entity_id: str) -> str:
+        entity_id = str(entity_id or "").strip()
+        if not entity_id:
+            return ""
+        record = self.index_manager.get_entity(entity_id) or {}
+        return str(record.get("canonical_name") or entity_id).strip()
+
+    def _build_director_goal(
+        self,
+        *,
+        chapter: int,
+        payoff_targets: List[str],
+        setup_targets: List[str],
+        knowledge_reveals: List[str],
+        outline: str,
+    ) -> str:
+        if payoff_targets:
+            return f"第{chapter}章优先推进并尽量兑现：{payoff_targets[0]}，同时保留后续更大压力。"
+        if knowledge_reveals:
+            return f"第{chapter}章围绕“{knowledge_reveals[0]}”推进真相层级，并让角色判断产生代价。"
+        if setup_targets:
+            return f"第{chapter}章先把“{setup_targets[0]}”种稳，为后续回收建立清晰抓手。"
+        outline_excerpt = outline[:120].strip()
+        if outline_excerpt:
+            return f"第{chapter}章应落地当前大纲推进点：{outline_excerpt}"
+        return f"第{chapter}章推进当前主冲突，并形成明确章末驱动力。"
+
+    def _build_director_primary_conflict(
+        self,
+        core_character_arcs: List[Dict[str, Any]],
+        knowledge_conflicts: List[Dict[str, Any]],
+        outline: str,
+    ) -> str:
+        if core_character_arcs:
+            lead = core_character_arcs[0]
+            desire = str(lead.get("desire") or "").strip()
+            fear = str(lead.get("fear") or "").strip()
+            if desire and fear:
+                return f"{self._resolve_director_entity_label(str(lead.get('entity_id') or ''))}想要{desire}，但又害怕{fear}。"
+        if knowledge_conflicts:
+            topic = str(knowledge_conflicts[0].get("topic") or "").strip()
+            if topic:
+                return f"围绕“{topic}”的认知分歧必须升级成可行动的冲突。"
+        outline_excerpt = outline[:120].strip()
+        if outline_excerpt:
+            return f"本章主冲突必须服务于当前大纲推进点：{outline_excerpt}"
+        return "主角必须在信息不足与现实代价之间做出更危险的选择。"
+
+    def _build_director_hook_target(
+        self,
+        payoff_targets: List[str],
+        setup_targets: List[str],
+        knowledge_reveals: List[str],
+        must_advance_threads: List[str],
+    ) -> str:
+        if payoff_targets:
+            return f"围绕 {payoff_targets[0]} 的阶段性兑现，章末抛出更高一层代价或新疑点。"
+        if knowledge_reveals:
+            return f"围绕 {knowledge_reveals[0]} 给出一半答案，再留下更危险的下一步。"
+        if setup_targets:
+            return f"让 {setup_targets[0]} 在章末产生立即可执行的后续目标。"
+        if must_advance_threads:
+            return f"让 {must_advance_threads[0]} 在章末形成更紧迫的行动压力。"
+        return "章末留下立即可执行的下一步目标。"
+
+    def _build_director_tempo(self, writing_guidance: Dict[str, Any], genre_profile: Dict[str, Any]) -> str:
+        methodology = writing_guidance.get("methodology") or {}
+        chapter_stage = str(methodology.get("chapter_stage") or "").strip()
+        genre = str(genre_profile.get("genre") or "").strip()
+        if chapter_stage:
+            return f"{chapter_stage}阶段节奏：中速起步，后半章明显抬升压力。"
+        if genre:
+            return f"{genre}向节奏：尽快进入冲突，中后段加速，章末留钩。"
+        return "中速推进，关键信息尽量绑定行动代价，章末抬升压力。"
+
+    def _build_director_review_focus(
+        self,
+        payoff_targets: List[str],
+        must_use_entities: List[str],
+        knowledge_reveals: List[str],
+        forbidden_resolutions: List[str],
+    ) -> List[str]:
+        focus: List[str] = []
+        if payoff_targets:
+            focus.append(f"检查是否真实推进或兑现 {payoff_targets[0]}")
+        if must_use_entities:
+            focus.append(f"检查 {must_use_entities[0]} 是否承担了本章关键动作")
+        if knowledge_reveals:
+            focus.append(f"检查 {knowledge_reveals[0]} 是否通过行动而不是解释推进")
+        if forbidden_resolutions:
+            focus.append(f"检查是否违反：{forbidden_resolutions[0]}")
+        if not focus:
+            focus.append("检查本章目标、冲突、章末钩子是否首尾一致")
+        return self._normalize_director_text_list(focus, limit=4)
+
+    def _build_director_rationale(
+        self,
+        chapter: int,
+        previous_summaries: List[str],
+        must_advance_threads: List[str],
+        knowledge_reveals: List[str],
+    ) -> str:
+        summary_hint = previous_summaries[-1][:80].strip() if previous_summaries else ""
+        thread_hint = must_advance_threads[0] if must_advance_threads else "本章主冲突"
+        if knowledge_reveals:
+            return f"第{chapter}章需要延续上一章积累的压力，并把“{thread_hint}”与“{knowledge_reveals[0]}”绑定推进。{summary_hint}"
+        return f"第{chapter}章需要延续上一章压力，优先推进“{thread_hint}”，避免空转铺垫。{summary_hint}"
+
+    def _director_brief_path(self, chapter: int) -> Path:
+        return self.project_root / DIRECTOR_DIR_NAME / f"ch{chapter:04d}.json"
+
+    def _write_director_brief(self, chapter: int, brief: Dict[str, Any]) -> Path:
+        path = self._director_brief_path(chapter)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def _load_director_brief(self, chapter: int) -> Dict[str, Any]:
+        path = self._director_brief_path(chapter)
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _get_task_director_brief(self, task: Dict[str, Any], chapter: int) -> Dict[str, Any]:
+        step_results = ((task.get("artifacts") or {}).get("step_results") or {})
+        brief = ((step_results.get("chapter-director") or {}).get("structured_output") or {})
+        if isinstance(brief, dict) and brief:
+            return self._normalize_director_brief(brief, chapter=chapter)
+        stored = self._load_director_brief(chapter)
+        if stored:
+            return self._normalize_director_brief(stored, chapter=chapter)
+        return self._build_fallback_director_brief(chapter)
+
+    def _sync_context_director_brief(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        chapter = int(((task.get("request") or {}).get("chapter") or 0))
+        if chapter <= 0:
+            return
+        director_brief = self._get_task_director_brief(task, chapter)
+        current_result = (((task.get("artifacts") or {}).get("step_results") or {}).get("context") or {})
+        merged_output = dict(payload or {})
+        merged_output["director_brief"] = director_brief
+        updated_result = dict(current_result)
+        updated_result["success"] = True
+        updated_result["structured_output"] = merged_output
+        self.store.save_step_result(task_id, "context", updated_result)
+        self.store.append_event(task_id, "info", "Context director brief synced", step_name="context", payload={"chapter": chapter})
 
     def _apply_write_data_sync(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
         request = task.get("request") or {}
@@ -1693,13 +2493,16 @@ class OrchestrationService:
         draft_output = (step_results.get("draft") or {}).get("structured_output") or {}
         polish_output = (step_results.get("polish") or {}).get("structured_output") or {}
         review_summary = artifacts.get("review_summary") or {}
+        director_brief = self._get_task_director_brief(task, chapter)
 
-        chapter_file = str(
+        requested_chapter_file = self._default_chapter_file(chapter)
+        reported_chapter_file = str(
             payload.get("chapter_file")
             or polish_output.get("chapter_file")
             or draft_output.get("chapter_file")
-            or self._default_chapter_file(chapter)
+            or requested_chapter_file
         )
+        chapter_file = requested_chapter_file
         content = payload.get("content") or polish_output.get("content") or draft_output.get("content") or ""
         if not isinstance(content, str) or not content.strip():
             raise ValueError("data-sync 无法确定章节正文内容")
@@ -1707,74 +2510,132 @@ class OrchestrationService:
         word_count = self._canonical_word_count(content)
         reported_word_count = self._parse_reported_word_count(payload, polish_output, draft_output)
         self._validate_writeback_content(content, word_count, reported_word_count)
-        chapter_path = self._write_project_text(chapter_file, content)
 
-        summary_file = str(payload.get("summary_file") or f".webnovel/summaries/ch{chapter:04d}.md")
+        requested_summary_file = self._default_summary_file(chapter)
+        reported_summary_file = str(payload.get("summary_file") or requested_summary_file)
+        summary_file = requested_summary_file
         summary_content = payload.get("summary_content") or payload.get("summary_text")
         if not isinstance(summary_content, str) or not summary_content.strip():
             summary_content = self._build_summary_markdown(chapter, content, review_summary)
-        summary_path = self._write_project_text(summary_file, summary_content)
-        existing_chapter = self.index_manager.get_chapter(chapter) or {}
-        previous_word_count = int(existing_chapter.get("word_count") or 0)
+        director_alignment = self._build_director_alignment(director_brief, payload, content)
 
         state_payload, structured_sync = self._normalize_state_payload(chapter, payload)
-        state_manager = StateManager(get_config(project_root=self.project_root))
-        state_manager.process_chapter_result(chapter, state_payload)
-        state_manager.update_progress(chapter, words=0)
-        state_manager._pending_progress_words_delta += word_count - previous_word_count
-        state_manager.save_state()
-        if structured_sync["world_settings"]:
-            self._merge_world_settings(structured_sync["world_settings"])
-        if structured_sync["entities"]:
-            self._upsert_structured_entities(chapter, structured_sync["entities"])
-        if structured_sync["relationships"]:
-            self._upsert_structured_relationships(chapter, structured_sync["relationships"])
-        self._record_structured_sync_event(task_id, chapter, structured_sync)
+        narrative_sync = self._normalize_narrative_payload(chapter, payload)
+        snapshot = self._snapshot_writeback_state(
+            chapter=chapter,
+            chapter_file=chapter_file,
+            summary_file=summary_file,
+            structured_sync=structured_sync,
+            narrative_sync=narrative_sync,
+        )
 
-        chapter_meta = state_payload.get("chapter_meta") or {}
-        self.index_manager.add_chapter(
-            ChapterMeta(
-                chapter=chapter,
-                title=self._resolve_chapter_title(chapter, content, chapter_meta),
-                location=str(chapter_meta.get("location") or ""),
-                word_count=word_count,
-                characters=self._normalize_characters(chapter_meta.get("characters")),
-                summary=self._extract_summary_excerpt(summary_content),
-                file_path=self._relative_project_path(chapter_path),
+        try:
+            chapter_path = self._write_project_text(chapter_file, content)
+            summary_path = self._write_project_text(summary_file, summary_content)
+            existing_chapter = self.index_manager.get_chapter(chapter) or {}
+            previous_word_count = int(existing_chapter.get("word_count") or 0)
+
+            state_manager = StateManager(get_config(project_root=self.project_root))
+            state_manager.process_chapter_result(chapter, state_payload)
+            state_manager.update_progress(chapter, words=0)
+            state_manager._pending_progress_words_delta += word_count - previous_word_count
+            state_manager.save_state()
+            if structured_sync["world_settings"]:
+                self._merge_world_settings(structured_sync["world_settings"])
+            if structured_sync["entities"]:
+                self._upsert_structured_entities(chapter, structured_sync["entities"])
+            if structured_sync["relationships"]:
+                self._upsert_structured_relationships(chapter, structured_sync["relationships"])
+            self._record_structured_sync_event(task_id, chapter, structured_sync)
+            if narrative_sync["summary"]["normalized_entries"]:
+                self._write_narrative_graph(narrative_sync)
+            self._record_narrative_sync_event(task_id, chapter, narrative_sync)
+
+            chapter_meta = state_payload.get("chapter_meta") or {}
+            self.index_manager.add_chapter(
+                ChapterMeta(
+                    chapter=chapter,
+                    title=self._resolve_chapter_title(chapter, content, chapter_meta),
+                    location=str(chapter_meta.get("location") or ""),
+                    word_count=word_count,
+                    characters=self._normalize_characters(chapter_meta.get("characters")),
+                    summary=self._extract_summary_excerpt(summary_content),
+                    file_path=self._relative_project_path(chapter_path),
+                )
             )
-        )
 
-        latest_task = self.store.get_task(task_id) or task
-        latest_artifacts = dict(latest_task.get("artifacts") or {})
-        writeback = dict(latest_artifacts.get("writeback") or {})
-        writeback.update(
-            {
-                "chapter_file": self._relative_project_path(chapter_path),
-                "summary_file": self._relative_project_path(summary_path),
-                "state_file": ".webnovel/state.json",
-                "word_count": word_count,
-                "index_updated": True,
-                "structured_sync": structured_sync["summary"],
-            }
-        )
-        latest_artifacts["writeback"] = writeback
-        self.store.update_task(task_id, artifacts=latest_artifacts)
-        if review_summary:
-            self._persist_review_summary(latest_task, review_summary)
+            latest_task = self.store.get_task(task_id) or task
+            if review_summary:
+                self._persist_review_summary(latest_task, review_summary)
+                self.store.append_event(
+                    task_id,
+                    "info",
+                    "Review summary persisted",
+                    step_name="data-sync",
+                    payload={"chapter": chapter},
+                )
+
+            warning_payload: Dict[str, Any] = {"chapter": chapter}
+            if reported_chapter_file and reported_chapter_file != requested_chapter_file:
+                warning_payload["reported_chapter_file"] = reported_chapter_file
+                warning_payload["actual_chapter_file"] = requested_chapter_file
+            if reported_summary_file and reported_summary_file != requested_summary_file:
+                warning_payload["reported_summary_file"] = reported_summary_file
+                warning_payload["actual_summary_file"] = requested_summary_file
+            if len(warning_payload) > 1:
+                self.store.append_event(
+                    task_id,
+                    "warning",
+                    "Write target normalized",
+                    step_name="data-sync",
+                    payload=warning_payload,
+                )
+
+            self._validate_writeback_consistency(
+                chapter=chapter,
+                chapter_path=chapter_path,
+                summary_path=summary_path,
+                summary_content=summary_content,
+                content=content,
+            )
+            self._sync_core_setting_docs(
+                task_id=task_id,
+                trigger="write",
+                chapter=chapter,
+                plan_payload=None,
+                state_payload=state_payload,
+                structured_sync=structured_sync,
+            )
+
+            latest_task = self.store.get_task(task_id) or task
+            latest_artifacts = dict(latest_task.get("artifacts") or {})
+            writeback = dict(latest_artifacts.get("writeback") or {})
+            writeback.update(
+                {
+                    "chapter_file": self._relative_project_path(chapter_path),
+                    "summary_file": self._relative_project_path(summary_path),
+                    "state_file": ".webnovel/state.json",
+                    "word_count": word_count,
+                    "index_updated": True,
+                    "structured_sync": structured_sync["summary"],
+                    "narrative_sync": narrative_sync["summary"],
+                    "director_alignment": director_alignment,
+                }
+            )
+            latest_artifacts["writeback"] = writeback
+            self.store.update_task(task_id, artifacts=latest_artifacts)
             self.store.append_event(
                 task_id,
                 "info",
-                "Review summary persisted",
+                "Data sync completed",
                 step_name="data-sync",
-                payload={"chapter": chapter},
+                payload=writeback,
             )
-        self.store.append_event(
-            task_id,
-            "info",
-            "Data sync completed",
-            step_name="data-sync",
-            payload=writeback,
-        )
+        except Exception as exc:
+            rollback_error = self._rollback_writeback_snapshot(task_id, chapter, snapshot)
+            if rollback_error is not None:
+                raise WritebackConsistencyError(f"{exc}; rollback_error={rollback_error}") from exc
+            raise
 
     def _apply_plan_writeback(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
         if self._is_plan_payload_blocked(payload):
@@ -1789,6 +2650,8 @@ class OrchestrationService:
         planning = state_data.setdefault("planning", {})
         volume_plans = planning.setdefault("volume_plans", {})
         latest_task = self.store.get_task(task_id) or task
+        chapters = [item for item in (payload.get("chapters") or []) if isinstance(item, dict)]
+        chapters_range = self._infer_plan_chapters_range(chapters)
         volume_plans[volume] = {
             "outline_file": self._relative_project_path(outline_path),
             "updated_at": latest_task.get("updated_at"),
@@ -1797,7 +2660,26 @@ class OrchestrationService:
         }
         planning["latest_volume"] = volume
         planning["last_blocked"] = None
+        progress = state_data.setdefault("progress", {})
+        try:
+            progress["current_volume"] = max(1, int(volume))
+        except ValueError:
+            progress.setdefault("current_volume", 1)
+        if chapters_range:
+            progress["volumes_planned"] = self._upsert_volume_plan_progress(
+                progress.get("volumes_planned"),
+                volume=progress.get("current_volume") or 1,
+                chapters_range=chapters_range,
+            )
         self._write_state_data(state_data)
+        self._sync_core_setting_docs(
+            task_id=task_id,
+            trigger="plan",
+            chapter=None,
+            plan_payload=payload,
+            state_payload=None,
+            structured_sync=None,
+        )
 
         latest_artifacts = dict(latest_task.get("artifacts") or {})
         latest_artifacts["writeback"] = {
@@ -1830,17 +2712,17 @@ class OrchestrationService:
             snippet or "暂无摘要。",
             "",
             SUMMARY_SECTION_REVIEW,
-            f"- overall_score: {review_summary.get('overall_score', 0)}",
-            f"- blocking: {str(bool(review_summary.get('blocking'))).lower()}",
-            f"- reviewer_count: {len(reviewers)}",
-            f"- issue_count: {len(issues)}",
+            f"- 总评分：{review_summary.get('overall_score', 0)}",
+            f"- 是否阻断：{'是' if bool(review_summary.get('blocking')) else '否'}",
+            f"- 审查器数量：{len(reviewers)}",
+            f"- 问题数量：{len(issues)}",
         ]
         if issues:
             lines.extend(["", SUMMARY_SECTION_ISSUES])
             for issue in issues[:5]:
                 title = issue.get("title") or issue.get("message") or "未命名问题"
                 severity = issue.get("severity") or "medium"
-                lines.append(f"- [{severity}] {title}")
+                lines.append(f"- [{self._translate_review_severity(severity)}] {title}")
         return "\n".join(lines).strip() + "\n"
 
     def _canonical_word_count(self, content: str) -> int:
@@ -1866,8 +2748,204 @@ class OrchestrationService:
                 f"reported word count drift is too large: reported={reported_word_count}, actual={actual_word_count}"
             )
 
+    def _validate_writeback_consistency(
+        self,
+        *,
+        chapter: int,
+        chapter_path: Path,
+        summary_path: Path,
+        summary_content: str,
+        content: str,
+    ) -> None:
+        expected_body = self._default_chapter_file(chapter)
+        actual_body = self._relative_project_path(chapter_path)
+        if actual_body != expected_body:
+            raise WritebackConsistencyError(f"正文文件路径错误：期望 {expected_body}，实际 {actual_body}")
+
+        expected_summary = self._default_summary_file(chapter)
+        actual_summary = self._relative_project_path(summary_path)
+        if actual_summary != expected_summary:
+            raise WritebackConsistencyError(f"摘要文件路径错误：期望 {expected_summary}，实际 {actual_summary}")
+
+        chapter_record = self.index_manager.get_chapter(chapter)
+        if not chapter_record:
+            raise WritebackConsistencyError(f"章节索引缺失：chapter={chapter}")
+        indexed_path = str(chapter_record.get("file_path") or "").replace("\\", "/")
+        if indexed_path != expected_body:
+            raise WritebackConsistencyError(f"章节索引 file_path 错误：期望 {expected_body}，实际 {indexed_path or '空'}")
+
+        metrics_records = self.index_manager.get_recent_review_metrics(limit=max(10, chapter + 2))
+        has_review_metrics = any(
+            int(record.get("start_chapter") or 0) == chapter and int(record.get("end_chapter") or 0) == chapter
+            for record in metrics_records
+        )
+        if not has_review_metrics:
+            raise WritebackConsistencyError(f"单章 review_metrics 缺失：chapter={chapter}")
+
+        state_data = self._read_state_data()
+        progress = state_data.get("progress") or {}
+        current_chapter = int(progress.get("current_chapter") or 0)
+        if current_chapter < chapter:
+            raise WritebackConsistencyError(f"当前进度未推进到目标章节：current_chapter={current_chapter}, chapter={chapter}")
+
+        chapter_meta = self._get_state_chapter_meta(state_data, chapter)
+        if not chapter_meta:
+            raise WritebackConsistencyError(f"state.json chapter_meta 缺失：chapter={chapter}")
+
+        if not chapter_path.is_file() or not summary_path.is_file():
+            raise WritebackConsistencyError("写回文件未落盘完成")
+        if not content.strip() or not summary_content.strip():
+            raise WritebackConsistencyError("正文或摘要内容为空")
+
     def _default_chapter_file(self, chapter: int) -> str:
-        return f"正文/第{chapter:04d}章.md"
+        volume = self._resolve_volume_for_chapter(chapter)
+        return f"{BODY_DIR_NAME}/第{volume}卷/第{chapter:04d}章.md"
+
+    def _default_summary_file(self, chapter: int) -> str:
+        return f".webnovel/summaries/ch{chapter:04d}.md"
+
+    def _repair_project_layout(self) -> None:
+        try:
+            self._migrate_legacy_chapter_files()
+        except Exception as exc:
+            logger.warning("failed to repair project layout for %s: %s", self.project_root, exc)
+
+    def _migrate_legacy_chapter_files(self) -> None:
+        body_dir = self.project_root / BODY_DIR_NAME
+        if not body_dir.is_dir():
+            return
+        legacy_pattern = re.compile(r"^第(\d{4})章\.md$")
+        moved_targets: Dict[int, str] = {}
+        for candidate in sorted(body_dir.glob("第*.md")):
+            if not candidate.is_file():
+                continue
+            matched = legacy_pattern.match(candidate.name)
+            if not matched:
+                continue
+            chapter = int(matched.group(1))
+            target_rel = self._default_chapter_file(chapter)
+            target_path = self._resolve_project_path(target_rel)
+            if candidate.resolve() == target_path.resolve():
+                moved_targets[chapter] = target_rel
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            if target_path.exists():
+                try:
+                    if target_path.read_text(encoding="utf-8") == candidate.read_text(encoding="utf-8"):
+                        candidate.unlink()
+                        moved_targets[chapter] = target_rel
+                except UnicodeDecodeError:
+                    continue
+                continue
+            candidate.replace(target_path)
+            moved_targets[chapter] = target_rel
+
+        if not moved_targets:
+            return
+        with self.index_manager._get_conn() as conn:
+            cursor = conn.cursor()
+            for chapter, target_rel in moved_targets.items():
+                legacy_rel = f"{BODY_DIR_NAME}/第{chapter:04d}章.md"
+                cursor.execute(
+                    "UPDATE chapters SET file_path = ? WHERE chapter = ? AND REPLACE(file_path, '\\\\', '/') IN (?, ?)",
+                    (target_rel, chapter, legacy_rel, target_rel),
+                )
+            conn.commit()
+
+    def _resolve_volume_for_chapter(self, chapter: int, state_data: Optional[Dict[str, Any]] = None) -> int:
+        if chapter <= 0:
+            return 1
+        data = state_data if state_data is not None else self._read_state_data()
+        progress = data.get("progress") or {}
+        best_match: Optional[tuple[int, int]] = None
+        for item in progress.get("volumes_planned") or []:
+            if not isinstance(item, dict):
+                continue
+            volume = item.get("volume")
+            if volume is None:
+                continue
+            parsed_range = self._parse_chapters_range(item.get("chapters_range"))
+            if parsed_range is None:
+                continue
+            start, end = parsed_range
+            if start <= chapter <= end:
+                try:
+                    candidate = (start, max(1, int(volume)))
+                except (TypeError, ValueError):
+                    continue
+                if best_match is None or candidate[0] > best_match[0] or (
+                    candidate[0] == best_match[0] and candidate[1] < best_match[1]
+                ):
+                    best_match = candidate
+        if best_match is not None:
+            return best_match[1]
+
+        current_chapter = 0
+        try:
+            current_chapter = max(0, int(progress.get("current_chapter") or 0))
+        except (TypeError, ValueError):
+            current_chapter = 0
+        if current_chapter > 0 and chapter in {current_chapter, current_chapter + 1}:
+            for candidate in (
+                progress.get("current_volume"),
+                ((data.get("planning") or {}).get("latest_volume")),
+            ):
+                try:
+                    return max(1, int(candidate or 1))
+                except (TypeError, ValueError):
+                    continue
+
+        for candidate in ((((chapter - 1) // 50) + 1), 1):
+            try:
+                return max(1, int(candidate or 1))
+            except (TypeError, ValueError):
+                continue
+        return 1
+
+    def _parse_chapters_range(self, raw: Any) -> Optional[tuple[int, int]]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        matched = re.match(r"^\s*(\d+)\s*[-~～至]\s*(\d+)\s*$", text)
+        if matched:
+            start, end = int(matched.group(1)), int(matched.group(2))
+            if start > 0 and end >= start:
+                return start, end
+        if text.isdigit():
+            value = int(text)
+            if value > 0:
+                return value, value
+        return None
+
+    def _infer_plan_chapters_range(self, chapters: List[Dict[str, Any]]) -> Optional[str]:
+        numbers = []
+        for item in chapters:
+            try:
+                chapter = int(item.get("chapter") or 0)
+            except (TypeError, ValueError):
+                continue
+            if chapter > 0:
+                numbers.append(chapter)
+        if not numbers:
+            return None
+        return f"{min(numbers)}-{max(numbers)}"
+
+    def _upsert_volume_plan_progress(self, raw_items: Any, *, volume: int, chapters_range: str) -> List[Dict[str, Any]]:
+        items = [dict(item) for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+        updated = False
+        for item in items:
+            try:
+                existing_volume = int(item.get("volume") or 0)
+            except (TypeError, ValueError):
+                existing_volume = 0
+            if existing_volume == volume:
+                item["chapters_range"] = chapters_range
+                updated = True
+                break
+        if not updated:
+            items.append({"volume": volume, "chapters_range": chapters_range})
+        items.sort(key=lambda row: int(row.get("volume") or 0))
+        return items
 
     def _resolve_project_path(self, raw_path: str) -> Path:
         candidate = Path(raw_path)
@@ -1889,9 +2967,362 @@ class OrchestrationService:
         target.write_text(content, encoding="utf-8")
         return target
 
+    def _snapshot_writeback_state(
+        self,
+        *,
+        chapter: int,
+        chapter_file: str,
+        summary_file: str,
+        structured_sync: Dict[str, Any],
+        narrative_sync: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        entity_ids = {
+            str(item.get("id") or "").strip()
+            for item in (structured_sync.get("entities") or [])
+            if str(item.get("id") or "").strip()
+        }
+        relationship_keys = {
+            (
+                str(item.get("from_entity") or "").strip(),
+                str(item.get("to_entity") or "").strip(),
+                str(item.get("type") or "").strip(),
+            )
+            for item in (structured_sync.get("relationships") or [])
+            if str(item.get("from_entity") or "").strip()
+            and str(item.get("to_entity") or "").strip()
+            and str(item.get("type") or "").strip()
+        }
+        with self.index_manager._get_conn() as conn:
+            cursor = conn.cursor()
+            chapter_row = cursor.execute("SELECT * FROM chapters WHERE chapter = ?", (chapter,)).fetchone()
+            review_metrics_row = cursor.execute(
+                "SELECT * FROM review_metrics WHERE start_chapter = ? AND end_chapter = ?",
+                (chapter, chapter),
+            ).fetchone()
+            entity_rows = [
+                dict(row)
+                for row in cursor.execute("SELECT * FROM entities").fetchall()
+                if row["id"] in entity_ids
+                or int(row["first_appearance"] or 0) == chapter
+                or int(row["last_appearance"] or 0) == chapter
+            ]
+            related_entity_ids = set(entity_ids)
+            related_entity_ids.update(str(row.get("id") or "").strip() for row in entity_rows if str(row.get("id") or "").strip())
+            alias_rows = [
+                dict(row)
+                for row in cursor.execute("SELECT * FROM aliases").fetchall()
+                if row["entity_id"] in related_entity_ids
+            ]
+            relationship_rows = [
+                dict(row)
+                for row in cursor.execute("SELECT * FROM relationships").fetchall()
+                if int(row["chapter"] or 0) == chapter
+                or (str(row["from_entity"] or ""), str(row["to_entity"] or ""), str(row["type"] or "")) in relationship_keys
+            ]
+        return {
+            "chapter": chapter,
+            "chapter_file": self._snapshot_project_text(chapter_file),
+            "summary_file": self._snapshot_project_text(summary_file),
+            "state_file": self._snapshot_project_text(".webnovel/state.json"),
+            "chapter_row": dict(chapter_row) if chapter_row else None,
+            "review_metrics_row": dict(review_metrics_row) if review_metrics_row else None,
+            "entity_rows": entity_rows,
+            "alias_rows": alias_rows,
+            "relationship_rows": relationship_rows,
+            "entity_ids": sorted(related_entity_ids),
+            "relationship_keys": [list(item) for item in sorted(relationship_keys)],
+            "narrative_snapshot": self._snapshot_narrative_state(chapter, narrative_sync),
+        }
+
+    def _snapshot_project_text(self, raw_path: str) -> Dict[str, Any]:
+        target = self._resolve_project_path(raw_path)
+        exists = target.is_file()
+        return {
+            "path": raw_path,
+            "exists": exists,
+            "content": target.read_text(encoding="utf-8") if exists else "",
+        }
+
+    def _rollback_writeback_snapshot(
+        self,
+        task_id: str,
+        chapter: int,
+        snapshot: Dict[str, Any],
+    ) -> Optional[str]:
+        self.store.append_event(
+            task_id,
+            "warning",
+            "writeback_rollback_started",
+            step_name="data-sync",
+            payload={"chapter": chapter},
+        )
+        try:
+            self._restore_writeback_snapshot(snapshot)
+        except Exception as exc:
+            self.store.append_event(
+                task_id,
+                "error",
+                "writeback_rollback_finished",
+                step_name="data-sync",
+                payload={"chapter": chapter, "rollback_error": str(exc)},
+            )
+            return str(exc)
+        self.store.append_event(
+            task_id,
+            "info",
+            "writeback_rollback_finished",
+            step_name="data-sync",
+            payload={"chapter": chapter},
+        )
+        return None
+
+    def _restore_writeback_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        chapter = int(snapshot.get("chapter") or 0)
+        entity_ids = {
+            str(item)
+            for item in (snapshot.get("entity_ids") or [])
+            if str(item).strip()
+        }
+        relationship_keys = {
+            tuple(str(part) for part in item)
+            for item in (snapshot.get("relationship_keys") or [])
+            if isinstance(item, list) and len(item) == 3
+        }
+        with self.index_manager._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM chapters WHERE chapter = ?", (chapter,))
+            cursor.execute("DELETE FROM review_metrics WHERE start_chapter = ? AND end_chapter = ?", (chapter, chapter))
+            relationship_rows = cursor.execute("SELECT * FROM relationships").fetchall()
+            relationship_ids_to_delete = [
+                int(row["id"])
+                for row in relationship_rows
+                if int(row["chapter"] or 0) == chapter
+                or (str(row["from_entity"] or ""), str(row["to_entity"] or ""), str(row["type"] or "")) in relationship_keys
+            ]
+            if relationship_ids_to_delete:
+                placeholders = ",".join("?" for _ in relationship_ids_to_delete)
+                cursor.execute(f"DELETE FROM relationships WHERE id IN ({placeholders})", tuple(relationship_ids_to_delete))
+            if entity_ids:
+                placeholders = ",".join("?" for _ in entity_ids)
+                cursor.execute(f"DELETE FROM aliases WHERE entity_id IN ({placeholders})", tuple(sorted(entity_ids)))
+                cursor.execute(f"DELETE FROM entities WHERE id IN ({placeholders})", tuple(sorted(entity_ids)))
+            for row in snapshot.get("entity_rows") or []:
+                entity_ids.add(str(row.get("id") or "").strip())
+            if entity_ids:
+                placeholders = ",".join("?" for _ in entity_ids)
+                cursor.execute(
+                    f"DELETE FROM entities WHERE id IN ({placeholders})",
+                    tuple(sorted(entity_ids)),
+                )
+                cursor.execute(
+                    f"DELETE FROM aliases WHERE entity_id IN ({placeholders})",
+                    tuple(sorted(entity_ids)),
+                )
+            self._restore_table_row(cursor, "chapters", snapshot.get("chapter_row"))
+            self._restore_table_row(cursor, "review_metrics", snapshot.get("review_metrics_row"))
+            self._restore_table_rows(cursor, "entities", snapshot.get("entity_rows") or [])
+            self._restore_table_rows(cursor, "aliases", snapshot.get("alias_rows") or [])
+            self._restore_table_rows(cursor, "relationships", snapshot.get("relationship_rows") or [])
+            self._restore_narrative_state(cursor, chapter, snapshot.get("narrative_snapshot") or {})
+            conn.commit()
+        self._restore_project_text(snapshot.get("chapter_file") or {})
+        self._restore_project_text(snapshot.get("summary_file") or {})
+        self._restore_project_text(snapshot.get("state_file") or {})
+
+    def _snapshot_narrative_state(self, chapter: int, narrative_sync: Dict[str, Any]) -> Dict[str, Any]:
+        foreshadowing_names = {
+            str(item.get("name") or "").strip()
+            for item in (narrative_sync.get("foreshadowing_items") or [])
+            if str(item.get("name") or "").strip()
+        }
+        timeline_keys = {
+            (
+                int(item.get("chapter") or chapter),
+                int(item.get("scene_index") or 0),
+                str(item.get("summary") or "").strip(),
+            )
+            for item in (narrative_sync.get("timeline_events") or [])
+            if str(item.get("summary") or "").strip()
+        }
+        character_arc_keys = {
+            (
+                str(item.get("entity_id") or "").strip(),
+                int(item.get("chapter") or chapter),
+            )
+            for item in (narrative_sync.get("character_arcs") or [])
+            if str(item.get("entity_id") or "").strip()
+        }
+        knowledge_state_keys = {
+            (
+                str(item.get("entity_id") or "").strip(),
+                int(item.get("chapter") or chapter),
+                str(item.get("topic") or "").strip(),
+            )
+            for item in (narrative_sync.get("knowledge_states") or [])
+            if str(item.get("entity_id") or "").strip() and str(item.get("topic") or "").strip()
+        }
+
+        with self.index_manager._get_conn() as conn:
+            cursor = conn.cursor()
+            snapshot: Dict[str, Any] = {
+                "foreshadowing_names": sorted(foreshadowing_names),
+                "timeline_keys": [list(item) for item in sorted(timeline_keys)],
+                "character_arc_keys": [list(item) for item in sorted(character_arc_keys)],
+                "knowledge_state_keys": [list(item) for item in sorted(knowledge_state_keys)],
+                "foreshadowing_rows": [],
+                "timeline_rows": [],
+                "character_arc_rows": [],
+                "knowledge_state_rows": [],
+            }
+            if self._table_exists(cursor, "foreshadowing_items"):
+                snapshot["foreshadowing_rows"] = [
+                    dict(row)
+                    for row in cursor.execute("SELECT * FROM foreshadowing_items").fetchall()
+                    if str(row["name"] or "").strip() in foreshadowing_names
+                ]
+            if self._table_exists(cursor, "timeline_events"):
+                snapshot["timeline_rows"] = [
+                    dict(row)
+                    for row in cursor.execute("SELECT * FROM timeline_events").fetchall()
+                    if int(row["chapter"] or 0) == chapter
+                    or (
+                        int(row["chapter"] or 0),
+                        int(row["scene_index"] or 0),
+                        str(row["summary"] or "").strip(),
+                    )
+                    in timeline_keys
+                ]
+            if self._table_exists(cursor, "character_arcs"):
+                snapshot["character_arc_rows"] = [
+                    dict(row)
+                    for row in cursor.execute("SELECT * FROM character_arcs").fetchall()
+                    if int(row["chapter"] or 0) == chapter
+                    or (str(row["entity_id"] or "").strip(), int(row["chapter"] or 0)) in character_arc_keys
+                ]
+            if self._table_exists(cursor, "knowledge_states"):
+                snapshot["knowledge_state_rows"] = [
+                    dict(row)
+                    for row in cursor.execute("SELECT * FROM knowledge_states").fetchall()
+                    if int(row["chapter"] or 0) == chapter
+                    or (
+                        str(row["entity_id"] or "").strip(),
+                        int(row["chapter"] or 0),
+                        str(row["topic"] or "").strip(),
+                    )
+                    in knowledge_state_keys
+                ]
+        return snapshot
+
+    def _restore_narrative_state(self, cursor: sqlite3.Cursor, chapter: int, snapshot: Dict[str, Any]) -> None:
+        foreshadowing_names = {
+            str(item)
+            for item in (snapshot.get("foreshadowing_names") or [])
+            if str(item).strip()
+        }
+        timeline_keys = {
+            tuple(item)
+            for item in (snapshot.get("timeline_keys") or [])
+            if isinstance(item, list) and len(item) == 3
+        }
+        character_arc_keys = {
+            tuple(item)
+            for item in (snapshot.get("character_arc_keys") or [])
+            if isinstance(item, list) and len(item) == 2
+        }
+        knowledge_state_keys = {
+            tuple(item)
+            for item in (snapshot.get("knowledge_state_keys") or [])
+            if isinstance(item, list) and len(item) == 3
+        }
+
+        if self._table_exists(cursor, "foreshadowing_items"):
+            if foreshadowing_names:
+                placeholders = ",".join("?" for _ in foreshadowing_names)
+                cursor.execute(
+                    f"DELETE FROM foreshadowing_items WHERE name IN ({placeholders})",
+                    tuple(sorted(foreshadowing_names)),
+                )
+            self._restore_table_rows(cursor, "foreshadowing_items", snapshot.get("foreshadowing_rows") or [])
+
+        if self._table_exists(cursor, "timeline_events"):
+            timeline_rows = cursor.execute("SELECT * FROM timeline_events").fetchall()
+            ids_to_delete = [
+                int(row["id"])
+                for row in timeline_rows
+                if int(row["chapter"] or 0) == chapter
+                or (
+                    int(row["chapter"] or 0),
+                    int(row["scene_index"] or 0),
+                    str(row["summary"] or "").strip(),
+                )
+                in timeline_keys
+            ]
+            if ids_to_delete:
+                placeholders = ",".join("?" for _ in ids_to_delete)
+                cursor.execute(f"DELETE FROM timeline_events WHERE id IN ({placeholders})", tuple(ids_to_delete))
+            self._restore_table_rows(cursor, "timeline_events", snapshot.get("timeline_rows") or [])
+
+        if self._table_exists(cursor, "character_arcs"):
+            if character_arc_keys:
+                cursor.execute("DELETE FROM character_arcs WHERE chapter = ?", (chapter,))
+                for entity_id, arc_chapter in character_arc_keys:
+                    cursor.execute(
+                        "DELETE FROM character_arcs WHERE entity_id = ? AND chapter = ?",
+                        (entity_id, arc_chapter),
+                    )
+            else:
+                cursor.execute("DELETE FROM character_arcs WHERE chapter = ?", (chapter,))
+            self._restore_table_rows(cursor, "character_arcs", snapshot.get("character_arc_rows") or [])
+
+        if self._table_exists(cursor, "knowledge_states"):
+            if knowledge_state_keys:
+                cursor.execute("DELETE FROM knowledge_states WHERE chapter = ?", (chapter,))
+                for entity_id, state_chapter, topic in knowledge_state_keys:
+                    cursor.execute(
+                        "DELETE FROM knowledge_states WHERE entity_id = ? AND chapter = ? AND topic = ?",
+                        (entity_id, state_chapter, topic),
+                    )
+            else:
+                cursor.execute("DELETE FROM knowledge_states WHERE chapter = ?", (chapter,))
+            self._restore_table_rows(cursor, "knowledge_states", snapshot.get("knowledge_state_rows") or [])
+
+    def _table_exists(self, cursor: sqlite3.Cursor, table: str) -> bool:
+        row = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    def _restore_table_row(self, cursor: sqlite3.Cursor, table: str, row: Optional[Dict[str, Any]]) -> None:
+        if not row:
+            return
+        self._restore_table_rows(cursor, table, [row])
+
+    def _restore_table_rows(self, cursor: sqlite3.Cursor, table: str, rows: List[Dict[str, Any]]) -> None:
+        for row in rows:
+            columns = list(row.keys())
+            placeholders = ", ".join("?" for _ in columns)
+            column_sql = ", ".join(columns)
+            values = [row[column] for column in columns]
+            cursor.execute(f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", values)
+
+    def _restore_project_text(self, snapshot: Dict[str, Any]) -> None:
+        raw_path = str(snapshot.get("path") or "").strip()
+        if not raw_path:
+            return
+        target = self._resolve_project_path(raw_path)
+        if snapshot.get("exists"):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(snapshot.get("content") or ""), encoding="utf-8")
+            return
+        if target.exists():
+            target.unlink()
+
     def _validate_output(self, step: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
         required = step.get("required_output_keys", [])
         missing = [key for key in required if key not in payload]
+        if str(step.get("name") or "").strip().lower() == "context" and "director_brief" in missing:
+            missing = [key for key in missing if key != "director_brief"]
         if missing:
             return {
                 "code": "INVALID_STEP_OUTPUT",
@@ -1912,6 +3343,16 @@ class OrchestrationService:
             if issue_type == "TIMELINE_ISSUE" and severity in {"critical", "high"}:
                 blocked.append(issue)
         return blocked
+
+    def _translate_review_severity(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        mapping = {
+            "critical": "严重",
+            "high": "高",
+            "medium": "中",
+            "low": "低",
+        }
+        return mapping.get(normalized, str(value or "中"))
 
     def _build_review_gate_error(self, task: Dict[str, Any], summary: Dict[str, Any]) -> Optional[Dict[str, str]]:
         if task.get("task_type") != "write":
@@ -2033,18 +3474,18 @@ class OrchestrationService:
             "## 总览",
             f"- 任务类型: {task.get('task_type') or 'review'}",
             f"- 章节范围: {start_chapter}-{end_chapter}",
-            f"- overall_score: {summary.get('overall_score', 0)}",
-            f"- blocking: {str(bool(summary.get('blocking'))).lower()}",
-            f"- can_proceed: {str(bool(summary.get('can_proceed', True))).lower()}",
-            f"- reviewer_count: {len(reviewers)}",
-            f"- issue_count: {len(issues)}",
+            f"- 总评分: {summary.get('overall_score', 0)}",
+            f"- 是否阻断: {'是' if bool(summary.get('blocking')) else '否'}",
+            f"- 是否可继续: {'是' if bool(summary.get('can_proceed', True)) else '否'}",
+            f"- 审查器数量: {len(reviewers)}",
+            f"- 问题数量: {len(issues)}",
         ]
         if request:
             lines.append(f"- request: {json.dumps(request, ensure_ascii=False)}")
         if severity_counts:
             lines.extend(["", "## 严重度统计"])
             for level in ("critical", "high", "medium", "low"):
-                lines.append(f"- {level}: {severity_counts.get(level, 0)}")
+                lines.append(f"- {self._translate_review_severity(level)}: {severity_counts.get(level, 0)}")
         if reviewers:
             lines.extend(["", "## 分审查器结果"])
             for reviewer in reviewers:
@@ -2058,7 +3499,7 @@ class OrchestrationService:
                 severity = issue.get("severity") or "medium"
                 source = issue.get("source") or "unknown"
                 detail = issue.get("description") or issue.get("detail") or ""
-                lines.append(f"{idx}. [{severity}] {title} ({source})")
+                lines.append(f"{idx}. [{self._translate_review_severity(severity)}] {title} ({source})")
                 if detail:
                     lines.append(f"   - {detail}")
         else:
@@ -2125,7 +3566,7 @@ class OrchestrationService:
                 continue
             if candidate.get("project_root") != str(self.project_root):
                 continue
-            if candidate.get("status") not in {"running", "interrupted", "resumable"}:
+            if candidate.get("status") not in {"interrupted", "resumable"}:
                 continue
             if requested_chapter and int((candidate.get("request") or {}).get("chapter") or 0) != requested_chapter:
                 continue
@@ -2137,7 +3578,10 @@ class OrchestrationService:
             return None
 
         status_order = {"running": 0, "interrupted": 1, "resumable": 2}
-        candidates.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        candidates.sort(
+            key=lambda item: self._parse_iso_datetime(item.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
         candidates.sort(key=lambda item: status_order.get(str(item.get("status")), 99))
         return candidates[0]
 
@@ -2193,23 +3637,36 @@ class OrchestrationService:
         polish_output = (step_results.get("polish") or {}).get("structured_output") or {}
         data_sync_output = (step_results.get("data-sync") or {}).get("structured_output") or {}
         writeback = ((task.get("artifacts") or {}).get("writeback") or {})
-        chapter_file = str(
-            writeback.get("chapter_file")
-            or data_sync_output.get("chapter_file")
-            or polish_output.get("chapter_file")
-            or draft_output.get("chapter_file")
-            or self._default_chapter_file(chapter)
-        )
-        summary_file = str(
-            writeback.get("summary_file")
-            or data_sync_output.get("summary_file")
-            or f".webnovel/summaries/ch{chapter:04d}.md"
-        )
+        chapter_file = str(writeback.get("chapter_file") or self._default_chapter_file(chapter))
+        summary_file = str(writeback.get("summary_file") or self._default_summary_file(chapter))
         chapter_path = self._resolve_project_path(chapter_file)
         summary_path = self._resolve_project_path(summary_file)
         if not chapter_path.is_file() or not summary_path.is_file():
             return False
-        return self.index_manager.get_chapter(chapter) is not None
+        chapter_record = self.index_manager.get_chapter(chapter)
+        if not chapter_record:
+            return False
+        indexed_path = str(chapter_record.get("file_path") or "").replace("\\", "/")
+        if indexed_path != self._default_chapter_file(chapter):
+            return False
+        metrics_records = self.index_manager.get_recent_review_metrics(limit=max(10, chapter + 2))
+        if not any(
+            int(record.get("start_chapter") or 0) == chapter and int(record.get("end_chapter") or 0) == chapter
+            for record in metrics_records
+        ):
+            return False
+        state_data = self._read_state_data()
+        progress = state_data.get("progress") or {}
+        if int(progress.get("current_chapter") or 0) < chapter:
+            return False
+        chapter_meta = self._get_state_chapter_meta(state_data, chapter)
+        return bool(chapter_meta)
+
+    def _get_state_chapter_meta(self, state_data: Dict[str, Any], chapter: int) -> Dict[str, Any]:
+        try:
+            return dict(get_chapter_meta_entry(state_data, chapter) or {})
+        except Exception:
+            return {}
 
     def _volume_plan_filename(self, volume: str) -> str:
         normalized = volume.strip()
@@ -2519,6 +3976,154 @@ class OrchestrationService:
             "state_change_records": max(0, len(state_payload["state_changes"]) - len(payload.get("state_changes", []))),
         }
         return state_payload, structured_sync
+
+    def _normalize_narrative_payload(self, chapter: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        foreshadowing_items: List[Dict[str, Any]] = []
+        timeline_events: List[Dict[str, Any]] = []
+        character_arcs: List[Dict[str, Any]] = []
+        knowledge_states: List[Dict[str, Any]] = []
+        warnings: List[str] = []
+        input_detected = False
+
+        raw_foreshadowing = payload.get("foreshadowing_items")
+        if isinstance(raw_foreshadowing, list):
+            input_detected = True
+            for item in raw_foreshadowing:
+                if not isinstance(item, dict):
+                    warnings.append("unrecognized_foreshadowing_item")
+                    continue
+                name = str(item.get("name") or item.get("title") or item.get("label") or item.get("content") or "").strip()
+                if not name:
+                    warnings.append("foreshadowing_missing_name")
+                    continue
+                foreshadowing_items.append(
+                    {
+                        "name": name,
+                        "content": str(item.get("content") or item.get("summary") or name).strip(),
+                        "planted_chapter": self._coerce_narrative_int(item.get("planted_chapter") or item.get("chapter"), default=chapter),
+                        "planned_payoff_chapter": self._coerce_narrative_int(item.get("planned_payoff_chapter") or item.get("due_chapter"), default=0),
+                        "payoff_chapter": self._coerce_narrative_int(item.get("payoff_chapter"), default=0),
+                        "status": str(item.get("status") or "active").strip() or "active",
+                        "importance": str(item.get("importance") or item.get("tier") or "medium").strip() or "medium",
+                        "owner_entity": str(item.get("owner_entity") or item.get("entity_id") or "").strip(),
+                        "payoff_note": str(item.get("payoff_note") or item.get("note") or "").strip(),
+                    }
+                )
+
+        raw_timeline = payload.get("timeline_events")
+        if isinstance(raw_timeline, list):
+            input_detected = True
+            for item in raw_timeline:
+                if not isinstance(item, dict):
+                    warnings.append("unrecognized_timeline_event")
+                    continue
+                summary = str(item.get("summary") or item.get("content") or item.get("description") or "").strip()
+                if not summary:
+                    warnings.append("timeline_missing_summary")
+                    continue
+                timeline_events.append(
+                    {
+                        "chapter": self._coerce_narrative_int(item.get("chapter"), default=chapter),
+                        "scene_index": self._coerce_narrative_int(item.get("scene_index"), default=0),
+                        "event_time_label": str(item.get("event_time_label") or item.get("time_label") or "").strip(),
+                        "location": str(item.get("location") or "").strip(),
+                        "summary": summary,
+                        "participants": self._normalize_characters(item.get("participants")),
+                        "objective_fact": self._coerce_narrative_bool(item.get("objective_fact"), default=True),
+                        "source": str(item.get("source") or "data-sync").strip() or "data-sync",
+                    }
+                )
+
+        raw_character_arcs = payload.get("character_arcs")
+        if isinstance(raw_character_arcs, list):
+            input_detected = True
+            for item in raw_character_arcs:
+                if not isinstance(item, dict):
+                    warnings.append("unrecognized_character_arc")
+                    continue
+                entity_id = str(item.get("entity_id") or item.get("character") or item.get("id") or "").strip()
+                if not entity_id:
+                    warnings.append("character_arc_missing_entity_id")
+                    continue
+                character_arcs.append(
+                    {
+                        "entity_id": entity_id,
+                        "chapter": self._coerce_narrative_int(item.get("chapter"), default=chapter),
+                        "desire": str(item.get("desire") or "").strip(),
+                        "fear": str(item.get("fear") or "").strip(),
+                        "misbelief": str(item.get("misbelief") or "").strip(),
+                        "arc_stage": str(item.get("arc_stage") or item.get("stage") or "").strip(),
+                        "relationship_state": self._coerce_narrative_object(item.get("relationship_state")),
+                        "notes": str(item.get("notes") or item.get("note") or "").strip(),
+                    }
+                )
+
+        raw_knowledge_states = payload.get("knowledge_states")
+        if isinstance(raw_knowledge_states, list):
+            input_detected = True
+            for item in raw_knowledge_states:
+                if not isinstance(item, dict):
+                    warnings.append("unrecognized_knowledge_state")
+                    continue
+                entity_id = str(item.get("entity_id") or item.get("character") or item.get("id") or "").strip()
+                topic = str(item.get("topic") or "").strip()
+                belief = str(item.get("belief") or "").strip()
+                if not entity_id or not topic or not belief:
+                    warnings.append("knowledge_state_missing_fields")
+                    continue
+                try:
+                    confidence = float(item.get("confidence") if item.get("confidence") is not None else 1.0)
+                except (TypeError, ValueError):
+                    confidence = 1.0
+                knowledge_states.append(
+                    {
+                        "entity_id": entity_id,
+                        "chapter": self._coerce_narrative_int(item.get("chapter"), default=chapter),
+                        "topic": topic,
+                        "belief": belief,
+                        "truth_status": str(item.get("truth_status") or "unknown").strip() or "unknown",
+                        "confidence": max(0.0, min(1.0, confidence)),
+                        "evidence": str(item.get("evidence") or "").strip(),
+                    }
+                )
+
+        summary = {
+            "normalized_entries": len(foreshadowing_items) + len(timeline_events) + len(character_arcs) + len(knowledge_states),
+            "foreshadowing_items": len(foreshadowing_items),
+            "timeline_events": len(timeline_events),
+            "character_arcs": len(character_arcs),
+            "knowledge_states": len(knowledge_states),
+        }
+        return {
+            "input_detected": input_detected,
+            "foreshadowing_items": foreshadowing_items,
+            "timeline_events": timeline_events,
+            "character_arcs": character_arcs,
+            "knowledge_states": knowledge_states,
+            "warnings": warnings,
+            "summary": summary,
+        }
+
+    def _coerce_narrative_bool(self, value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        normalized = str(value).strip().casefold()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
+
+    def _coerce_narrative_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_narrative_object(self, value: Any) -> Dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
 
     def _enrich_data_sync_payload(self, task: Dict[str, Any], payload: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
         enriched = dict(payload)
@@ -2958,6 +4563,439 @@ class OrchestrationService:
                 **summary,
             },
         )
+
+    def _write_narrative_graph(self, narrative_sync: Dict[str, Any]) -> None:
+        self.narrative_graph.write_batch(
+            foreshadowing_items=narrative_sync.get("foreshadowing_items") or [],
+            timeline_events=narrative_sync.get("timeline_events") or [],
+            character_arcs=narrative_sync.get("character_arcs") or [],
+            knowledge_states=narrative_sync.get("knowledge_states") or [],
+        )
+
+    def _record_narrative_sync_event(self, task_id: str, chapter: int, narrative_sync: Dict[str, Any]) -> None:
+        summary = narrative_sync.get("summary") or {}
+        if narrative_sync.get("input_detected") and not summary.get("normalized_entries"):
+            self.store.append_event(
+                task_id,
+                "warning",
+                "Narrative state sync missing",
+                step_name="data-sync",
+                payload={"chapter": chapter, "warnings": narrative_sync.get("warnings", [])},
+            )
+            return
+        if summary.get("normalized_entries"):
+            self.store.append_event(
+                task_id,
+                "info",
+                "Narrative state synced",
+                step_name="data-sync",
+                payload={"chapter": chapter, **summary},
+            )
+            return
+
+    def _build_director_alignment(self, director_brief: Dict[str, Any], payload: Dict[str, Any], content: str) -> Dict[str, List[str]]:
+        alignment = {"satisfied": [], "missed": [], "deferred": []}
+        if not isinstance(director_brief, dict) or not director_brief:
+            return alignment
+
+        chapter_meta = dict(payload.get("chapter_meta") or {})
+        payload_foreshadowing = [item for item in (payload.get("foreshadowing_items") or []) if isinstance(item, dict)]
+        payload_timeline = [item for item in (payload.get("timeline_events") or []) if isinstance(item, dict)]
+        payload_arcs = [item for item in (payload.get("character_arcs") or []) if isinstance(item, dict)]
+        payload_knowledge = [item for item in (payload.get("knowledge_states") or []) if isinstance(item, dict)]
+        payload_relationships = [item for item in (payload.get("relationships_new") or []) if isinstance(item, dict)]
+        chapter_characters = self._normalize_characters(chapter_meta.get("characters"))
+
+        text_evidence = "\n".join(
+            [
+                str(content or ""),
+                json.dumps(payload_foreshadowing, ensure_ascii=False),
+                json.dumps(payload_timeline, ensure_ascii=False),
+                json.dumps(payload_arcs, ensure_ascii=False),
+                json.dumps(payload_knowledge, ensure_ascii=False),
+                json.dumps(payload_relationships, ensure_ascii=False),
+                json.dumps(chapter_characters, ensure_ascii=False),
+            ]
+        ).casefold()
+
+        def has_text(target: str) -> bool:
+            normalized = str(target or "").strip().casefold()
+            return bool(normalized) and normalized in text_evidence
+
+        foreshadowing_by_name = {
+            str(item.get("name") or "").strip().casefold(): item
+            for item in payload_foreshadowing
+            if str(item.get("name") or "").strip()
+        }
+
+        for target in self._normalize_director_text_list(director_brief.get("payoff_targets")):
+            matched = foreshadowing_by_name.get(target.casefold())
+            if matched and str(matched.get("status") or "").strip().casefold() in {"paid_off", "resolved", "fulfilled"}:
+                alignment["satisfied"].append(f"payoff:{target}")
+            elif matched:
+                alignment["deferred"].append(f"payoff:{target}")
+            else:
+                alignment["missed"].append(f"payoff:{target}")
+
+        for target in self._normalize_director_text_list(director_brief.get("setup_targets")):
+            if has_text(target):
+                alignment["satisfied"].append(f"setup:{target}")
+            else:
+                alignment["missed"].append(f"setup:{target}")
+
+        for target in self._normalize_director_text_list(director_brief.get("must_advance_threads")):
+            if has_text(target):
+                alignment["satisfied"].append(f"thread:{target}")
+            else:
+                alignment["missed"].append(f"thread:{target}")
+
+        for target in self._normalize_director_text_list(director_brief.get("must_use_entities")):
+            if has_text(target):
+                alignment["satisfied"].append(f"entity:{target}")
+            else:
+                alignment["missed"].append(f"entity:{target}")
+
+        for target in self._normalize_director_text_list(director_brief.get("relationship_moves")):
+            if has_text(target):
+                alignment["satisfied"].append(f"relationship:{target}")
+            else:
+                alignment["missed"].append(f"relationship:{target}")
+
+        for target in self._normalize_director_text_list(director_brief.get("knowledge_reveals")):
+            if has_text(target):
+                alignment["satisfied"].append(f"knowledge:{target}")
+            else:
+                alignment["missed"].append(f"knowledge:{target}")
+
+        for key in alignment:
+            alignment[key] = self._normalize_director_text_list(alignment[key], limit=20)
+        return alignment
+
+    def _sync_core_setting_docs(
+        self,
+        *,
+        task_id: str,
+        trigger: str,
+        chapter: Optional[int],
+        plan_payload: Optional[Dict[str, Any]],
+        state_payload: Optional[Dict[str, Any]],
+        structured_sync: Optional[Dict[str, Any]],
+    ) -> None:
+        state_data = self._read_state_data()
+        sync_input = self._build_setting_sync_input(
+            state_data=state_data,
+            trigger=trigger,
+            chapter=chapter,
+            plan_payload=plan_payload,
+            state_payload=state_payload,
+            structured_sync=structured_sync,
+        )
+        generated = self._generate_setting_docs(sync_input)
+        changed_paths: List[str] = []
+        for key, path in SETTING_DOC_PATHS.items():
+            content = str(generated.get(key) or "").strip()
+            if not content:
+                continue
+            resolved = self._resolve_project_path(path)
+            existing = resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
+            merged = self._merge_setting_doc_content(existing, content)
+            if existing.strip() == merged.strip():
+                continue
+            self._write_project_text(path, merged if merged.endswith("\n") else merged + "\n")
+            changed_paths.append(path)
+        if changed_paths:
+            self.store.append_event(
+                task_id,
+                "info",
+                "Core setting docs synced",
+                step_name="data-sync" if trigger == "write" else "plan",
+                payload={"trigger": trigger, "files": changed_paths, "chapter": chapter},
+            )
+
+    def _build_setting_sync_input(
+        self,
+        *,
+        state_data: Dict[str, Any],
+        trigger: str,
+        chapter: Optional[int],
+        plan_payload: Optional[Dict[str, Any]],
+        state_payload: Optional[Dict[str, Any]],
+        structured_sync: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        project_info = dict(state_data.get("project_info") or {})
+        protagonist_state = dict(state_data.get("protagonist_state") or {})
+        golden_finger = dict(protagonist_state.get("golden_finger") or {})
+        planning = state_data.get("planning") or {}
+        profile = dict(planning.get("profile") or {})
+        readiness = dict(planning.get("readiness") or {})
+        world_settings = dict(state_data.get("world_settings") or {})
+        chapter_meta = self._get_state_chapter_meta(state_data, chapter or 0) if chapter else {}
+        chapters = self.index_manager.get_recent_chapters(limit=20)
+        review_metrics = self.index_manager.get_recent_review_metrics(limit=20)
+        return {
+            "trigger": trigger,
+            "chapter": chapter,
+            "project_info": project_info,
+            "protagonist_state": protagonist_state,
+            "golden_finger": golden_finger,
+            "planning_profile": profile,
+            "planning_readiness": readiness,
+            "world_settings": world_settings,
+            "chapter_meta": chapter_meta,
+            "chapter_rows": chapters,
+            "review_metrics": review_metrics,
+            "plan_payload": plan_payload or {},
+            "state_payload": state_payload or {},
+            "structured_sync": structured_sync or {},
+        }
+
+    def _generate_setting_docs(self, sync_input: Dict[str, Any]) -> Dict[str, str]:
+        if self._should_use_llm_for_setting_docs():
+            generated = self._generate_setting_docs_with_llm(sync_input)
+            if generated:
+                return generated
+        return self._generate_setting_docs_deterministically(sync_input)
+
+    def _should_use_llm_for_setting_docs(self) -> bool:
+        mode = str(getattr(self.runner, "mode", "") or "").strip().lower()
+        provider = str(getattr(self.runner, "provider", "") or "").strip().lower()
+        return mode == "api" or provider in {"openai-compatible", "openai", "azure-openai"}
+
+    def _generate_setting_docs_with_llm(self, sync_input: Dict[str, Any]) -> Dict[str, str]:
+        step_spec = {
+            "name": "setting-docs-sync",
+            "instructions": (
+                "根据输入中的项目状态、卷规划和章节结构化结果，输出 4 份中文 Markdown 文档。"
+                "必须分别覆盖：世界观、力量体系、主角卡、金手指设计。"
+                "每份文档都要按固定小标题组织，缺失信息请明确写“待补充”，不要输出空壳模板。"
+                "输出 JSON，不要附加解释。"
+            ),
+            "required_output_keys": ["worldview", "power_system", "protagonist", "golden_finger"],
+            "output_schema": {
+                "worldview": "string",
+                "power_system": "string",
+                "protagonist": "string",
+                "golden_finger": "string",
+            },
+        }
+        prompt_bundle = {
+            "task_id": f"settings-sync-{sync_input.get('trigger')}-{sync_input.get('chapter') or 'base'}",
+            "input": sync_input,
+            "reference_documents": [],
+            "project_context": [
+                {
+                    "path": path,
+                    "content": self._resolve_project_path(path).read_text(encoding="utf-8")
+                    if self._resolve_project_path(path).is_file()
+                    else "",
+                }
+                for path in SETTING_DOC_PATHS.values()
+            ],
+        }
+        try:
+            result = self.runner.run(step_spec, self.project_root, prompt_bundle)
+        except Exception as exc:
+            logger.warning("setting doc llm sync failed: %s", exc)
+            return {}
+        if not result.success or not isinstance(result.structured_output, dict):
+            return {}
+        return {
+            "worldview": str(result.structured_output.get("worldview") or "").strip(),
+            "power_system": str(result.structured_output.get("power_system") or "").strip(),
+            "protagonist": str(result.structured_output.get("protagonist") or "").strip(),
+            "golden_finger": str(result.structured_output.get("golden_finger") or "").strip(),
+        }
+
+    def _generate_setting_docs_deterministically(self, sync_input: Dict[str, Any]) -> Dict[str, str]:
+        project = sync_input.get("project_info") or {}
+        profile = sync_input.get("planning_profile") or {}
+        protagonist_state = sync_input.get("protagonist_state") or {}
+        golden_finger = sync_input.get("golden_finger") or {}
+        world_settings = sync_input.get("world_settings") or {}
+        plan_payload = sync_input.get("plan_payload") or {}
+        chapter_meta = sync_input.get("chapter_meta") or {}
+        structured_sync = sync_input.get("structured_sync") or {}
+        chapter_rows = sync_input.get("chapter_rows") or []
+        review_metrics = sync_input.get("review_metrics") or []
+
+        worldview_lines = [
+            "# 世界观",
+            "",
+            "## 项目概览",
+            f"- 书名：{project.get('title') or '待补充'}",
+            f"- 题材：{project.get('genre') or '待补充'}",
+            f"- 世界规模：{project.get('world_scale') or '待补充'}",
+            f"- 核心卖点：{project.get('core_selling_points') or '待补充'}",
+            "",
+            "## 城市与异常环境",
+            self._bullet_block(world_settings.get("locations"), empty_text="待补充"),
+            "",
+            "## 势力与规则",
+            self._bullet_block(world_settings.get("factions"), empty_text="待补充"),
+            "",
+            "## 卷规划沉淀",
+            f"- 最新卷：{((sync_input.get('planning_profile') or {}).get('volume_1_title') or ((plan_payload.get('volume_plan') or {}).get('title')) or '待补充')}",
+            f"- 卷冲突：{profile.get('volume_1_conflict') or self._summarize_volume_plan(plan_payload) or '待补充'}",
+            f"- 卷高潮：{profile.get('volume_1_climax') or '待补充'}",
+        ]
+
+        power_lines = [
+            "# 力量体系",
+            "",
+            "## 能力主轴",
+            f"- 体系类型：{project.get('power_system_type') or '待补充'}",
+            f"- 金手指：{golden_finger.get('name') or project.get('golden_finger_name') or '待补充'}",
+            f"- 类型：{project.get('golden_finger_type') or '待补充'}",
+            "",
+            "## 规则与代价",
+            f"- 公开可见度：{project.get('gf_visibility') or '待补充'}",
+            f"- 不可逆代价：{project.get('gf_irreversible_cost') or '待补充'}",
+            f"- 风格定位：{project.get('golden_finger_style') or '待补充'}",
+            "",
+            "## 已沉淀规则",
+            self._bullet_block(world_settings.get("power_system"), empty_text="待补充"),
+        ]
+
+        protagonist_lines = [
+            "# 主角卡",
+            "",
+            "## 基础信息",
+            f"- 姓名：{protagonist_state.get('name') or profile.get('protagonist_name') or '待补充'}",
+            f"- 身份：{profile.get('protagonist_identity') or '待补充'}",
+            f"- 初始状态：{profile.get('protagonist_initial_state') or '待补充'}",
+            "",
+            "## 动机与缺陷",
+            f"- 欲望：{profile.get('protagonist_desire') or project.get('protagonist_desire') or '待补充'}",
+            f"- 缺陷：{profile.get('protagonist_flaw') or '待补充'}",
+            f"- 原型：{profile.get('protagonist_archetype') or '待补充'}",
+            "",
+            "## 近期章节体现",
+            self._render_recent_chapter_notes(chapter_rows, review_metrics, chapter_meta),
+        ]
+
+        gf_lines = [
+            "# 金手指设计",
+            "",
+            "## 核心定义",
+            f"- 名称：{golden_finger.get('name') or project.get('golden_finger_name') or '待补充'}",
+            f"- 类型：{project.get('golden_finger_type') or '待补充'}",
+            f"- 当前等级：{golden_finger.get('level') if golden_finger.get('level') is not None else '待补充'}",
+            "",
+            "## 触发与限制",
+            f"- 冷却：{golden_finger.get('cooldown') if golden_finger.get('cooldown') is not None else '待补充'}",
+            f"- 技能清单：{self._inline_join(golden_finger.get('skills')) or '待补充'}",
+            f"- 不可逆代价：{project.get('gf_irreversible_cost') or '待补充'}",
+            "",
+            "## 最近结构化补充",
+            self._render_structured_sync_notes(structured_sync),
+        ]
+
+        return {
+            "worldview": "\n".join(worldview_lines).strip(),
+            "power_system": "\n".join(power_lines).strip(),
+            "protagonist": "\n".join(protagonist_lines).strip(),
+            "golden_finger": "\n".join(gf_lines).strip(),
+        }
+
+    def _merge_setting_doc_content(self, existing: str, generated: str) -> str:
+        existing_text = str(existing or "").strip()
+        generated_text = str(generated or "").strip()
+        if not existing_text:
+            return generated_text
+        if self._looks_like_template_doc(existing_text):
+            return generated_text
+        existing_sections = self._split_markdown_sections(existing_text)
+        generated_sections = self._split_markdown_sections(generated_text)
+        if not existing_sections or not generated_sections:
+            return generated_text
+        title, body = generated_sections[0]
+        merged: List[str] = [f"{title}\n{body}".strip()]
+        existing_map = {title: body for title, body in existing_sections[1:]}
+        generated_titles = {title for title, _ in generated_sections[1:]}
+        for title, body in generated_sections[1:]:
+            merged.append(f"## {title}\n{body}".strip())
+        for title, body in existing_sections[1:]:
+            if title not in generated_titles and body.strip():
+                merged.append(f"## {title}\n{body}".strip())
+        return "\n\n".join(block.strip() for block in merged if block.strip())
+
+    def _looks_like_template_doc(self, content: str) -> bool:
+        normalized = content.strip()
+        if not normalized:
+            return True
+        template_signals = ("待补充", "（待填写）", "（待补）", "暂无内容", "TODO")
+        section_count = normalized.count("## ")
+        signal_count = sum(normalized.count(token) for token in template_signals)
+        return section_count > 0 and signal_count >= max(2, section_count // 2)
+
+    def _split_markdown_sections(self, text: str) -> List[tuple[str, str]]:
+        stripped = text.strip()
+        if not stripped:
+            return []
+        parts = re.split(r"^##\s+", stripped, flags=re.MULTILINE)
+        sections: List[tuple[str, str]] = []
+        title_line, _, body = parts[0].partition("\n")
+        sections.append((title_line.strip(), body.strip()))
+        for part in parts[1:]:
+            title, _, section_body = part.partition("\n")
+            sections.append((title.strip(), section_body.strip()))
+        return sections
+
+    def _bullet_block(self, items: Any, *, empty_text: str) -> str:
+        normalized_items: List[str] = []
+        for item in items or []:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                summary = str(item.get("summary") or "").strip()
+                if name and summary:
+                    normalized_items.append(f"- {name}：{summary}")
+                elif name:
+                    normalized_items.append(f"- {name}")
+            elif str(item).strip():
+                normalized_items.append(f"- {str(item).strip()}")
+        return "\n".join(normalized_items) if normalized_items else f"- {empty_text}"
+
+    def _inline_join(self, items: Any) -> str:
+        if not isinstance(items, list):
+            return ""
+        values = [str(item).strip() for item in items if str(item).strip()]
+        return "；".join(values)
+
+    def _render_recent_chapter_notes(
+        self,
+        chapter_rows: List[Dict[str, Any]],
+        review_metrics: List[Dict[str, Any]],
+        chapter_meta: Dict[str, Any],
+    ) -> str:
+        blocks: List[str] = []
+        if chapter_meta:
+            title = str(chapter_meta.get("title") or "").strip() or "当前章节"
+            location = str(chapter_meta.get("location") or "").strip() or "待补充"
+            characters = self._inline_join(chapter_meta.get("characters")) or "待补充"
+            blocks.append(f"- 最近章节标题：{title}")
+            blocks.append(f"- 最近章节地点：{location}")
+            blocks.append(f"- 最近涉及角色：{characters}")
+        if chapter_rows:
+            latest = chapter_rows[0]
+            blocks.append(f"- 当前最新章节：第{latest.get('chapter')}章，标题《{latest.get('title') or '未命名'}》")
+        if review_metrics:
+            latest_metric = review_metrics[0]
+            blocks.append(f"- 最近审查分：{latest_metric.get('overall_score') or 0}")
+        return "\n".join(blocks) if blocks else "- 待补充"
+
+    def _render_structured_sync_notes(self, structured_sync: Dict[str, Any]) -> str:
+        if not structured_sync:
+            return "- 待补充"
+        summary = structured_sync.get("summary") or {}
+        warnings = structured_sync.get("warnings") or []
+        lines = [
+            f"- 结构化实体：{summary.get('entity_records') or 0}",
+            f"- 结构化关系：{summary.get('relationship_records') or 0}",
+            f"- 世界设定项：{summary.get('world_setting_records') or 0}",
+        ]
+        if warnings:
+            lines.append(f"- 待确认项：{'；'.join(str(item) for item in warnings[:5])}")
+        return "\n".join(lines)
 
     def _load_workflow(self, task_type: str) -> Dict[str, Any]:
         path = self.spec_dir / f"{task_type}.json"

@@ -1,4 +1,6 @@
 const BASE = ''
+const DEFAULT_REQUEST_TIMEOUT_MS = 20000
+const STATUS_REQUEST_TIMEOUT_MS = 8000
 
 const CODE_MESSAGE_MAP = {
     CONFLICT: '当前操作与现有数据冲突，请调整后重试。',
@@ -15,10 +17,13 @@ const CODE_MESSAGE_MAP = {
     INTERNAL_ERROR: '服务器内部错误，请稍后重试。',
     PROJECT_BOOTSTRAP_FAILED: '项目初始化失败。',
     PROJECT_BOOTSTRAP_INCOMPLETE: '项目初始化未完成，未生成必要文件。',
-    LLM_NOT_CONFIGURED: '写作模型尚未配置完整。',
-    LLM_HTTP_ERROR: '写作模型接口请求失败。',
-    LLM_REQUEST_FAILED: '写作模型接口连接失败。',
-    LLM_RESPONSE_INVALID: '写作模型返回的数据格式无效。',
+    LLM_NOT_CONFIGURED: '写作引擎尚未完成配置。',
+    LLM_HTTP_ERROR: '写作引擎接口请求失败。',
+    LLM_REQUEST_FAILED: '写作引擎接口连接失败。',
+    LLM_RESPONSE_INVALID: '写作引擎返回的数据格式无效。',
+    LLM_TIMEOUT: '写作引擎请求超时。',
+    LLM_CONNECTION_ERROR: '写作引擎接口连接失败。',
+    LLM_INVALID_RESPONSE: '写作引擎返回的数据格式无效。',
     CODEX_CLI_NOT_FOUND: '未找到 Codex CLI 可执行文件。',
     CODEX_AUTH_REQUIRED: 'Codex CLI 尚未登录。',
     CODEX_TIMEOUT: 'Codex 步骤执行超时。',
@@ -61,12 +66,6 @@ const STATUS_CODE_MAP = {
     503: 'SERVICE_UNAVAILABLE',
     504: 'REQUEST_TIMEOUT',
 }
-
-Object.assign(CODE_MESSAGE_MAP, {
-    LLM_TIMEOUT: '写作模型请求超时。',
-    LLM_CONNECTION_ERROR: '写作模型接口连接失败。',
-    LLM_INVALID_RESPONSE: '写作模型返回的数据格式无效。',
-})
 
 class AppError extends Error {
     constructor({
@@ -164,13 +163,23 @@ function buildApiError(path, statusCode, payload, text) {
     })
 }
 
+function inferTimeoutMs(path, timeoutMs) {
+    if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        return timeoutMs
+    }
+    if (path === '/api/llm/status' || path === '/api/rag/status') {
+        return STATUS_REQUEST_TIMEOUT_MS
+    }
+    return DEFAULT_REQUEST_TIMEOUT_MS
+}
+
 export function normalizeError(error) {
     if (error instanceof AppError) return error
     if (error?.name === 'AbortError') {
         return new AppError({
             displayMessage: CODE_MESSAGE_MAP.REQUEST_TIMEOUT,
             code: 'REQUEST_TIMEOUT',
-            rawMessage: '请求已中断。',
+            rawMessage: '请求已中止。',
         })
     }
     if (error && typeof error === 'object') {
@@ -210,7 +219,9 @@ export function normalizeError(error) {
 }
 
 export async function requestJSON(path, options = {}) {
-    const { params, body, method = 'GET' } = options
+    const { params, body, method = 'GET', timeoutMs } = options
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), inferTimeoutMs(path, timeoutMs))
 
     let response
     try {
@@ -221,14 +232,20 @@ export async function requestJSON(path, options = {}) {
                 ...(body ? { 'Content-Type': 'application/json' } : {}),
             },
             body: body ? JSON.stringify(body) : undefined,
+            signal: controller.signal,
         })
     } catch (error) {
+        if (error?.name === 'AbortError') {
+            throw normalizeError(error)
+        }
         throw new AppError({
             displayMessage: CODE_MESSAGE_MAP.NETWORK_ERROR,
             code: 'NETWORK_ERROR',
             rawMessage: error instanceof Error ? error.message : String(error || ''),
             details: { path },
         })
+    } finally {
+        window.clearTimeout(timer)
     }
 
     const contentType = response.headers.get('content-type') || ''
@@ -259,12 +276,12 @@ export async function requestJSON(path, options = {}) {
     }
 }
 
-export function fetchJSON(path, params = {}) {
-    return requestJSON(path, { params, method: 'GET' })
+export function fetchJSON(path, params = {}, options = {}) {
+    return requestJSON(path, { ...options, params, method: 'GET' })
 }
 
-export function postJSON(path, body = {}) {
-    return requestJSON(path, { method: 'POST', body })
+export function postJSON(path, body = {}, options = {}) {
+    return requestJSON(path, { ...options, method: 'POST', body })
 }
 
 export function subscribeSSE(onMessage, handlers = {}) {

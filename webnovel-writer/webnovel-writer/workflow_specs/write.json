@@ -3,6 +3,42 @@
   "version": 1,
   "steps": [
     {
+      "name": "chapter-director",
+      "type": "internal",
+      "required_output_keys": [
+        "chapter",
+        "chapter_goal",
+        "primary_conflict",
+        "must_advance_threads",
+        "payoff_targets",
+        "setup_targets",
+        "must_use_entities",
+        "relationship_moves",
+        "knowledge_reveals",
+        "forbidden_resolutions",
+        "ending_hook_target",
+        "tempo",
+        "review_focus",
+        "rationale"
+      ],
+      "output_schema": {
+        "chapter": 1,
+        "chapter_goal": "string",
+        "primary_conflict": "string",
+        "must_advance_threads": [],
+        "payoff_targets": [],
+        "setup_targets": [],
+        "must_use_entities": [],
+        "relationship_moves": [],
+        "knowledge_reveals": [],
+        "forbidden_resolutions": [],
+        "ending_hook_target": "string",
+        "tempo": "string",
+        "review_focus": [],
+        "rationale": "string"
+      }
+    },
+    {
       "name": "context",
       "type": "codex",
       "template": "write-context.md",
@@ -12,11 +48,13 @@
         "references/reading-power-taxonomy.md"
       ],
       "required_output_keys": [
+        "director_brief",
         "task_brief",
         "contract_v2",
         "draft_prompt"
       ],
       "output_schema": {
+        "director_brief": {},
         "task_brief": {},
         "contract_v2": {},
         "draft_prompt": "string"
@@ -36,7 +74,7 @@
         "word_count"
       ],
       "output_schema": {
-        "chapter_file": "正文/第0001章.md",
+        "chapter_file": "正文/当前请求章节正文.md",
         "content": "string",
         "word_count": 0
       }
@@ -132,7 +170,7 @@
         "change_summary"
       ],
       "output_schema": {
-        "chapter_file": "正文/第0001章.md",
+        "chapter_file": "正文/当前请求章节正文.md",
         "content": "string",
         "anti_ai_force_check": "pass",
         "change_summary": []
@@ -157,7 +195,7 @@
       ],
       "output_schema": {
         "files_written": [],
-        "summary_file": ".webnovel/summaries/ch0001.md",
+        "summary_file": ".webnovel/summaries/当前请求章节摘要.md",
         "state_updated": true,
         "index_updated": true,
         "chapter_meta": {
@@ -196,7 +234,55 @@
         "entities_appeared": [],
         "relationships_new": [],
         "state_changes": [],
-        "uncertain": []
+        "uncertain": [],
+        "foreshadowing_items": [
+          {
+            "name": "string",
+            "content": "string",
+            "planted_chapter": 0,
+            "planned_payoff_chapter": 0,
+            "status": "active|paid_off",
+            "importance": "low|medium|high|critical",
+            "owner_entity": "string",
+            "payoff_note": "string"
+          }
+        ],
+        "timeline_events": [
+          {
+            "chapter": 0,
+            "scene_index": 0,
+            "event_time_label": "string",
+            "location": "string",
+            "summary": "string",
+            "participants": [
+              "string"
+            ],
+            "objective_fact": true
+          }
+        ],
+        "character_arcs": [
+          {
+            "entity_id": "string",
+            "chapter": 0,
+            "desire": "string",
+            "fear": "string",
+            "misbelief": "string",
+            "arc_stage": "string",
+            "relationship_state": {},
+            "notes": "string"
+          }
+        ],
+        "knowledge_states": [
+          {
+            "entity_id": "string",
+            "chapter": 0,
+            "topic": "string",
+            "belief": "string",
+            "truth_status": "unknown|true|false|partial",
+            "confidence": 1.0,
+            "evidence": "string"
+          }
+        ]
       }
     }
   ]

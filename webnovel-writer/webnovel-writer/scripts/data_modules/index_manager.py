@@ -50,6 +50,12 @@ from .index_entity_mixin import IndexEntityMixin
 from .index_debt_mixin import IndexDebtMixin
 from .index_reading_mixin import IndexReadingMixin
 from .index_observability_mixin import IndexObservabilityMixin
+from .narrative_models import (
+    CharacterArcMeta,
+    ForeshadowingItemMeta,
+    KnowledgeStateMeta,
+    TimelineEventMeta,
+)
 from .observability import safe_append_perf_timing, safe_log_tool_call
 
 
@@ -629,6 +635,97 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                 "CREATE INDEX IF NOT EXISTS idx_checklist_score_value ON writing_checklist_scores(score)"
             )
 
+            # ==================== v5.6 新增表：叙事状态追踪 ====================
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS foreshadowing_items (
+                    name TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    planted_chapter INTEGER NOT NULL,
+                    planned_payoff_chapter INTEGER DEFAULT 0,
+                    payoff_chapter INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
+                    importance TEXT DEFAULT 'medium',
+                    owner_entity TEXT DEFAULT '',
+                    payoff_note TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_foreshadowing_status_chapter ON foreshadowing_items(status, planted_chapter)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_foreshadowing_owner ON foreshadowing_items(owner_entity)"
+            )
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS timeline_events (
+                    id INTEGER PRIMARY KEY,
+                    chapter INTEGER NOT NULL,
+                    scene_index INTEGER DEFAULT 0,
+                    event_time_label TEXT DEFAULT '',
+                    location TEXT DEFAULT '',
+                    summary TEXT NOT NULL,
+                    participants TEXT,
+                    objective_fact BOOLEAN DEFAULT 1,
+                    source TEXT DEFAULT 'data-sync',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_timeline_chapter_scene ON timeline_events(chapter, scene_index)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_timeline_location ON timeline_events(location)"
+            )
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS character_arcs (
+                    entity_id TEXT NOT NULL,
+                    chapter INTEGER NOT NULL,
+                    desire TEXT DEFAULT '',
+                    fear TEXT DEFAULT '',
+                    misbelief TEXT DEFAULT '',
+                    arc_stage TEXT DEFAULT '',
+                    relationship_state_json TEXT,
+                    notes TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (entity_id, chapter)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_character_arcs_entity ON character_arcs(entity_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_character_arcs_chapter ON character_arcs(chapter)"
+            )
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_states (
+                    entity_id TEXT NOT NULL,
+                    chapter INTEGER NOT NULL,
+                    topic TEXT NOT NULL,
+                    belief TEXT NOT NULL,
+                    truth_status TEXT DEFAULT 'unknown',
+                    confidence REAL DEFAULT 1.0,
+                    evidence TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (entity_id, chapter, topic)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_entity_topic ON knowledge_states(entity_id, topic)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_chapter ON knowledge_states(chapter)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_truth_status ON knowledge_states(truth_status)"
+            )
+
             conn.commit()
 
     @contextmanager
@@ -663,6 +760,414 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
             self.close()
         except Exception:
             pass
+
+    def upsert_foreshadowing_item(self, item: ForeshadowingItemMeta) -> bool:
+        """插入或更新伏笔条目。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO foreshadowing_items (
+                    name, content, planted_chapter, planned_payoff_chapter,
+                    payoff_chapter, status, importance, owner_entity, payoff_note
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    content = excluded.content,
+                    planted_chapter = excluded.planted_chapter,
+                    planned_payoff_chapter = excluded.planned_payoff_chapter,
+                    payoff_chapter = excluded.payoff_chapter,
+                    status = excluded.status,
+                    importance = excluded.importance,
+                    owner_entity = excluded.owner_entity,
+                    payoff_note = excluded.payoff_note,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                (
+                    item.name,
+                    item.content,
+                    item.planted_chapter,
+                    item.planned_payoff_chapter,
+                    item.payoff_chapter,
+                    item.status,
+                    item.importance,
+                    item.owner_entity,
+                    item.payoff_note,
+                ),
+            )
+            conn.commit()
+            return True
+
+    def list_active_foreshadowing_items(
+        self,
+        before_chapter: Optional[int] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """获取当前仍有效的伏笔条目。"""
+        sql = """
+            SELECT * FROM foreshadowing_items
+            WHERE status = 'active'
+        """
+        params: List[Any] = []
+        if before_chapter is not None:
+            sql += " AND planted_chapter <= ?"
+            params.append(before_chapter)
+        sql += """
+            ORDER BY
+                CASE importance
+                    WHEN 'critical' THEN 4
+                    WHEN 'high' THEN 3
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 1
+                    ELSE 0
+                END DESC,
+                CASE
+                    WHEN planned_payoff_chapter > 0 THEN planned_payoff_chapter
+                    ELSE 999999
+                END ASC,
+                planted_chapter DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def mark_foreshadowing_paid_off(
+        self,
+        name: str,
+        chapter: int,
+        payoff_note: str = "",
+    ) -> bool:
+        """将伏笔标记为已兑现。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE foreshadowing_items
+                SET status = 'paid_off',
+                    payoff_chapter = ?,
+                    payoff_note = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE name = ?
+            """,
+                (chapter, payoff_note, name),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def record_timeline_event(self, event: TimelineEventMeta) -> int:
+        """记录时间线事件。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO timeline_events (
+                    chapter, scene_index, event_time_label, location,
+                    summary, participants, objective_fact, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    event.chapter,
+                    event.scene_index,
+                    event.event_time_label,
+                    event.location,
+                    event.summary,
+                    json.dumps(event.participants, ensure_ascii=False),
+                    1 if event.objective_fact else 0,
+                    event.source,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def get_recent_timeline_events(
+        self,
+        chapter: Optional[int] = None,
+        window: int = 5,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """获取最近时间窗内的时间线事件。"""
+        sql = """
+            SELECT * FROM timeline_events
+        """
+        params: List[Any] = []
+        if chapter is not None:
+            start_chapter = max(0, chapter - max(window, 1) + 1)
+            sql += " WHERE chapter <= ? AND chapter >= ?"
+            params.extend([chapter, start_chapter])
+        sql += " ORDER BY chapter DESC, scene_index DESC, id DESC LIMIT ?"
+        params.append(limit)
+
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            rows = []
+            for row in cursor.fetchall():
+                data = self._row_to_dict(row, parse_json=["participants"])
+                data["objective_fact"] = bool(data.get("objective_fact", 0))
+                rows.append(data)
+            return rows
+
+    def save_character_arc(self, arc: CharacterArcMeta) -> bool:
+        """插入或更新角色弧线快照。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO character_arcs (
+                    entity_id, chapter, desire, fear, misbelief,
+                    arc_stage, relationship_state_json, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_id, chapter) DO UPDATE SET
+                    desire = excluded.desire,
+                    fear = excluded.fear,
+                    misbelief = excluded.misbelief,
+                    arc_stage = excluded.arc_stage,
+                    relationship_state_json = excluded.relationship_state_json,
+                    notes = excluded.notes,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                (
+                    arc.entity_id,
+                    arc.chapter,
+                    arc.desire,
+                    arc.fear,
+                    arc.misbelief,
+                    arc.arc_stage,
+                    json.dumps(arc.relationship_state, ensure_ascii=False),
+                    arc.notes,
+                ),
+            )
+            conn.commit()
+            return True
+
+    def get_latest_character_arcs(
+        self,
+        chapter: Optional[int] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """获取每个角色截至指定章节的最新弧线状态。"""
+        latest_sql = """
+            SELECT entity_id, MAX(chapter) AS max_chapter
+            FROM character_arcs
+        """
+        params: List[Any] = []
+        if chapter is not None:
+            latest_sql += " WHERE chapter <= ?"
+            params.append(chapter)
+        latest_sql += " GROUP BY entity_id"
+
+        sql = f"""
+            SELECT
+                ca.*,
+                e.canonical_name,
+                e.tier,
+                e.is_protagonist
+            FROM character_arcs ca
+            INNER JOIN ({latest_sql}) latest
+                ON latest.entity_id = ca.entity_id
+               AND latest.max_chapter = ca.chapter
+            LEFT JOIN entities e ON e.id = ca.entity_id
+            ORDER BY
+                COALESCE(e.is_protagonist, 0) DESC,
+                CASE COALESCE(e.tier, '')
+                    WHEN '核心' THEN 0
+                    WHEN '重要' THEN 1
+                    ELSE 2
+                END ASC,
+                ca.chapter DESC,
+                ca.entity_id ASC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            return [
+                self._row_to_dict(row, parse_json=["relationship_state_json"])
+                for row in cursor.fetchall()
+            ]
+
+    def get_core_character_arcs(
+        self,
+        chapter: Optional[int] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """获取核心角色截至指定章节的最新弧线。"""
+        rows = self.get_latest_character_arcs(chapter=chapter, limit=max(limit * 3, limit))
+        results = []
+        for row in rows:
+            if row.get("is_protagonist") or row.get("tier") in {"核心", "重要"}:
+                results.append(row)
+            if len(results) >= limit:
+                break
+        return results
+
+    def get_character_arc_timeline(
+        self,
+        entity_id: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """获取单个角色的弧线时间线。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM character_arcs
+                WHERE entity_id = ?
+                ORDER BY chapter DESC
+                LIMIT ?
+            """,
+                (entity_id, limit),
+            )
+            return [
+                self._row_to_dict(row, parse_json=["relationship_state_json"])
+                for row in cursor.fetchall()
+            ]
+
+    def save_knowledge_state(self, state: KnowledgeStateMeta) -> bool:
+        """插入或更新认知状态。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO knowledge_states (
+                    entity_id, chapter, topic, belief, truth_status,
+                    confidence, evidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_id, chapter, topic) DO UPDATE SET
+                    belief = excluded.belief,
+                    truth_status = excluded.truth_status,
+                    confidence = excluded.confidence,
+                    evidence = excluded.evidence,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                (
+                    state.entity_id,
+                    state.chapter,
+                    state.topic,
+                    state.belief,
+                    state.truth_status,
+                    state.confidence,
+                    state.evidence,
+                ),
+            )
+            conn.commit()
+            return True
+
+    def get_entity_knowledge_states(
+        self,
+        entity_id: Optional[str] = None,
+        chapter: Optional[int] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """获取角色认知状态。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            if entity_id:
+                latest_sql = """
+                    SELECT topic, MAX(chapter) AS max_chapter
+                    FROM knowledge_states
+                    WHERE entity_id = ?
+                """
+                params: List[Any] = [entity_id]
+                if chapter is not None:
+                    latest_sql += " AND chapter <= ?"
+                    params.append(chapter)
+                latest_sql += " GROUP BY topic"
+                sql = f"""
+                    SELECT ks.*
+                    FROM knowledge_states ks
+                    INNER JOIN ({latest_sql}) latest
+                        ON latest.topic = ks.topic
+                       AND latest.max_chapter = ks.chapter
+                    WHERE ks.entity_id = ?
+                    ORDER BY ks.chapter DESC, ks.topic ASC
+                    LIMIT ?
+                """
+                params.extend([entity_id, limit])
+                cursor.execute(sql, params)
+            else:
+                sql = "SELECT * FROM knowledge_states"
+                params = []
+                if chapter is not None:
+                    sql += " WHERE chapter <= ?"
+                    params.append(chapter)
+                sql += " ORDER BY chapter DESC, entity_id ASC, topic ASC LIMIT ?"
+                params.append(limit)
+                cursor.execute(sql, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_knowledge_conflicts(
+        self,
+        chapter: Optional[int] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """获取认知冲突与已知谬误。"""
+        latest_sql = """
+            SELECT entity_id, topic, MAX(chapter) AS max_chapter
+            FROM knowledge_states
+        """
+        params: List[Any] = []
+        if chapter is not None:
+            latest_sql += " WHERE chapter <= ?"
+            params.append(chapter)
+        latest_sql += " GROUP BY entity_id, topic"
+
+        sql = f"""
+            SELECT ks.*
+            FROM knowledge_states ks
+            INNER JOIN ({latest_sql}) latest
+                ON latest.entity_id = ks.entity_id
+               AND latest.topic = ks.topic
+               AND latest.max_chapter = ks.chapter
+            ORDER BY ks.topic ASC, ks.chapter DESC, ks.entity_id ASC
+        """
+
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            topic_groups: Dict[str, List[Dict[str, Any]]] = {}
+            for row in cursor.fetchall():
+                data = dict(row)
+                topic_groups.setdefault(data["topic"], []).append(data)
+
+        conflicts: List[Dict[str, Any]] = []
+        for topic, entries in topic_groups.items():
+            normalized_beliefs = {
+                (entry.get("belief") or "").strip()
+                for entry in entries
+                if (entry.get("belief") or "").strip()
+            }
+            has_falsehood = any(
+                entry.get("truth_status") in {"false", "partial"}
+                for entry in entries
+            )
+            if len(normalized_beliefs) <= 1 and not has_falsehood:
+                continue
+            conflicts.append(
+                {
+                    "topic": topic,
+                    "beliefs": entries,
+                    "distinct_beliefs": sorted(normalized_beliefs),
+                    "entity_count": len(entries),
+                    "has_falsehood": has_falsehood,
+                    "latest_chapter": max(entry.get("chapter", 0) for entry in entries),
+                }
+            )
+
+        conflicts.sort(
+            key=lambda item: (
+                0 if item["has_falsehood"] else 1,
+                -len(item["distinct_beliefs"]),
+                -item["latest_chapter"],
+                item["topic"],
+            )
+        )
+        return conflicts[:limit]
 
     # ==================== 章节操作 ====================
 

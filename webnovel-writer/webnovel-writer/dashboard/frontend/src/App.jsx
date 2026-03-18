@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, subscribeSSE } from './api.js'
 import {
     ApiSettingsSection,
@@ -26,11 +26,11 @@ const MODE_OPTIONS = [
 ]
 
 const TASK_TEMPLATES = [
-    { key: 'init', title: '\u5206\u6790\u73b0\u6709\u9879\u76ee', fields: ['project_root'] },
+    { key: 'init', title: '\u8865\u79cd\u9879\u76ee\u9aa8\u67b6\uff08\u65e7\u5165\u53e3\uff09', fields: ['project_root'] },
     { key: 'plan', title: '\u89c4\u5212\u5377', fields: ['volume', 'mode'] },
     { key: 'write', title: '\u64b0\u5199\u7ae0\u8282', fields: ['chapter', 'mode', 'require_manual_approval'] },
     { key: 'review', title: '\u6267\u884c\u5ba1\u67e5', fields: ['chapter_range', 'mode'] },
-    { key: 'resume', title: '\u6062\u590d\u6d41\u7a0b', fields: ['mode'] },
+    { key: 'resume', title: '\u6062\u590d\u4efb\u52a1', fields: ['mode'] },
 ]
 
 const PROJECT_BOOTSTRAP_TEMPLATE = {
@@ -42,11 +42,11 @@ const PROJECT_BOOTSTRAP_TEMPLATE = {
 }
 
 const TASK_TYPE_LABELS = {
-    init: '\u521d\u59cb\u5316',
-    plan: '\u89c4\u5212',
-    write: '\u5199\u4f5c',
-    review: '\u5ba1\u67e5',
-    resume: '\u6062\u590d',
+    init: '\u65e7\u521d\u59cb\u5316',
+    plan: '\u89c4\u5212\u5377',
+    write: '\u64b0\u5199\u7ae0\u8282',
+    review: '\u6267\u884c\u5ba1\u67e5',
+    resume: '\u6062\u590d\u4efb\u52a1',
 }
 
 const STATUS_LABELS = {
@@ -61,7 +61,7 @@ const STATUS_LABELS = {
 
 const APPROVAL_STATUS_LABELS = {
     not_required: '\u65e0\u9700\u5ba1\u6279',
-    pending: '\u5f85\u5ba1\u6279',
+    pending: '\u5f85\u6279\u51c6\u56de\u5199',
     approved: '\u5df2\u6279\u51c6',
     rejected: '\u5df2\u62d2\u7edd',
 }
@@ -89,12 +89,16 @@ const EVENT_LEVEL_LABELS = {
 }
 
 const TABLE_HEADER_LABELS = {
+    name: '\u540d\u79f0',
     canonical_name: '\u6807\u51c6\u540d\u79f0',
     type: '\u7c7b\u578b',
     tier: '\u5c42\u7ea7',
     last_appearance: '\u6700\u540e\u51fa\u73b0\u7ae0\u8282',
     from_entity: '\u8d77\u59cb\u5b9e\u4f53',
     to_entity: '\u76ee\u6807\u5b9e\u4f53',
+    from_entity_display: '\u8d77\u59cb\u5b9e\u4f53',
+    to_entity_display: '\u76ee\u6807\u5b9e\u4f53',
+    type_label: '\u5173\u7cfb\u7c7b\u578b',
     chapter: '\u7ae0\u8282',
     title: '\u6807\u9898',
     location: '\u5730\u70b9',
@@ -114,6 +118,25 @@ const TABLE_HEADER_LABELS = {
     retry_count: '\u91cd\u8bd5\u6b21\u6570',
     source_type: '\u6765\u6e90\u7c7b\u578b',
     source_id: '\u6765\u6e90 ID',
+    from_entity_name: '\u8d77\u59cb\u5b9e\u4f53',
+    to_entity_name: '\u76ee\u6807\u5b9e\u4f53',
+    target_label: '\u4efb\u52a1\u76ee\u6807',
+}
+
+const RELATIONSHIP_TYPE_LABELS = {
+    family: '\u5bb6\u5ead',
+    ally: '\u540c\u76df',
+    enemy: '\u654c\u5bf9',
+    mentor: '\u5e08\u53cb',
+    subordinate: '\u4e0a\u4e0b\u7ea7',
+    colleague: '\u540c\u4e8b',
+    suspect: '\u5acc\u7591',
+    investigating: '\u8c03\u67e5',
+    conflict: '\u51b2\u7a81',
+    owes: '\u6b20\u8d26',
+    protects: '\u4fdd\u62a4',
+    watches: '\u76d1\u89c6',
+    warned_by: '\u9884\u8b66\u6765\u6e90',
 }
 
 const EXACT_EVENT_MESSAGES = {
@@ -126,7 +149,27 @@ const EXACT_EVENT_MESSAGES = {
     'Review summary persisted': '\u5ba1\u67e5\u6c47\u603b\u5df2\u5199\u5165',
     'Review gate blocked execution': '\u5ba1\u67e5\u95f8\u95e8\u963b\u6b62\u7ee7\u7eed\u6267\u884c',
     'Waiting for writeback approval': '\u7b49\u5f85\u56de\u5199\u5ba1\u6279',
+    'Write target normalized': '\u5df2\u6309\u4efb\u52a1\u7ae0\u8282\u53f7\u7ea0\u6b63\u5199\u56de\u76ee\u6807',
+    'Data sync completed': '\u5199\u56de\u540c\u6b65\u5b8c\u6210',
+    'Data sync payload enriched': '\u5df2\u8865\u9f50\u5199\u56de\u6240\u9700\u7684\u7ed3\u6784\u5316\u4fe1\u606f',
+    'Plan writeback completed': '\u5377\u89c4\u5212\u5199\u56de\u5b8c\u6210',
+    'Core setting docs synced': '\u6838\u5fc3\u8bbe\u5b9a\u96c6\u5df2\u66f4\u65b0',
+    'Chapter body written': '\u6b63\u6587\u5df2\u5199\u5165',
+    'Step writeback failed': '\u6b65\u9aa4\u5199\u56de\u5931\u8d25',
+    'Resume target resolved': '\u5df2\u786e\u5b9a\u9700\u8981\u6062\u590d\u7684\u4efb\u52a1',
+    'Resume target scheduled': '\u5df2\u91cd\u65b0\u6392\u5165\u6062\u590d\u961f\u5217',
+    'Resume target already running': '\u76ee\u6807\u4efb\u52a1\u6b63\u5728\u8fd0\u884c\uff0c\u65e0\u9700\u91cd\u590d\u6062\u590d',
+    'Resume schedule failed': '\u6062\u590d\u6392\u7a0b\u5931\u8d25',
+    'Task scheduled for resume': '\u4efb\u52a1\u5df2\u51c6\u5907\u6062\u590d',
+    'Task auto-completed during resume recovery': '\u6062\u590d\u68c0\u67e5\u65f6\u68c0\u6d4b\u5230\u4efb\u52a1\u5df2\u5b8c\u6210',
+    'Resume target failed': '\u6062\u590d\u76ee\u6807\u6267\u884c\u5931\u8d25',
+    'Workflow spec not found': '\u672a\u627e\u5230\u5de5\u4f5c\u6d41\u5951\u7ea6',
+    'Workflow parse failed': '\u5de5\u4f5c\u6d41\u5951\u7ea6\u89e3\u6790\u5931\u8d25',
+    'Workflow config error': '\u5de5\u4f5c\u6d41\u914d\u7f6e\u6709\u8bef',
+    'Task execution failed': '\u4efb\u52a1\u6267\u884c\u5931\u8d25',
     plan_blocked: '\u89c4\u5212\u5f85\u8865\u4fe1\u606f',
+    writeback_rollback_started: '\u5f00\u59cb\u56de\u6eda\u5931\u8d25\u5199\u56de',
+    writeback_rollback_finished: '\u5931\u8d25\u5199\u56de\u5df2\u56de\u6eda',
 }
 
 Object.assign(EXACT_EVENT_MESSAGES, {
@@ -145,6 +188,27 @@ Object.assign(EXACT_EVENT_MESSAGES, {
     'json_extraction_recovered': '\u5df2\u4ece\u539f\u59cb\u8f93\u51fa\u4e2d\u6062\u590d JSON',
 })
 
+const UI_COPY = {
+    overviewPlanningTitle: '\u89c4\u5212\u5fc5\u586b\u4fe1\u606f',
+    projectCreateHint: '\u4ec5\u7528\u4e8e\u65b0\u7a7a\u76ee\u5f55\u521b\u5efa\u9879\u76ee\uff1b\u5982\u679c\u4f60\u662f\u4ece\u684c\u9762\u542f\u52a8\u5668\u8fdb\u5165\uff0c\u901a\u5e38\u4e0d\u7528\u518d\u70b9\u201c\u521b\u5efa\u9879\u76ee\u201d\u3002',
+    taskEntryHint: '\u4e3b\u94fe\u5efa\u8bae\u6309\u201c\u89c4\u5212\u5377 -> \u64b0\u5199\u7ae0\u8282 -> \u6267\u884c\u5ba1\u67e5 / \u6062\u590d\u4efb\u52a1\u201d\u4f7f\u7528\uff1b\u201c\u8865\u79cd\u9879\u76ee\u9aa8\u67b6\uff08\u65e7\u5165\u53e3\uff09\u201d\u53ea\u7528\u4e8e\u517c\u5bb9\u65e7\u9879\u76ee\u3002',
+    planningHint: '\u5148\u628a\u8fd9\u91cc\u7684\u89c4\u5212\u4fe1\u606f\u8865\u9f50\uff0c\u518d\u8fd0\u884c\u201c\u89c4\u5212\u5377\u201d\u3002\u5982\u679c\u4fe1\u606f\u4e0d\u8db3\uff0c\u7cfb\u7edf\u4f1a\u63d0\u793a\u4f60\u56de\u5230\u8fd9\u91cc\u7ee7\u7eed\u8865\u8d44\u6599\u3002',
+    planBlockedStatus: '\u5df2\u5b8c\u6210 / \u5f85\u8865\u8d44\u6599',
+    planBlockedStep: '\u5f85\u8865\u8d44\u6599',
+    approvalNotApplicable: '\u4e0d\u9002\u7528',
+    approvalNotRequired: '\u672c\u4efb\u52a1\u65e0\u9700\u4f60\u5904\u7406',
+    approvalNotReached: '\u5c1a\u672a\u8fdb\u5165\u5ba1\u6279',
+    approvalPending: '\u7b49\u4f60\u6279\u51c6\u56de\u5199',
+    approvalApproved: '\u5df2\u6279\u51c6',
+    approvalApprovedWritingBack: '\u4f60\u5df2\u6279\u51c6\uff0c\u7cfb\u7edf\u6b63\u5728\u5199\u56de',
+    approvalApprovedCompleted: '\u5df2\u6279\u51c6\uff0c\u5199\u56de\u5df2\u5b8c\u6210',
+    approvalRejected: '\u5df2\u62d2\u7edd\u56de\u5199',
+    unknownSystemEvent: '\u7cfb\u7edf\u4e8b\u4ef6',
+    unknownSystemEventWithDetail: '\u7cfb\u7edf\u4e8b\u4ef6\uff08\u8bf7\u67e5\u770b\u8be6\u60c5\u533a\uff09',
+    writingEngine: '\u5199\u4f5c\u5f15\u64ce',
+    retrievalEngine: '\u68c0\u7d22\u5f15\u64ce',
+}
+
 export default function App() {
     const [page, setPage] = useState('control')
     const [projectInfo, setProjectInfo] = useState(null)
@@ -154,35 +218,63 @@ export default function App() {
     const [selectedTaskId, setSelectedTaskId] = useState(null)
     const [refreshToken, setRefreshToken] = useState(0)
     const [connected, setConnected] = useState(false)
+    const refreshDebounceRef = useRef(null)
+    const lastStatusRefreshRef = useRef(0)
 
     useEffect(() => {
-        reloadAll()
+        reloadCore()
     }, [refreshToken])
 
     useEffect(() => {
+        reloadServiceStatus()
         const dispose = subscribeSSE(
-            () => setRefreshToken((value) => value + 1),
+            () => {
+                if (refreshDebounceRef.current) {
+                    window.clearTimeout(refreshDebounceRef.current)
+                }
+                refreshDebounceRef.current = window.setTimeout(() => {
+                    refreshDebounceRef.current = null
+                    setRefreshToken((value) => value + 1)
+                    if (Date.now() - lastStatusRefreshRef.current > 60000) {
+                        reloadServiceStatus()
+                    }
+                }, 250)
+            },
             {
                 onOpen: () => setConnected(true),
                 onError: () => setConnected(false),
             },
         )
+        const statusTimer = window.setInterval(() => {
+            reloadServiceStatus()
+        }, 60000)
         return () => {
             dispose()
+            window.clearInterval(statusTimer)
+            if (refreshDebounceRef.current) {
+                window.clearTimeout(refreshDebounceRef.current)
+                refreshDebounceRef.current = null
+            }
             setConnected(false)
         }
     }, [])
 
-    function reloadAll() {
+    function reloadCore() {
         fetchJSON('/api/project/info').then(setProjectInfo).catch(() => setProjectInfo(null))
-        fetchJSON('/api/llm/status').then(setLlmStatus).catch(() => setLlmStatus(null))
-        fetchJSON('/api/rag/status').then(setRagStatus).catch(() => setRagStatus(null))
         fetchJSON('/api/tasks').then((items) => {
             setTasks(items)
-            if (!selectedTaskId && items.length > 0) {
-                setSelectedTaskId(items[0].id)
-            }
+            setSelectedTaskId((currentId) => {
+                if (items.length === 0) return null
+                if (currentId && items.some((item) => item.id === currentId)) return currentId
+                return items[0].id
+            })
         }).catch(() => setTasks([]))
+    }
+
+    function reloadServiceStatus() {
+        lastStatusRefreshRef.current = Date.now()
+        fetchJSON('/api/llm/status').then(setLlmStatus).catch(() => setLlmStatus(null))
+        fetchJSON('/api/rag/status').then(setRagStatus).catch(() => setRagStatus(null))
     }
 
     const selectedTask = useMemo(() => tasks.find((item) => item.id === selectedTaskId) || null, [tasks, selectedTaskId])
@@ -222,6 +314,7 @@ export default function App() {
                         llmStatus={llmStatus}
                         ragStatus={ragStatus}
                         onTaskCreated={(task) => {
+                            setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
                             setSelectedTaskId(task.id)
                             setPage('tasks')
                             setRefreshToken((value) => value + 1)
@@ -268,25 +361,25 @@ function getWritingModelTone(llmStatus) {
 }
 
 function formatWritingModelPill(llmStatus) {
-    if (!llmStatus?.installed) return '\u672a\u914d\u7f6e\u53ef\u7528\u7684\u5199\u4f5c\u6a21\u578b'
+    if (!llmStatus?.installed) return '\u672a\u914d\u7f6e\u53ef\u7528\u7684\u5199\u4f5c\u5f15\u64ce'
     const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
-    if (effectiveStatus === 'failed') return `\u5199\u4f5c\u6a21\u578b\u8fde\u63a5\u5931\u8d25 ${formatWritingModelValue(llmStatus)}`
-    if (effectiveStatus === 'degraded') return `\u5199\u4f5c\u6a21\u578b\u63a2\u6d3b\u5f02\u5e38\uff0c\u6700\u8fd1\u6267\u884c\u6210\u529f ${formatWritingModelValue(llmStatus)}`
-    if (effectiveStatus === 'connected') return `\u5199\u4f5c\u6a21\u578b\u5df2\u8054\u901a ${formatWritingModelValue(llmStatus)}`
-    return `\u5199\u4f5c\u6a21\u578b\u5df2\u914d\u7f6e ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'failed') return `${UI_COPY.writingEngine}\u8fde\u63a5\u5931\u8d25 ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'degraded') return `${UI_COPY.writingEngine}\u63a2\u6d3b\u5f02\u5e38\uff0c\u4f46\u6700\u8fd1\u8fd0\u884c\u6210\u529f ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'connected') return `${UI_COPY.writingEngine}\u5df2\u8fde\u63a5 ${formatWritingModelValue(llmStatus)}`
+    return `${UI_COPY.writingEngine}\u5df2\u914d\u7f6e ${formatWritingModelValue(llmStatus)}`
 }
 
 function formatWritingModelValue(llmStatus) {
     if (!llmStatus) return '\u672a\u914d\u7f6e'
     if (llmStatus.mode === 'cli') {
-        return llmStatus.version ? `Codex CLI (${llmStatus.version})` : 'Codex CLI'
+        return llmStatus.version ? `\u672c\u5730 CLI\uff08${llmStatus.version}\uff09` : '\u672c\u5730 CLI'
     }
     if (llmStatus.mode === 'api') {
         const model = llmStatus.model || '\u672a\u6307\u5b9a\u6a21\u578b'
-        return `API / ${model}`
+        return `\u6a21\u578b\uff1a${model}`
     }
     if (llmStatus.mode === 'mock') {
-        return 'Mock Runner'
+        return '\u6a21\u62df\u8fd0\u884c\u5668'
     }
     return llmStatus.provider || '\u672a\u914d\u7f6e'
 }
@@ -302,12 +395,12 @@ function formatWritingModelDetail(llmStatus) {
             ? '\uff08\u8fde\u63a5\u5931\u8d25\uff09'
             : '\uff08\u5df2\u914d\u7f6e\uff09'
     if (llmStatus.mode === 'cli') {
-        const base = llmStatus.binary ? `Codex CLI (${llmStatus.binary})` : 'Codex CLI'
+        const base = llmStatus.binary ? `\u672c\u5730 CLI\uff08${llmStatus.binary}\uff09` : '\u672c\u5730 CLI'
         return `${base}${statusSuffix}`
     }
     if (llmStatus.mode === 'api') {
         const model = llmStatus.model || '\u672a\u6307\u5b9a\u6a21\u578b'
-        return `API / ${model}${statusSuffix}`
+        return `\u6a21\u578b\uff1a${model}${statusSuffix}`
     }
     return `${llmStatus.provider || '\u5df2\u914d\u7f6e'}${statusSuffix}`
 }
@@ -320,10 +413,10 @@ function getRagTone(ragStatus) {
 }
 
 function formatRagStatusLabel(ragStatus) {
-    if (!ragStatus?.configured) return 'RAG \u672a\u914d\u7f6e'
-    if (ragStatus?.connection_status === 'failed') return `RAG \u8fde\u63a5\u5931\u8d25: ${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`
-    if (ragStatus?.connection_status === 'connected') return `RAG \u5df2\u8054\u901a ${ragStatus?.embed_model || ''}`.trim()
-    return `RAG \u5df2\u914d\u7f6e ${ragStatus?.embed_model || ''}`.trim()
+    if (!ragStatus?.configured) return `${UI_COPY.retrievalEngine}\u672a\u914d\u7f6e`
+    if (ragStatus?.connection_status === 'failed') return `${UI_COPY.retrievalEngine}\u8fde\u63a5\u5931\u8d25\uff1a${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`
+    if (ragStatus?.connection_status === 'connected') return `${UI_COPY.retrievalEngine}\u5df2\u8fde\u63a5 ${ragStatus?.embed_model || ''}`.trim()
+    return `${UI_COPY.retrievalEngine}\u5df2\u914d\u7f6e ${ragStatus?.embed_model || ''}`.trim()
 }
 
 function formatRagDetail(ragStatus) {
@@ -334,10 +427,10 @@ function formatRagDetail(ragStatus) {
 }
 
 function formatRagErrorSummary(error) {
-    if (!error) return 'unknown'
-    const stage = error?.details?.stage ? `${error.details.stage}` : 'rag'
+    if (!error) return '\u672a\u77e5\u9519\u8bef'
+    const stage = error?.details?.stage ? `${error.details.stage}` : '\u68c0\u7d22'
     const code = error?.code || 'UNKNOWN'
-    return `${stage}/${code}`
+    return `${stage} / ${code}`
 }
 
 function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProjectBootstrapped }) {
@@ -352,14 +445,14 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProje
                     <MetricCard label={'\u603b\u5b57\u6570'} value={formatNumber(projectInfo?.progress?.total_words || 0)} />
                     <MetricCard label={'\u5f53\u524d\u7ae0\u8282'} value={`\u7b2c ${projectInfo?.progress?.current_chapter || 0} \u7ae0`} />
                     <MetricCard label={'\u9898\u6750'} value={projectMeta?.genre || '\u672a\u77e5'} />
-                    <MetricCard label={'\u5199\u4f5c\u6a21\u578b'} value={formatWritingModelDetail(llmStatus)} />
-                    <MetricCard label="RAG" value={formatRagDetail(ragStatus)} />
+                    <MetricCard label={UI_COPY.writingEngine} value={formatWritingModelDetail(llmStatus)} />
+                    <MetricCard label={UI_COPY.retrievalEngine} value={formatRagDetail(ragStatus)} />
                 </div>
-                {(ragStatus?.connection_status === 'failed' || ragStatus?.last_error) && <div className="empty-state">{'RAG \u6700\u8fd1\u9519\u8bef\uff1a'}{formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}</div>}
+                {(ragStatus?.connection_status === 'failed' || ragStatus?.last_error) && <div className="empty-state">{`${UI_COPY.retrievalEngine}\u6700\u8fd1\u9519\u8bef\uff1a`}{formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}</div>}
             </section>
             <section className="panel">
                 <div className="panel-title">{'\u9879\u76ee\u521b\u5efa'}</div>
-                <div className="empty-state">{'\u7528\u4e8e\u7a7a\u76ee\u5f55\u7684\u672c\u5730\u521d\u59cb\u5316\uff0c\u4e0d\u4f9d\u8d56\u5199\u4f5c\u6a21\u578b\u3002'}</div>
+                <div className="empty-state">{UI_COPY.projectCreateHint}</div>
                 <div className="launcher-grid">
                     <ProjectBootstrapSection
                         currentProjectRoot={dashboardContext.project_root || ''}
@@ -372,16 +465,22 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProje
             </section>
             <section className="panel">
                 <div className="panel-title">{'\u4efb\u52a1\u5165\u53e3'}</div>
-                <div className="empty-state">{'\u5206\u6790\u3001\u89c4\u5212\u3001\u5199\u4f5c\u3001\u5ba1\u67e5\u90fd\u4f1a\u4f7f\u7528\u5f53\u524d\u5199\u4f5c\u6a21\u578b\uff1b\u53ef\u5728 Codex CLI \u548c API \u4e4b\u95f4\u5207\u6362\u3002'}</div>
+                <div className="empty-state">{UI_COPY.taskEntryHint}</div>
                 <div className="launcher-grid">
                     {TASK_TEMPLATES.map((template) => (
-                        <TaskLauncherSection key={template.key} template={template} onCreated={onTaskCreated} MODE_OPTIONS={MODE_OPTIONS} />
+                        <TaskLauncherSection
+                            key={template.key}
+                            template={template}
+                            onCreated={onTaskCreated}
+                            MODE_OPTIONS={MODE_OPTIONS}
+                            suggestedChapter={Math.max(1, Number(projectInfo?.progress?.current_chapter || 0) + 1)}
+                        />
                     ))}
                 </div>
             </section>
             <section className="panel full-span">
-                <div className="panel-title">{'规划必填信息'}</div>
-                <div className="empty-state">{'补齐这里的最小规划信息后，plan 才会生成真实卷纲；信息不足时任务会显示为已完成 / 待补信息。'}</div>
+                <div className="panel-title">{UI_COPY.overviewPlanningTitle}</div>
+                <div className="empty-state">{UI_COPY.planningHint}</div>
                 <PlanningProfileSection onSaved={() => onProjectBootstrapped()} />
             </section>
             <section className="panel full-span">
@@ -417,12 +516,13 @@ function TaskCenterPage({ tasks, selectedTask, onSelectTask, onMutated, onNaviga
             MetricCard={MetricCard}
             translateTaskType={translateTaskType}
             translateTaskStatus={translateTaskStatus}
-            translateApprovalStatus={translateApprovalStatus}
             translateStepName={translateStepName}
             translateEventLevel={translateEventLevel}
             translateEventMessage={translateEventMessage}
             resolveTaskStatusLabel={resolveTaskStatusLabel}
             resolveCurrentStepLabel={resolveCurrentStepLabel}
+            resolveApprovalStatusLabel={resolveApprovalStatusLabel}
+            resolveTargetLabel={resolveTaskTargetLabel}
         />
     )
 }
@@ -474,18 +574,59 @@ function isPlanBlockedTask(task) {
 }
 
 function resolveTaskStatusLabel(task) {
-    if (isPlanBlockedTask(task)) return '已完成 / 待补信息'
+    if (isPlanBlockedTask(task)) return UI_COPY.planBlockedStatus
     return translateTaskStatus(task?.status)
 }
 
 function resolveCurrentStepLabel(task) {
-    if (isPlanBlockedTask(task)) return '待补信息'
-    return translateStepName(task?.current_step || 'idle')
+    if (isPlanBlockedTask(task)) return UI_COPY.planBlockedStep
+    const runtimeStep = task?.runtime_status?.step_key
+    if (['completed', 'failed'].includes(task?.status) && task?.runtime_status?.phase_label) {
+        return task.runtime_status.phase_label
+    }
+    if (['completed', 'failed'].includes(task?.status) && runtimeStep) {
+        return translateStepName(runtimeStep)
+    }
+    return translateStepName(task?.current_step || runtimeStep || 'idle')
 }
 
 function translateApprovalStatus(value) {
-    if (value === 'n/a') return '\u4e0d\u9002\u7528'
+    if (value === 'n/a') return UI_COPY.approvalNotApplicable
     return APPROVAL_STATUS_LABELS[value] || value || '-'
+}
+
+function resolveApprovalStatusLabel(task) {
+    const approvalStatus = task?.approval_status || 'n/a'
+    if (task?.task_type !== 'write') return translateApprovalStatus(approvalStatus)
+    if (!task?.request?.require_manual_approval) return UI_COPY.approvalNotRequired
+    if (approvalStatus === 'approved') {
+        if (task?.status === 'completed') return UI_COPY.approvalApprovedCompleted
+        if (['queued', 'running'].includes(task?.status) && ['approval-gate', 'data-sync'].includes(task?.current_step)) {
+            return UI_COPY.approvalApprovedWritingBack
+        }
+        return UI_COPY.approvalApproved
+    }
+    if (approvalStatus === 'pending' || task?.status === 'awaiting_writeback_approval') return UI_COPY.approvalPending
+    if (approvalStatus === 'rejected') return UI_COPY.approvalRejected
+    return UI_COPY.approvalNotReached
+}
+
+function resolveTaskTargetLabel(task) {
+    if (task?.runtime_status?.target_label) return task.runtime_status.target_label
+    const request = task?.request || {}
+    if (task?.task_type === 'plan') {
+        return `\u7b2c ${request.volume || 1} \u5377`
+    }
+    if (task?.task_type === 'write' && request.chapter) {
+        return `\u7b2c ${request.chapter} \u7ae0`
+    }
+    if (task?.task_type === 'review' && request.chapter_range) {
+        return `\u7b2c ${request.chapter_range} \u7ae0`
+    }
+    if (task?.task_type === 'resume') {
+        return request.chapter ? `\u6062\u590d\u7b2c ${request.chapter} \u7ae0` : '\u6062\u590d\u6700\u8fd1\u4e2d\u65ad\u4efb\u52a1'
+    }
+    return '-'
 }
 
 function translateStepName(value) {
@@ -508,6 +649,8 @@ function translateKnownValue(value) {
     if (APPROVAL_STATUS_LABELS[value]) return APPROVAL_STATUS_LABELS[value]
     if (STEP_LABELS[value]) return STEP_LABELS[value]
     if (EVENT_LEVEL_LABELS[value]) return EVENT_LEVEL_LABELS[value]
+    if (RELATIONSHIP_TYPE_LABELS[value]) return RELATIONSHIP_TYPE_LABELS[value]
+    if (value === 'plot') return '\u5267\u60c5\u6a21\u677f'
     return value
 }
 
@@ -527,7 +670,7 @@ function translateEventMessage(message) {
     const stepFailedMatch = message.match(/^Step failed[:\uff1a](.+)$/)
     if (stepFailedMatch) return `\u6b65\u9aa4\u5931\u8d25\uff1a${translateStepName(stepFailedMatch[1])}`
 
-    return message
+    return /^[\x00-\x7F\s:._/-]+$/.test(message) ? UI_COPY.unknownSystemEventWithDetail : message
 }
 
 function resolveColumnValue(row, column) {
@@ -543,6 +686,7 @@ function formatCell(value, column) {
     if (typeof value === 'boolean') return value ? '\u662f' : '\u5426'
     if (typeof value === 'object') return JSON.stringify(value)
     if (column === 'chapter') return String(value)
+    if (column === 'type') return String(translateKnownValue(value))
     if (isDateTimeColumn(column)) return formatTimestampShort(value)
     return String(translateKnownValue(value))
 }

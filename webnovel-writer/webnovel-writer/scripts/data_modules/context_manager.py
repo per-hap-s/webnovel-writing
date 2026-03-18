@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import get_config
 from .index_manager import IndexManager, WritingChecklistScoreMeta
+from .narrative_graph import NarrativeGraph
 from .context_ranker import ContextRanker
 from .snapshot_manager import SnapshotManager, SnapshotVersionMismatch
 from .context_weights import (
@@ -54,6 +55,8 @@ class ContextManager:
         "reader_signal",
         "genre_profile",
         "writing_guidance",
+        "narrative_state",
+        "director_brief",
     }
     SECTION_ORDER = [
         "core",
@@ -62,6 +65,8 @@ class ContextManager:
         "reader_signal",
         "genre_profile",
         "writing_guidance",
+        "narrative_state",
+        "director_brief",
         "story_skeleton",
         "memory",
         "preferences",
@@ -73,6 +78,7 @@ class ContextManager:
         self.config = config or get_config()
         self.snapshot_manager = snapshot_manager or SnapshotManager(self.config)
         self.index_manager = IndexManager(self.config)
+        self.narrative_graph = NarrativeGraph(config=self.config, manager=self.index_manager)
         self.context_ranker = ContextRanker(self.config)
 
     def _is_snapshot_compatible(self, cached: Dict[str, Any], template: str) -> bool:
@@ -220,6 +226,8 @@ class ContextManager:
         reader_signal = self._load_reader_signal(chapter)
         genre_profile = self._load_genre_profile(state)
         writing_guidance = self._build_writing_guidance(chapter, reader_signal, genre_profile)
+        narrative_state = self.narrative_graph.summarize_for_context(chapter)
+        director_brief = self._load_director_brief(chapter)
 
         return {
             "meta": {"chapter": chapter},
@@ -229,6 +237,8 @@ class ContextManager:
             "reader_signal": reader_signal,
             "genre_profile": genre_profile,
             "writing_guidance": writing_guidance,
+            "narrative_state": narrative_state,
+            "director_brief": director_brief,
             "story_skeleton": story_skeleton,
             "preferences": preferences,
             "memory": memory,
@@ -241,6 +251,18 @@ class ContextManager:
                 ),
             },
         }
+
+    def _load_director_brief(self, chapter: int) -> Dict[str, Any]:
+        if chapter <= 0:
+            return {}
+        path = self.config.project_root / ".webnovel" / "director" / f"ch{chapter:04d}.json"
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _load_reader_signal(self, chapter: int) -> Dict[str, Any]:
         if not getattr(self.config, "context_reader_signal_enabled", True):

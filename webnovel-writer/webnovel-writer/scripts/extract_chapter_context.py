@@ -382,6 +382,8 @@ def _load_contract_context(project_root: Path, chapter_num: int) -> Dict[str, An
         "reader_signal": (sections.get("reader_signal") or {}).get("content", {}),
         "genre_profile": (sections.get("genre_profile") or {}).get("content", {}),
         "writing_guidance": (sections.get("writing_guidance") or {}).get("content", {}),
+        "narrative_state": (sections.get("narrative_state") or {}).get("content", {}),
+        "director_brief": (sections.get("director_brief") or {}).get("content", {}),
     }
 
 
@@ -408,6 +410,8 @@ def build_chapter_context_payload(project_root: Path, chapter_num: int) -> Dict[
         "reader_signal": contract_context.get("reader_signal", {}),
         "genre_profile": contract_context.get("genre_profile", {}),
         "writing_guidance": contract_context.get("writing_guidance", {}),
+        "narrative_state": contract_context.get("narrative_state", {}),
+        "director_brief": contract_context.get("director_brief", {}),
         "rag_assist": rag_assist,
     }
 
@@ -520,6 +524,55 @@ def _render_text(payload: Dict[str, Any]) -> str:
         risk_flags = list(signals.get("risk_flags") or [])
         if risk_flags:
             lines.append(f"- 风险标记: {', '.join(str(flag) for flag in risk_flags)}")
+        lines.append("")
+
+    narrative_state = payload.get("narrative_state") or {}
+    if isinstance(narrative_state, dict):
+        active_foreshadowing = narrative_state.get("active_foreshadowing") or []
+        recent_timeline_events = narrative_state.get("recent_timeline_events") or []
+        core_character_arcs = narrative_state.get("core_character_arcs") or []
+        knowledge_conflicts = narrative_state.get("knowledge_conflicts") or []
+        if active_foreshadowing or recent_timeline_events or core_character_arcs or knowledge_conflicts:
+            lines.append("## 叙事状态")
+            lines.append("")
+            if active_foreshadowing:
+                lines.append("### 活跃伏笔")
+                for item in active_foreshadowing[:5]:
+                    name = item.get("name") or "未命名伏笔"
+                    content = item.get("content") or ""
+                    lines.append(f"- {name}: {content}")
+                lines.append("")
+            if recent_timeline_events:
+                lines.append("### 最近时间线")
+                for item in recent_timeline_events[:5]:
+                    lines.append(f"- 第{item.get('chapter')}章: {item.get('summary')}")
+                lines.append("")
+            if core_character_arcs:
+                lines.append("### 核心角色弧线")
+                for item in core_character_arcs[:5]:
+                    entity = item.get("canonical_name") or item.get("entity_id") or "未命名角色"
+                    stage = item.get("arc_stage") or "unknown"
+                    lines.append(f"- {entity}: {stage}")
+                lines.append("")
+            if knowledge_conflicts:
+                lines.append("### 认知冲突")
+                for item in knowledge_conflicts[:5]:
+                    topic = item.get("topic") or "未命名主题"
+                    lines.append(f"- {topic}")
+                lines.append("")
+
+    director_brief = payload.get("director_brief") or {}
+    if isinstance(director_brief, dict) and director_brief:
+        lines.append("## Director Brief")
+        lines.append("")
+        lines.append(f"- chapter_goal: {director_brief.get('chapter_goal')}")
+        lines.append(f"- primary_conflict: {director_brief.get('primary_conflict')}")
+        lines.append(f"- ending_hook_target: {director_brief.get('ending_hook_target')}")
+        lines.append(f"- tempo: {director_brief.get('tempo')}")
+        for key in ("must_advance_threads", "payoff_targets", "setup_targets", "must_use_entities", "review_focus"):
+            values = director_brief.get(key) or []
+            if values:
+                lines.append(f"- {key}: {', '.join(str(item) for item in values[:5])}")
         lines.append("")
 
     reader_signal = payload.get("reader_signal") or {}

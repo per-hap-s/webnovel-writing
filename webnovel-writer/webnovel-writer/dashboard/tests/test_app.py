@@ -30,8 +30,8 @@ def mock_project_root(tmp_path: Path) -> Path:
     )
 
     conn = sqlite3.connect(str(webnovel_dir / "index.db"))
-    conn.execute("CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT, type TEXT, is_archived INTEGER DEFAULT 0, last_appearance INTEGER)")
-    conn.execute("CREATE TABLE relationships (id INTEGER PRIMARY KEY AUTOINCREMENT, from_entity TEXT, to_entity TEXT, relation_type TEXT, chapter INTEGER)")
+    conn.execute("CREATE TABLE entities (id TEXT PRIMARY KEY, canonical_name TEXT, type TEXT, is_archived INTEGER DEFAULT 0, last_appearance INTEGER)")
+    conn.execute("CREATE TABLE relationships (id INTEGER PRIMARY KEY AUTOINCREMENT, from_entity TEXT, to_entity TEXT, type TEXT, chapter INTEGER)")
     conn.execute("CREATE TABLE chapters (chapter INTEGER PRIMARY KEY, title TEXT, word_count INTEGER)")
     conn.execute("CREATE TABLE scenes (id INTEGER PRIMARY KEY AUTOINCREMENT, chapter INTEGER, scene_index INTEGER, content TEXT)")
     conn.commit()
@@ -76,10 +76,110 @@ def client(mock_project_root: Path, mock_orchestrator: MagicMock) -> TestClient:
             yield test_client
 
 
+def _seed_narrative_tables(project_root: Path) -> None:
+    conn = sqlite3.connect(str(project_root / ".webnovel" / "index.db"))
+    conn.execute(
+        """
+        CREATE TABLE foreshadowing_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            entity_id TEXT,
+            introduced_chapter INTEGER,
+            payoff_chapter INTEGER,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE timeline_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id TEXT,
+            chapter INTEGER,
+            summary TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE character_arcs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id TEXT,
+            chapter INTEGER,
+            arc_stage TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE knowledge_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id TEXT,
+            chapter INTEGER,
+            fact TEXT,
+            state TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO foreshadowing_items (name, entity_id, introduced_chapter, payoff_chapter, status) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("setup-1", "hero", 1, None, "open"),
+            ("setup-2", "hero", 2, None, "open"),
+            ("setup-3", "ally", 3, None, "open"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO timeline_events (entity_id, chapter, summary) VALUES (?, ?, ?)",
+        [
+            ("hero", 2, "timeline hero chapter 2"),
+            ("ally", 2, "timeline ally chapter 2"),
+            ("hero", 3, "timeline hero chapter 3"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO character_arcs (entity_id, chapter, arc_stage) VALUES (?, ?, ?)",
+        [
+            ("hero", 1, "hesitant"),
+            ("hero", 2, "committed"),
+            ("ally", 2, "watching"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO knowledge_states (entity_id, chapter, fact, state) VALUES (?, ?, ?, ?)",
+        [
+            ("hero", 1, "secret-a", "suspects"),
+            ("hero", 2, "secret-b", "confirmed"),
+            ("ally", 2, "secret-a", "unknown"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_llm_status_success(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.probe_llm.return_value = {
+        "provider": "openai-compatible",
+        "mode": "api",
+        "model": "gpt-test",
+        "configured": True,
+        "probe_status": "failed",
+        "effective_status": "degraded",
+        "status_source": "recent_task_success",
+        "last_successful_request_at": "2026-03-17T00:00:00Z",
+        "last_successful_task_type": "write",
+        "last_probe_error": {"code": "PROBE_HTTP_ERROR"},
+        "connection_status": "degraded",
+    }
     response = client.get("/api/llm/status")
     assert response.status_code == 200
-    assert response.json()["provider"] == "openai-compatible"
+    data = response.json()
+    assert data["provider"] == "openai-compatible"
+    assert data["probe_status"] == "failed"
+    assert data["effective_status"] == "degraded"
+    assert data["status_source"] == "recent_task_success"
+    assert data["last_successful_request_at"] == "2026-03-17T00:00:00Z"
+    assert data["last_successful_task_type"] == "write"
     mock_orchestrator.probe_llm.assert_called_once()
 
 
@@ -91,6 +191,31 @@ def test_rag_status_success(client: TestClient, mock_orchestrator: MagicMock):
     assert data["embed_model"] == "BAAI/bge-m3"
     assert data["retry_policy"]["max_retries"] == 6
     mock_orchestrator.probe_rag.assert_called_once()
+
+
+def test_cancel_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.cancel_task.return_value = {
+        "id": "task-1",
+        "status": "interrupted",
+        "error": {"code": "TASK_CANCELLED", "message": "由仪表盘手动停止任务"},
+    }
+
+    response = client.post("/api/tasks/task-1/cancel", json={"reason": "由仪表盘手动停止任务"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "interrupted"
+    assert data["error"]["code"] == "TASK_CANCELLED"
+    mock_orchestrator.cancel_task.assert_called_once_with("task-1", reason="由仪表盘手动停止任务")
+
+
+def test_cancel_task_returns_not_found_when_missing(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.cancel_task.side_effect = KeyError("missing")
+
+    response = client.post("/api/tasks/missing/cancel", json={"reason": "stop"})
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "NOT_FOUND"
 
 
 def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
@@ -238,3 +363,239 @@ def test_project_info_supports_request_scoped_project_root(client: TestClient, m
     assert response.json()["project_info"]["title"] == "Other Root"
     assert response.json()["dashboard_context"]["project_root"] == str(other_root)
     assert response.json()["dashboard_context"]["project_initialized"] is True
+
+
+def test_file_read_returns_metadata_for_text_file(client: TestClient, mock_project_root: Path):
+    target = mock_project_root / "正文" / "第0001章.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("测试正文", encoding="utf-8")
+
+    response = client.get("/api/files/read", params={"path": "正文/第0001章.md"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["exists"] is True
+    assert data["is_binary"] is False
+    assert data["encoding"] == "utf-8"
+    assert data["size"] > 0
+    assert data["modified_at"]
+    assert data["content"] == "测试正文"
+
+
+def test_file_read_returns_binary_metadata_for_non_text_file(client: TestClient, mock_project_root: Path):
+    target = mock_project_root / "正文" / "封面.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\xff\x00\xab")
+
+    response = client.get("/api/files/read", params={"path": "正文/封面.bin"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["exists"] is True
+    assert data["is_binary"] is True
+    assert data["encoding"] == "binary"
+    assert data["size"] == 3
+    assert data["modified_at"]
+    assert data["content"] == ""
+
+
+def test_file_tree_includes_project_state_and_summaries(client: TestClient, mock_project_root: Path):
+    summaries_dir = mock_project_root / ".webnovel" / "summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    (summaries_dir / "ch0001.md").write_text("# 第1章摘要\n", encoding="utf-8")
+
+    response = client.get("/api/files/tree")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "项目状态" in payload
+    state_paths = [item["path"] for item in payload["项目状态"]]
+    assert ".webnovel/state.json" in state_paths
+    summary_dir = next(item for item in payload["项目状态"] if item["path"] == ".webnovel/summaries")
+    assert any(child["path"] == ".webnovel/summaries/ch0001.md" for child in summary_dir["children"])
+
+
+def test_file_read_supports_state_json_and_summaries(client: TestClient, mock_project_root: Path):
+    summaries_dir = mock_project_root / ".webnovel" / "summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    (summaries_dir / "ch0002.md").write_text("# 第2章摘要\n", encoding="utf-8")
+
+    state_response = client.get("/api/files/read", params={"path": ".webnovel/state.json"})
+    summary_response = client.get("/api/files/read", params={"path": ".webnovel/summaries/ch0002.md"})
+
+    assert state_response.status_code == 200
+    assert summary_response.status_code == 200
+    assert state_response.json()["content"]
+    assert summary_response.json()["content"] == "# 第2章摘要\n"
+
+
+def test_relationships_endpoint_returns_entity_display_names(client: TestClient, mock_project_root: Path):
+    conn = sqlite3.connect(str(mock_project_root / ".webnovel" / "index.db"))
+    conn.execute(
+        "INSERT INTO entities (id, canonical_name, type, is_archived, last_appearance) VALUES (?, ?, ?, 0, ?)",
+        ("shenyan", "沈言", "character", 2),
+    )
+    conn.execute(
+        "INSERT INTO entities (id, canonical_name, type, is_archived, last_appearance) VALUES (?, ?, ?, 0, ?)",
+        ("shenmu", "沈母", "character", 1),
+    )
+    conn.execute(
+        "INSERT INTO relationships (from_entity, to_entity, type, chapter) VALUES (?, ?, ?, ?)",
+        ("shenyan", "shenmu", "family", 2),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get("/api/relationships")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["from_entity_name"] == "沈言"
+    assert payload[0]["to_entity_name"] == "沈母"
+
+
+def test_file_tree_uses_hierarchical_display_names_for_volume_and_chapter(client: TestClient, mock_project_root: Path):
+    chapter_file = mock_project_root / "正文" / "第1卷" / "第0002章.md"
+    chapter_file.parent.mkdir(parents=True, exist_ok=True)
+    chapter_file.write_text("测试正文", encoding="utf-8")
+
+    response = client.get("/api/files/tree")
+
+    assert response.status_code == 200
+    payload = response.json()
+    body_root = next(item for item in payload["正文"] if item["path"] == "正文/第1卷")
+    assert body_root["display_name"] == "第1卷"
+    chapter_node = next(item for item in body_root["children"] if item["path"] == "正文/第1卷/第0002章.md")
+    assert chapter_node["display_name"] == "第2章"
+
+
+def test_file_read_returns_hierarchical_display_name_and_display_timestamp(client: TestClient, mock_project_root: Path):
+    chapter_file = mock_project_root / "正文" / "第1卷" / "第0001章.md"
+    chapter_file.parent.mkdir(parents=True, exist_ok=True)
+    chapter_file.write_text("测试正文", encoding="utf-8")
+
+    response = client.get("/api/files/read", params={"path": "正文/第1卷/第0001章.md"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["display_name"] == "第1章"
+    assert payload["modified_at_display"]
+
+
+def test_review_metrics_and_relationships_expose_display_helpers(client: TestClient, mock_project_root: Path):
+    conn = sqlite3.connect(str(mock_project_root / ".webnovel" / "index.db"))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS review_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, end_chapter INTEGER, overall_score REAL, created_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO entities (id, canonical_name, type, is_archived, last_appearance) VALUES (?, ?, ?, 0, ?)",
+        ("shenyan", "沈言", "character", 2),
+    )
+    conn.execute(
+        "INSERT INTO entities (id, canonical_name, type, is_archived, last_appearance) VALUES (?, ?, ?, 0, ?)",
+        ("shenmu", "沈母", "character", 1),
+    )
+    conn.execute(
+        "INSERT INTO relationships (from_entity, to_entity, type, chapter) VALUES (?, ?, ?, ?)",
+        ("shenyan", "shenmu", "family", 2),
+    )
+    conn.execute(
+        "INSERT INTO review_metrics (end_chapter, overall_score, created_at) VALUES (?, ?, ?)",
+        (2, 95, "2026-03-18T09:59:08+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    relationship_response = client.get("/api/relationships")
+    review_response = client.get("/api/review-metrics")
+
+    assert relationship_response.status_code == 200
+    assert review_response.status_code == 200
+    relationship = relationship_response.json()[0]
+    metric = review_response.json()[0]
+    assert relationship["from_entity_display"] == "沈言"
+    assert relationship["to_entity_display"] == "沈母"
+    assert relationship["type_label"] == "家庭"
+    assert relationship["from_entity_label"] == "起始实体"
+    assert relationship["to_entity_label"] == "目标实体"
+    assert relationship["type_label_label"] == "关系类型"
+    assert metric["created_at_display"] == "2026-03-18 17:59:08"
+
+
+def test_foreshadowing_endpoint_supports_chapter_entity_and_limit(client: TestClient, mock_project_root: Path):
+    _seed_narrative_tables(mock_project_root)
+
+    response = client.get("/api/foreshadowing", params={"chapter": 2, "entity": "hero", "limit": 1})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["name"] == "setup-2"
+    assert payload[0]["entity_id"] == "hero"
+
+
+def test_foreshadowing_endpoint_excludes_paid_off_items_for_planted_schema(client: TestClient, mock_project_root: Path):
+    conn = sqlite3.connect(str(mock_project_root / ".webnovel" / "index.db"))
+    conn.execute(
+        """
+        CREATE TABLE foreshadowing_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            owner_entity TEXT,
+            planted_chapter INTEGER,
+            payoff_chapter INTEGER DEFAULT 0,
+            status TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO foreshadowing_items (name, owner_entity, planted_chapter, payoff_chapter, status) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("paid-off-setup", "hero", 1, 2, "paid_off"),
+            ("active-setup", "hero", 3, 0, "active"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get("/api/foreshadowing", params={"chapter": 10, "entity": "hero", "limit": 10})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["name"] for item in payload] == ["active-setup"]
+
+
+def test_timeline_events_endpoint_supports_chapter_entity_and_limit(client: TestClient, mock_project_root: Path):
+    _seed_narrative_tables(mock_project_root)
+
+    response = client.get("/api/timeline-events", params={"chapter": 2, "entity": "hero", "limit": 5})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["summary"] == "timeline hero chapter 2"
+    assert payload[0]["chapter"] == 2
+
+
+def test_character_arcs_endpoint_supports_chapter_entity_and_limit(client: TestClient, mock_project_root: Path):
+    _seed_narrative_tables(mock_project_root)
+
+    response = client.get("/api/character-arcs", params={"chapter": 2, "entity": "hero", "limit": 5})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["entity_id"] == "hero"
+    assert payload[0]["arc_stage"] == "committed"
+
+
+def test_knowledge_states_endpoint_supports_chapter_entity_and_limit(client: TestClient, mock_project_root: Path):
+    _seed_narrative_tables(mock_project_root)
+
+    response = client.get("/api/knowledge-states", params={"chapter": 2, "entity": "hero", "limit": 5})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["fact"] == "secret-b"
+    assert payload[0]["state"] == "confirmed"

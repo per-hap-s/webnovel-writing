@@ -1,10 +1,26 @@
 ﻿import { useEffect, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 
+const RELATIONSHIP_TYPE_LABELS = {
+    family: '家庭',
+    ally: '同盟',
+    enemy: '敌对',
+    mentor: '师友',
+    subordinate: '上下级',
+    colleague: '同事',
+    suspect: '嫌疑',
+    investigating: '调查',
+    conflict: '冲突',
+    owes: '欠债',
+    protects: '保护',
+    watches: '监视',
+    warned_by: '预警来源',
+}
+
 const LLM_PROVIDER_OPTIONS = [
-    { value: 'openai-compatible', label: 'OpenAI Compatible' },
-    { value: 'openai', label: 'OpenAI Official' },
-    { value: 'azure-openai', label: 'Azure OpenAI' },
+    { value: 'openai-compatible', label: '兼容 OpenAI 接口' },
+    { value: 'openai', label: 'OpenAI 官方接口' },
+    { value: 'azure-openai', label: 'Azure OpenAI 接口' },
 ]
 
 const DEFAULT_LAUNCHER_FORM = {
@@ -18,10 +34,21 @@ const DEFAULT_LAUNCHER_FORM = {
     require_manual_approval: true,
 }
 
-export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIONS }) {
+export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIONS, suggestedChapter }) {
     const [form, setForm] = useState(DEFAULT_LAUNCHER_FORM)
+    const [lastSuggestedChapter, setLastSuggestedChapter] = useState(DEFAULT_LAUNCHER_FORM.chapter)
     const [submitting, setSubmitting] = useState(false)
     const [error, setError] = useState(null)
+
+    useEffect(() => {
+        if (!template.fields.includes('chapter')) return
+        const nextSuggested = Math.max(1, Number(suggestedChapter || 1))
+        setForm((current) => {
+            if (current.chapter !== lastSuggestedChapter && current.chapter > 0) return current
+            return { ...current, chapter: nextSuggested }
+        })
+        setLastSuggestedChapter(nextSuggested)
+    }, [template.fields, suggestedChapter, lastSuggestedChapter])
 
     async function submit() {
         setSubmitting(true)
@@ -228,7 +255,7 @@ export function PlanningProfileSection({ onSaved }) {
             setFieldSpecs(response.field_specs || [])
             setReadiness(response.readiness || null)
             setLastBlocked(response.last_blocked || null)
-            setMessage('规划必填信息已保存，总纲与 readiness 已同步更新。')
+            setMessage('规划信息已保存，总纲与规划条件已同步更新。')
             if (onSaved) onSaved(response)
         } catch (err) {
             setError(normalizeError(err))
@@ -243,10 +270,10 @@ export function PlanningProfileSection({ onSaved }) {
         <div className="planning-profile">
             <div className="planning-status-row">
                 <div className={`planning-pill ${readiness?.ok ? 'ready' : 'blocked'}`}>
-                    {readiness?.ok ? '已满足 plan 条件' : '待补信息'}
+                    {readiness?.ok ? '已满足规划条件' : '待补信息'}
                 </div>
                 <div className="tiny">
-                    {readiness ? `已填写 ${readiness.completed_fields || 0}/${readiness.total_required_fields || 0}` : '正在读取 readiness...'}
+                    {readiness ? `已填写 ${readiness.completed_fields || 0}/${readiness.total_required_fields || 0}` : '正在读取规划条件...'}
                 </div>
             </div>
             {missingItems.length > 0 ? (
@@ -261,7 +288,7 @@ export function PlanningProfileSection({ onSaved }) {
             ) : null}
             {lastBlocked?.blocking_items?.length ? (
                 <div className="planning-warning subtle">
-                    <div className="subsection-title">最近一次 plan 阻断</div>
+                    <div className="subsection-title">最近一次规划阻断</div>
                     <div className="tiny">{lastBlocked.reason || '信息不足'}</div>
                     <div className="planning-tags">
                         {lastBlocked.blocking_items.map((item, index) => (
@@ -535,16 +562,20 @@ export function TaskCenterPageSection({
     MetricCard,
     translateTaskType,
     translateTaskStatus,
-    translateApprovalStatus,
     translateStepName,
     translateEventLevel,
     translateEventMessage,
     resolveTaskStatusLabel,
     resolveCurrentStepLabel,
+    resolveApprovalStatusLabel,
+    resolveTargetLabel,
 }) {
     const [events, setEvents] = useState([])
     const [actionError, setActionError] = useState(null)
     const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
+    const [cancelSubmitting, setCancelSubmitting] = useState(false)
+    const canRetryTask = ['failed', 'interrupted'].includes(selectedTask?.status) && selectedTask?.runtime_status?.retryable !== false
+    const canCancelTask = ['queued', 'running', 'awaiting_writeback_approval'].includes(selectedTask?.status)
 
     useEffect(() => {
         if (!tasks.some(isRuntimeActiveTask)) return undefined
@@ -568,6 +599,31 @@ export function TaskCenterPageSection({
         }
     }
 
+    async function cancelTask(task) {
+        if (!task?.id || !canCancelTask) return
+        setCancelSubmitting(true)
+        setActionError(null)
+        try {
+            await postJSON(`/api/tasks/${task.id}/cancel`, { reason: '由仪表盘手动停止任务' })
+            onMutated()
+        } catch (err) {
+            const normalized = normalizeError(err)
+            if (normalized.statusCode === 404 || normalized.statusCode === 405) {
+                setActionError({
+                    code: 'TASK_CANCEL_UNAVAILABLE',
+                    displayMessage: '当前后端还未提供“停止任务”接口。',
+                    rawMessage: normalized.rawMessage || normalized.displayMessage,
+                    details: normalized.details,
+                    statusCode: normalized.statusCode,
+                })
+            } else {
+                setActionError(normalized)
+            }
+        } finally {
+            setCancelSubmitting(false)
+        }
+    }
+
     return (
         <div className="split-layout">
             <section className="panel list-panel">
@@ -581,6 +637,7 @@ export function TaskCenterPageSection({
                                 <div>{translateTaskType(liveTask.task_type)}</div>
                                 <span className={`runtime-badge ${resolveRuntimeBadgeTone(liveTask)}`}>{resolveRuntimeBadgeLabel(liveTask)}</span>
                             </div>
+                            <div className="tiny task-target">{resolveTargetLabel ? resolveTargetLabel(liveTask) : (liveTask.runtime_status?.target_label || '-')}</div>
                             <div className="muted">{resolveTaskStatusLabel ? resolveTaskStatusLabel(liveTask) : translateTaskStatus(liveTask.status)}</div>
                             <div className="tiny">{resolveCurrentStepLabel ? resolveCurrentStepLabel(liveTask) : translateStepName(liveTask.current_step || 'idle')}</div>
                             <div className="tiny runtime-summary">{buildRuntimeSummary(liveTask)}</div>
@@ -598,8 +655,9 @@ export function TaskCenterPageSection({
                     <>
                         <div className="detail-grid">
                             <MetricCard label="状态" value={resolveTaskStatusLabel ? resolveTaskStatusLabel(liveSelectedTask) : translateTaskStatus(liveSelectedTask.status)} />
+                            <MetricCard label="任务目标" value={resolveTargetLabel ? resolveTargetLabel(liveSelectedTask) : (liveSelectedTask.runtime_status?.target_label || '-')} />
                             <MetricCard label="当前步骤" value={resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle')} />
-                            <MetricCard label="审批" value={translateApprovalStatus(liveSelectedTask.approval_status || 'n/a')} />
+                            <MetricCard label="审批" value={resolveApprovalStatusLabel ? resolveApprovalStatusLabel(liveSelectedTask) : (liveSelectedTask.approval_status || '-')} />
                             <MetricCard label="类型" value={translateTaskType(liveSelectedTask.task_type)} />
                         </div>
                         {liveSelectedTask?.artifacts?.plan_blocked ? (
@@ -618,6 +676,7 @@ export function TaskCenterPageSection({
                             <div className="subsection-title">实时运行状态</div>
                             <div className="detail-grid">
                                 <MetricCard label="当前阶段" value={liveSelectedTask.runtime_status?.phase_label || (resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle'))} />
+                                <MetricCard label="任务目标" value={liveSelectedTask.runtime_status?.target_label || (resolveTargetLabel ? resolveTargetLabel(liveSelectedTask) : '-')} />
                                 <MetricCard label="阶段说明" value={liveSelectedTask.runtime_status?.phase_detail || '暂无'} />
                                 <MetricCard label="运行状态" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
                                 <MetricCard label="已运行时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.running_seconds)} />
@@ -625,16 +684,24 @@ export function TaskCenterPageSection({
                                 <MetricCard label="当前尝试" value={formatCountValue(liveSelectedTask.runtime_status?.attempt)} />
                                 <MetricCard label="重试次数" value={formatCountValue(liveSelectedTask.runtime_status?.retry_count, true)} />
                                 <MetricCard label="超时预算" value={formatTimeoutValue(liveSelectedTask.runtime_status?.timeout_seconds)} />
+                                <MetricCard label="步骤开始于" value={formatTimestampShort(liveSelectedTask.runtime_status?.step_started_at || '-')} />
+                                <MetricCard label="等待开始于" value={formatTimestampShort(liveSelectedTask.runtime_status?.waiting_since || '-')} />
                                 <MetricCard label="最近事件" value={liveSelectedTask.runtime_status?.last_event_label || '暂无'} />
                                 <MetricCard label="最近更新时间" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_event_at || liveSelectedTask.updated_at || '-')} />
                                 <MetricCard label="最近活动" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_activity_at || '-')} />
+                                <MetricCard label="最近一次有效活动" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_non_heartbeat_activity_at || '-')} />
                                 <MetricCard label="错误码" value={liveSelectedTask.runtime_status?.error_code || '-'} />
                                 <MetricCard label="HTTP 状态" value={liveSelectedTask.runtime_status?.http_status || '-'} />
                                 <MetricCard label="是否可重试" value={formatRetryableValue(liveSelectedTask.runtime_status?.retryable)} />
                             </div>
                         </div>
                         <div className="button-row">
-                            <button className="secondary-button" onClick={() => perform(`/api/tasks/${liveSelectedTask.id}/retry`, {})}>重试</button>
+                            {canRetryTask ? <button className="secondary-button" onClick={() => perform(`/api/tasks/${liveSelectedTask.id}/retry`, {})}>重试</button> : null}
+                            {canCancelTask ? (
+                                <button className="secondary-button" onClick={() => cancelTask(liveSelectedTask)} disabled={cancelSubmitting}>
+                                    {cancelSubmitting ? '停止中...' : '停止任务'}
+                                </button>
+                            ) : null}
                             {liveSelectedTask.status === 'awaiting_writeback_approval' && (
                                 <>
                                     <button className="primary-button" onClick={() => perform('/api/review/approve', { task_id: liveSelectedTask.id, reason: '由仪表盘批准回写' })}>批准回写</button>
@@ -643,10 +710,22 @@ export function TaskCenterPageSection({
                             )}
                         </div>
                         <ErrorNotice error={actionError} />
-                        <ErrorNotice error={liveSelectedTask.error || null} title="任务失败原因" />
+                        <ErrorNotice
+                            error={liveSelectedTask.error || null}
+                            title={
+                                liveSelectedTask.status === 'interrupted'
+                                    ? '任务中断原因'
+                                    : liveSelectedTask.status === 'rejected'
+                                        ? '任务拒绝原因'
+                                        : '任务失败原因'
+                            }
+                        />
                         <div className="subsection">
                             <div className="subsection-title">步骤输出</div>
-                            <pre className="code-block">{JSON.stringify(liveSelectedTask.artifacts?.step_results || {}, null, 2)}</pre>
+                            <details className="raw-output-details">
+                                <summary>查看原始结果 / 调试信息</summary>
+                                <pre className="code-block">{JSON.stringify(liveSelectedTask.artifacts?.step_results || {}, null, 2)}</pre>
+                            </details>
                         </div>
                         <div className="subsection">
                             <div className="subsection-title">事件流</div>
@@ -655,6 +734,11 @@ export function TaskCenterPageSection({
                                     <div key={event.id} className={`event-card ${event.level}`}>
                                         <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} · {formatTimestampShort(event.timestamp)}</div>
                                         <div>{translateEventMessage(event.message)}</div>
+                                        <div className="event-payload-row">
+                                            {buildEventPayloadTags(event.payload || {}).map((tag) => (
+                                                <span key={`${event.id}-${tag.label}`} className="event-payload-tag">{tag.label}：{tag.value}</span>
+                                            ))}
+                                        </div>
                                     </div>
                                 ))}
                             </div>
@@ -677,8 +761,28 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
         fetchJSON('/api/chapters').then(setChapters).catch(() => setChapters([]))
     }, [refreshToken])
 
+    const chapterSummaryData = buildChapterSummaries(chapters, entities, relationships)
+    const chapterSummaries = chapterSummaryData.items
+
     return (
         <div className="page-grid">
+            <section className="panel full-span">
+                <div className="panel-title">{chapterSummaryData.title}</div>
+                {chapterSummaries.length === 0 ? (
+                    <div className="tiny">当前还没有可展示的章节摘要；如果写作已完成但这里为空，请回到对应任务查看 `data-sync` warning。</div>
+                ) : (
+                    <div className="summary-grid">
+                        {chapterSummaries.map((item) => (
+                            <div key={item.chapter} className="summary-card">
+                                <div className="summary-card-title">第 {item.chapter} 章</div>
+                                <div className="tiny">{item.title || '未命名章节'}</div>
+                                <div className="summary-card-meta">{chapterSummaryData.entityLabel}：{item.entityCount}</div>
+                                <div className="summary-card-meta">{chapterSummaryData.relationshipLabel}：{item.relationshipCount}</div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </section>
             <section className="panel">
                 <div className="panel-title">实体</div>
                 {chapters.length > 0 && entities.length === 0 ? <div className="tiny">当前已有章节，但暂未看到结构化实体；如本章未抽取到结果，会在对应任务事件流里显示 warning。</div> : null}
@@ -687,7 +791,7 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
             <section className="panel">
                 <div className="panel-title">关系</div>
                 {chapters.length > 0 && relationships.length === 0 ? <div className="tiny">当前已有章节，但暂未看到结构化关系；请同时检查对应写作任务的 `data-sync` 事件。</div> : null}
-                <SimpleTable rows={relationships} columns={['from_entity', 'to_entity', 'type', 'chapter']} />
+                <SimpleTable rows={relationships} columns={['from_entity_display', 'to_entity_display', 'type_label', 'chapter']} />
             </section>
             <section className="panel full-span">
                 <div className="panel-title">章节</div>
@@ -700,13 +804,19 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
 export function FilesPageSection({ refreshToken }) {
     const [tree, setTree] = useState({})
     const [selectedPath, setSelectedPath] = useState('')
-    const [fileDetail, setFileDetail] = useState({ path: '', content: '', exists: false, is_binary: false, encoding: 'utf-8' })
+    const [fileDetail, setFileDetail] = useState(emptyFileDetail())
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState(null)
+    const [missingNotice, setMissingNotice] = useState('')
 
     useEffect(() => {
         fetchJSON('/api/files/tree').then((result) => {
             setTree(result)
+            if (selectedPath && !treeContainsPath(result, selectedPath)) {
+                setSelectedPath('')
+                setFileDetail(emptyFileDetail())
+                setMissingNotice('当前文件已不存在，已清除选中。')
+            }
             setError(null)
         }).catch((err) => {
             setTree({})
@@ -716,27 +826,52 @@ export function FilesPageSection({ refreshToken }) {
 
     useEffect(() => {
         if (!selectedPath) {
-            setFileDetail({ path: '', content: '', exists: false, is_binary: false, encoding: 'utf-8' })
+            setFileDetail(emptyFileDetail())
             return
         }
         setLoading(true)
+        setMissingNotice('')
         fetchJSON('/api/files/read', { path: selectedPath }).then((result) => {
+            if (result.exists === false) {
+                setSelectedPath('')
+                setFileDetail(emptyFileDetail())
+                setError(null)
+                setMissingNotice('当前文件已不存在，已清除选中。')
+                return
+            }
             setFileDetail({
                 path: result.path || selectedPath,
                 content: typeof result.content === 'string' ? result.content : '',
                 exists: Boolean(result.exists),
                 is_binary: Boolean(result.is_binary),
                 encoding: result.encoding || 'utf-8',
+                size: Number(result.size || 0),
+                modified_at: result.modified_at || '',
+                display_name: result.display_name || '',
+                is_internal: Boolean(result.is_internal),
+                doc_status: result.doc_status || null,
+                summary_card: result.summary_card || null,
+                internal_hint: result.internal_hint || '',
             })
             setError(null)
         }).catch((err) => {
-            setFileDetail({ path: selectedPath, content: '', exists: false, is_binary: false, encoding: 'utf-8' })
-            setError(normalizeError(err))
+            const normalized = normalizeError(err)
+            if (normalized.statusCode === 404) {
+                setSelectedPath('')
+                setFileDetail(emptyFileDetail())
+                setError(null)
+                setMissingNotice('当前文件已不存在，已清除选中。')
+            } else {
+                setFileDetail({ ...emptyFileDetail(), path: selectedPath })
+                setError(normalized)
+            }
         }).finally(() => setLoading(false))
     }, [selectedPath, refreshToken])
 
+    const selectedNode = findTreeNode(tree, selectedPath)
+    const fileMeta = resolveFileDisplayMeta(selectedPath || fileDetail.path, selectedNode, fileDetail)
     const previewText = !selectedPath
-        ? '请选择左侧文件'
+        ? (missingNotice || '请选择左侧文件')
         : loading
             ? '读取中...'
             : fileDetail.is_binary
@@ -746,15 +881,42 @@ export function FilesPageSection({ refreshToken }) {
                     : '读取失败'
 
     return (
-        <div className="split-layout">
-            <section className="panel list-panel">
+        <div className="split-layout files-layout">
+            <section className="panel list-panel file-tree-panel">
                 <div className="panel-title">文档树</div>
-                <FileTree tree={tree} onSelect={setSelectedPath} />
+                <div className="file-tree-scroll">
+                    <FileTree tree={tree} onSelect={setSelectedPath} />
+                </div>
             </section>
-            <section className="panel detail-panel">
-                <div className="panel-title">{selectedPath || '选择文件'}</div>
+            <section className="panel detail-panel file-preview-panel">
+                <div className="panel-title">{fileMeta.displayName || selectedPath || '选择文件'}</div>
+                {selectedPath ? (
+                    <div className="file-meta-card">
+                        <div className="file-meta-grid">
+                            <div><strong>显示名称：</strong>{fileMeta.displayName}</div>
+                            <div><strong>真实路径：</strong>{fileDetail.path || selectedPath}</div>
+                            <div><strong>文件类型：</strong>{fileMeta.fileType}</div>
+                            <div><strong>状态标签：</strong>{fileMeta.docStatus || '-'}</div>
+                            <div><strong>编码：</strong>{fileDetail.encoding || '-'}</div>
+                            <div><strong>大小：</strong>{formatFileSize(fileDetail.size)}</div>
+                            <div><strong>更新时间：</strong>{formatTimestampShort(fileDetail.modified_at || '-')}</div>
+                        </div>
+                    </div>
+                ) : null}
+                {selectedPath && fileDetail.summary_card ? (
+                    <div className="file-meta-card">
+                        <div className="subsection-title">{fileDetail.summary_card.title || '摘要'}</div>
+                        {fileDetail.summary_card.warning ? <div className="tiny">{fileDetail.summary_card.warning}</div> : null}
+                        <div className="file-meta-grid">
+                            {(fileDetail.summary_card.items || []).map((item) => (
+                                <div key={`${item.label}-${item.value}`}><strong>{item.label}：</strong>{item.value || '-'}</div>
+                            ))}
+                        </div>
+                    </div>
+                ) : null}
+                {selectedPath && fileDetail.internal_hint ? <div className="tiny">{fileDetail.internal_hint}</div> : null}
                 <ErrorNotice error={error} />
-                <pre className="code-block large">{previewText}</pre>
+                <pre className="code-block file-preview">{previewText}</pre>
             </section>
         </div>
     )
@@ -830,6 +992,9 @@ export function QualityPageSection({ refreshToken, onMutated, SimpleTable, trans
 function resolveRuntimeBadgeLabel(task) {
     if (task?.artifacts?.plan_blocked) return '待补信息'
     const stepState = task?.runtime_status?.step_state
+    if (stepState === 'interrupted') return '已中断'
+    if (stepState === 'cancelled') return '已停止'
+    if (stepState === 'rejected') return '已拒绝'
     if (stepState === 'retrying') return '重试中'
     if (stepState === 'waiting_approval') return '待审批'
     if (stepState === 'failed') return '已失败'
@@ -844,6 +1009,9 @@ function resolveRuntimeBadgeTone(task) {
     if (stepState === 'running') return 'info'
     if (stepState === 'retrying') return 'warning'
     if (stepState === 'waiting_approval') return 'warning'
+    if (stepState === 'interrupted') return 'warning'
+    if (stepState === 'cancelled') return 'warning'
+    if (stepState === 'rejected') return 'danger'
     if (stepState === 'failed') return 'danger'
     if (stepState === 'completed') return 'success'
     return 'muted'
@@ -855,9 +1023,12 @@ function buildRuntimeSummary(task) {
     const parts = []
     if (runtime.phase_label) parts.push(runtime.phase_label)
     if (runtime.phase_detail) parts.push(runtime.phase_detail)
+    if (runtime.step_state === 'interrupted' || runtime.step_state === 'cancelled' || runtime.step_state === 'rejected') {
+        return parts.join(' · ') || resolveRuntimeBadgeLabel(task)
+    }
     if (runtime.step_state === 'retrying' && runtime.attempt) {
         parts.push(`第 ${runtime.attempt} 次尝试`)
-    } else if (runtime.step_state === 'running' && runtime.running_seconds > 0) {
+    } else if (runtime.step_state === 'running' && runtime.running_seconds >= 0) {
         parts.push(formatRuntimeDuration(runtime.running_seconds))
     } else if (runtime.step_state === 'failed' && runtime.error_code) {
         parts.push(runtime.error_code)
@@ -878,13 +1049,13 @@ function isRuntimeActiveTask(task) {
 function withLiveRuntimeStatus(task, nowMs) {
     if (!task?.runtime_status || !isRuntimeActiveTask(task)) return task
     const runtime = task.runtime_status
-    const referenceMs = parseTimestampToMs(runtime.last_activity_at || runtime.last_event_at || task.updated_at)
-    if (!Number.isFinite(referenceMs)) return task
-    const elapsedSeconds = Math.max(0, Math.floor((nowMs - referenceMs) / 1000))
-    if (elapsedSeconds <= 0) return task
-    const runningSeconds = Math.max(0, Number(runtime.running_seconds || 0)) + elapsedSeconds
-    const waitingSeconds = shouldTickWaiting(runtime)
-        ? Math.max(0, Number(runtime.waiting_seconds || 0)) + elapsedSeconds
+    const runningStartMs = parseTimestampToMs(runtime.step_started_at || runtime.last_activity_at || runtime.last_event_at || task.updated_at)
+    const waitingStartMs = parseTimestampToMs(runtime.waiting_since)
+    const runningSeconds = Number.isFinite(runningStartMs)
+        ? Math.max(0, Math.floor((nowMs - runningStartMs) / 1000))
+        : Math.max(0, Number(runtime.running_seconds || 0))
+    const waitingSeconds = shouldTickWaiting(runtime) && Number.isFinite(waitingStartMs)
+        ? Math.max(0, Math.floor((nowMs - waitingStartMs) / 1000))
         : Math.max(0, Number(runtime.waiting_seconds || 0))
     return {
         ...task,
@@ -897,7 +1068,7 @@ function withLiveRuntimeStatus(task, nowMs) {
 }
 
 function shouldTickWaiting(runtime) {
-    return ['llm_request_started', 'request_dispatched', 'awaiting_model_response', 'step_heartbeat'].includes(runtime?.last_event_message)
+    return ['llm_request_started', 'request_dispatched', 'awaiting_model_response'].includes(runtime?.last_event_message)
         || Number(runtime?.waiting_seconds || 0) > 0
 }
 
@@ -909,7 +1080,7 @@ function parseTimestampToMs(value) {
 
 function formatRuntimeDuration(seconds) {
     const total = Number(seconds || 0)
-    if (!Number.isFinite(total) || total <= 0) return '-'
+    if (!Number.isFinite(total) || total < 0) return '-'
     const hours = Math.floor(total / 3600)
     const minutes = Math.floor((total % 3600) / 60)
     const remainSeconds = total % 60
@@ -1034,18 +1205,199 @@ function FileTree({ tree, onSelect }) {
 function TreeNodes({ nodes, onSelect }) {
     return (
         <div className="tree-nodes">
-            {nodes.map((node) => (
-                <div key={node.path} className="tree-node">
-                    {node.type === 'dir' ? (
-                        <>
-                            <div className="tree-folder">{node.name}</div>
-                            <TreeNodes nodes={node.children || []} onSelect={onSelect} />
-                        </>
-                    ) : (
-                        <button className="tree-file" onClick={() => onSelect(node.path)}>{node.name}</button>
-                    )}
-                </div>
-            ))}
+            {nodes.map((node) => <TreeNode key={node.path} node={node} onSelect={onSelect} />)}
         </div>
     )
+}
+
+function TreeNode({ node, onSelect }) {
+    const [expanded, setExpanded] = useState(true)
+
+    if (node.type === 'dir') {
+        return (
+            <div className="tree-node">
+                <button className="tree-folder tree-folder-toggle" onClick={() => setExpanded((value) => !value)}>
+                    <span className="tree-folder-icon">{expanded ? '▾' : '▸'}</span>
+                    <span>{displayTreeNodeName(node)}</span>
+                </button>
+                {expanded ? <TreeNodes nodes={node.children || []} onSelect={onSelect} /> : null}
+            </div>
+        )
+    }
+
+    return (
+        <div className="tree-node">
+            <button className="tree-file" onClick={() => onSelect(node.path)}>{displayTreeNodeName(node)}</button>
+        </div>
+    )
+}
+
+function displayTreeNodeName(node) {
+    return resolveFileDisplayMeta(node?.path || node?.name || '', node).displayName
+}
+
+function resolveFileDisplayMeta(path, node = null, fileDetail = null) {
+    const preferred = resolveLegacyFileDisplayMeta(path)
+    const fallbackDisplayName = node?.display_name || fileDetail?.display_name || preferred.displayName
+    return {
+        displayName: preferred.displayName || fallbackDisplayName || '未命名文件',
+        fileType: preferred.fileType || resolveFileType(path),
+        docStatus: node?.doc_status || fileDetail?.doc_status || null,
+        isInternal: Boolean(node?.is_internal || fileDetail?.is_internal),
+    }
+}
+
+function resolveLegacyFileDisplayMeta(path) {
+    const normalizedPath = String(path || '').replace(/\\/g, '/')
+    const segments = normalizedPath.split('/').filter(Boolean)
+    const name = segments[segments.length - 1] || normalizedPath || '未命名文件'
+    const chapterInVolumeMatch = normalizedPath.match(/^正文\/第(\d+)卷\/第(\d{4})章\.md$/)
+    const volumeDirMatch = normalizedPath.match(/^正文\/第(\d+)卷$/)
+    if (normalizedPath === '.webnovel/state.json' || name === 'state.json') {
+        return { displayName: 'state.json', fileType: '状态文件' }
+    }
+    if (normalizedPath === '正文') {
+        return { displayName: '正文', fileType: '目录' }
+    }
+    if (volumeDirMatch) {
+        return { displayName: `第${String(Number(volumeDirMatch[1]))}卷`, fileType: '卷目录' }
+    }
+    if (normalizedPath === '.webnovel/summaries' || name === '章节摘要') {
+        return { displayName: '章节摘要', fileType: '目录' }
+    }
+    const volumePlanMatch = name.match(/^volume-(\d+)-plan\.md$/i)
+    if (volumePlanMatch) {
+        return { displayName: `第${String(Number(volumePlanMatch[1]))}卷规划.md`, fileType: '卷规划' }
+    }
+    const chapterFileMatch = name.match(/^ch(\d{4})\.md$/i)
+    if (chapterFileMatch) {
+        return { displayName: `第${String(Number(chapterFileMatch[1]))}章摘要.md`, fileType: '摘要' }
+    }
+    if (chapterInVolumeMatch) {
+        return {
+            displayName: `第${String(Number(chapterInVolumeMatch[2]))}章`,
+            fileType: '正文',
+        }
+    }
+    const chapterBodyMatch = name.match(/^第(\d{4})章\.md$/i)
+    if (chapterBodyMatch) {
+        return { displayName: `第${String(Number(chapterBodyMatch[1]))}章正文.md`, fileType: '正文' }
+    }
+    if (name === '总纲.md') {
+        return { displayName: '总纲.md', fileType: '总纲' }
+    }
+    if (segments.includes('设定集')) {
+        return { displayName: name, fileType: '设定' }
+    }
+    if (segments.includes('大纲')) {
+        return { displayName: name, fileType: '大纲' }
+    }
+    if (segments.includes('正文')) {
+        return { displayName: name, fileType: '正文' }
+    }
+    return { displayName: name, fileType: segments.length > 1 ? '文件' : '目录' }
+}
+
+function resolveFileType(path) {
+    const normalizedPath = String(path || '').replace(/\\/g, '/')
+    if (normalizedPath === '.webnovel/state.json') return '状态文件'
+    if (/\/第\d+卷$/.test(normalizedPath)) return '卷目录'
+    if (/\/第\d{4}章\.md$/.test(normalizedPath)) return '正文'
+    if (/\/ch\d{4}\.md$/i.test(normalizedPath)) return '摘要'
+    if (/volume-\d+-plan\.md$/i.test(normalizedPath)) return '卷规划'
+    if (normalizedPath.endsWith('/总纲.md')) return '总纲'
+    if (normalizedPath.includes('设定集/')) return '设定'
+    return normalizedPath.split('/').length > 1 ? '文件' : '目录'
+}
+
+function translateRelationshipType(value) {
+    return RELATIONSHIP_TYPE_LABELS[String(value || '').trim()] || String(value || '-')
+}
+
+function buildEventPayloadTags(payload) {
+    const items = []
+    const pairs = [
+        ['attempt', '尝试'],
+        ['retry_count', '重试'],
+        ['timeout_seconds', '超时'],
+        ['http_status', 'HTTP'],
+        ['error_code', '错误码'],
+    ]
+    pairs.forEach(([key, label]) => {
+        const value = payload?.[key]
+        if (value === null || value === undefined || value === '') return
+        items.push({ label, value: key === 'timeout_seconds' ? `${value} 秒` : String(value) })
+    })
+    return items
+}
+
+function buildChapterSummaries(chapters, entities, relationships) {
+    const hasFirstAppearance = (entities || []).some((item) => item?.first_appearance !== undefined && item?.first_appearance !== null)
+    const items = (chapters || []).map((chapter) => {
+        const number = Number(chapter.chapter || 0)
+        return {
+            chapter: number,
+            title: chapter.title || '',
+            entityCount: (entities || []).filter((item) => Number(hasFirstAppearance ? item.first_appearance : item.last_appearance || 0) === number).length,
+            relationshipCount: (relationships || []).filter((item) => Number(item.chapter || 0) === number).length,
+        }
+    }).filter((item) => item.chapter > 0)
+    return {
+        items,
+        title: hasFirstAppearance ? '本章新增摘要' : '本章实体/关系摘要',
+        entityLabel: hasFirstAppearance ? '新增实体' : '实体',
+        relationshipLabel: hasFirstAppearance ? '新增关系' : '关系',
+    }
+}
+
+function treeContainsPath(tree, targetPath) {
+    const target = String(targetPath || '').trim()
+    if (!target) return false
+    const nodes = Object.values(tree || {}).flat()
+    return walkTreeNodes(nodes).some((node) => node?.type === 'file' && node.path === target)
+}
+
+function walkTreeNodes(nodes) {
+    const output = []
+    ;(nodes || []).forEach((node) => {
+        output.push(node)
+        if (node?.children?.length) {
+            output.push(...walkTreeNodes(node.children))
+        }
+    })
+    return output
+}
+
+function findTreeNode(tree, targetPath) {
+    if (!targetPath) return null
+    return walkTreeNodes(Object.values(tree || {}).flat()).find((node) => node?.path === targetPath) || null
+}
+
+function emptyFileDetail() {
+    return {
+        path: '',
+        content: '',
+        exists: false,
+        is_binary: false,
+        encoding: 'utf-8',
+        size: 0,
+        modified_at: '',
+        display_name: '',
+        is_internal: false,
+        doc_status: null,
+        summary_card: null,
+        internal_hint: '',
+    }
+}
+
+function displayPathAlias(path) {
+    return resolveFileDisplayMeta(path).displayName
+}
+
+function formatFileSize(size) {
+    const value = Number(size || 0)
+    if (!Number.isFinite(value) || value <= 0) return '-'
+    if (value < 1024) return `${value} B`
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }

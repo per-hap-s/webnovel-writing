@@ -99,6 +99,7 @@ pre {
 .status-pill.danger { color: var(--danger); }
 .content {
     padding: 24px;
+    min-width: 0;
 }
 .page-grid {
     display: grid;
@@ -113,6 +114,7 @@ pre {
     border-radius: 24px;
     padding: 20px;
     box-shadow: var(--shadow);
+    min-width: 0;
 }
 .panel-title, .subsection-title {
     font-size: 1.1rem;
@@ -239,9 +241,27 @@ pre {
     display: grid;
     grid-template-columns: 320px 1fr;
     gap: 20px;
+    align-items: start;
 }
 .list-panel, .detail-panel {
     min-height: 70vh;
+}
+.files-layout {
+    grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+    min-height: calc(100vh - 48px);
+    align-items: stretch;
+}
+.file-tree-panel, .file-preview-panel {
+    min-height: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+.file-tree-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
 }
 .task-list, .event-list, .approval-list {
     display: grid;
@@ -301,6 +321,11 @@ pre {
 .runtime-summary {
     margin-top: 4px;
 }
+.task-target {
+    margin-top: 4px;
+    color: var(--accent);
+    font-weight: 700;
+}
 .muted {
     color: var(--muted);
 }
@@ -311,6 +336,15 @@ pre {
 .subsection {
     margin-top: 18px;
 }
+.raw-output-details summary,
+.error-details summary {
+    cursor: pointer;
+    color: var(--accent);
+}
+.raw-output-details {
+    display: grid;
+    gap: 10px;
+}
 .code-block {
     background: #1e1c1a;
     color: #f7f3ea;
@@ -318,9 +352,29 @@ pre {
     padding: 16px;
     max-height: 320px;
     overflow: auto;
+    margin: 0;
 }
 .code-block.large {
     min-height: 60vh;
+}
+.file-preview {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    max-height: none;
+}
+.file-meta-card {
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: white;
+    border: 1px solid var(--line);
+}
+.file-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px 12px;
+    font-size: 0.88rem;
 }
 .table-wrap {
     overflow: auto;
@@ -355,6 +409,20 @@ th, td {
     color: var(--muted);
     margin-bottom: 6px;
 }
+.event-payload-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+.event-payload-tag {
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(22, 105, 122, 0.08);
+    border: 1px solid rgba(22, 105, 122, 0.16);
+    font-size: 0.8rem;
+    color: var(--muted);
+}
 .tree-root, .tree-nodes {
     display: grid;
     gap: 8px;
@@ -371,6 +439,22 @@ th, td {
 }
 .tree-title, .tree-folder {
     font-weight: 700;
+}
+.tree-folder-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    text-align: left;
+}
+.tree-folder-icon {
+    color: var(--muted);
+    width: 1rem;
+    display: inline-flex;
+    justify-content: center;
 }
 .tree-file {
     padding: 6px 0;
@@ -400,6 +484,15 @@ th, td {
     .sidebar {
         border-right: none;
         border-bottom: 1px solid rgba(31, 27, 24, 0.08);
+    }
+    .files-layout {
+        min-height: auto;
+    }
+    .file-tree-panel, .file-preview-panel {
+        height: auto;
+    }
+    .file-tree-scroll, .file-preview {
+        min-height: auto;
     }
 }
 
@@ -467,4 +560,24 @@ th, td {
     background: white;
     border: 1px solid var(--line);
     font-size: 0.85rem;
+}
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+.summary-card {
+    padding: 14px;
+    border-radius: 16px;
+    background: white;
+    border: 1px solid var(--line);
+    display: grid;
+    gap: 6px;
+}
+.summary-card-title {
+    font-weight: 700;
+}
+.summary-card-meta {
+    font-size: 0.84rem;
+    color: var(--muted);
 }

@@ -59,6 +59,10 @@ class RetryRequest(BaseModel):
     resume_from_step: Optional[str] = None
 
 
+class CancelTaskRequest(BaseModel):
+    reason: str = ""
+
+
 class ReviewDecisionRequest(BaseModel):
     task_id: str
     reason: str = ""

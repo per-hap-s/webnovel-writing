@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,7 +21,23 @@ FILE_LOCK_TIMEOUT = 30
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="microseconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _parse_sort_datetime(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        return parsed.replace(tzinfo=local_tz).astimezone(timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class TaskStore:
@@ -189,7 +205,7 @@ class TaskStore:
             except json.JSONDecodeError as e:
                 logger.warning("任务文件 JSON 解析失败，文件: %s，错误: %s", str(path), e)
                 continue
-        tasks.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        tasks.sort(key=lambda item: _parse_sort_datetime(item.get("created_at")), reverse=True)
         return tasks[:limit]
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -377,7 +393,17 @@ class TaskStore:
             current_step=step_name,
             interrupted_at=_now_iso(),
             finished_at=None,
-            error={"code": "TASK_INTERRUPTED", "message": reason},
+            error={"code": "TASK_INTERRUPTED", "message": reason, "retryable": True},
+        )
+
+    def mark_cancelled(self, task_id: str, step_name: Optional[str], reason: str) -> Dict[str, Any]:
+        return self.update_task(
+            task_id,
+            status="interrupted",
+            current_step=step_name,
+            interrupted_at=_now_iso(),
+            finished_at=_now_iso(),
+            error={"code": "TASK_CANCELLED", "message": reason, "retryable": False},
         )
 
     def mark_rejected(self, task_id: str, reason: str) -> Dict[str, Any]:
@@ -432,11 +458,11 @@ class TaskStore:
             if not task_id or task.get("status") != "running" or task_id in active:
                 continue
             current_step = task.get("current_step")
-            self.mark_interrupted(task_id, current_step, "Task interrupted before service restart recovery")
+            self.mark_interrupted(task_id, current_step, "服务重启前任务未完成，已中断，可从当前步骤继续处理。")
             self.append_event(
                 task_id,
                 "warning",
-                "Task marked interrupted after service restart",
+                "服务重启后检测到未完成任务，已标记为中断",
                 step_name=current_step,
                 payload={"resume_hint": current_step},
             )

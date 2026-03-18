@@ -18,7 +18,10 @@ from scripts.data_modules.config import load_runtime_env
 
 STEP_ERROR_MESSAGES = {
     "LLM_NOT_CONFIGURED": "请先配置写作模型的 API Key 和模型名称。",
+    "LLM_TIMEOUT": "写作模型请求超时。",
+    "LLM_CONNECTION_ERROR": "写作模型接口连接失败。",
     "LLM_HTTP_ERROR": "写作模型接口请求失败。",
+    "LLM_INVALID_RESPONSE": "写作模型返回的数据格式无效。",
     "LLM_REQUEST_FAILED": "写作模型接口连接失败。",
     "LLM_RESPONSE_INVALID": "写作模型返回的数据格式无效。",
     "INVALID_STEP_OUTPUT": "步骤输出中不包含有效 JSON 对象。",
@@ -28,24 +31,6 @@ STEP_ERROR_MESSAGES = {
     "CODEX_EXEC_ERROR": "Codex CLI 调用失败。",
     "CODEX_STEP_FAILED": "Codex 步骤执行失败。",
 }
-
-STEP_ERROR_MESSAGES.update(
-    {
-        "LLM_NOT_CONFIGURED": "请先配置写作模型的 API Key 和模型名称。",
-        "LLM_TIMEOUT": "写作模型请求超时。",
-        "LLM_CONNECTION_ERROR": "写作模型接口连接失败。",
-        "LLM_HTTP_ERROR": "写作模型接口请求失败。",
-        "LLM_INVALID_RESPONSE": "写作模型返回的数据格式无效。",
-        "LLM_REQUEST_FAILED": "写作模型接口连接失败。",
-        "LLM_RESPONSE_INVALID": "写作模型返回的数据格式无效。",
-        "INVALID_STEP_OUTPUT": "步骤输出中不包含有效 JSON 对象。",
-        "CODEX_CLI_NOT_FOUND": "未找到 Codex CLI 可执行文件。",
-        "CODEX_AUTH_REQUIRED": "Codex CLI 尚未登录。",
-        "CODEX_TIMEOUT": "Codex 步骤执行超时。",
-        "CODEX_EXEC_ERROR": "Codex CLI 调用失败。",
-        "CODEX_STEP_FAILED": "Codex 步骤执行失败。",
-    }
-)
 
 
 def _ensure_str(data: Union[str, bytes, None]) -> str:
@@ -125,6 +110,96 @@ def _balanced_json_candidates(raw: str) -> tuple[list[str], bool]:
     return candidates, start is not None
 
 
+def _repair_truncated_json_object(raw: str) -> Optional[str]:
+    start: Optional[int] = None
+    stack: list[str] = []
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(raw):
+        if start is None:
+            if char == "{":
+                start = index
+                stack = ["}"]
+                in_string = False
+                escape = False
+            continue
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            stack.append("}")
+            continue
+        if char == "[":
+            stack.append("]")
+            continue
+        if char in {"}", "]"}:
+            if not stack or stack[-1] != char:
+                return None
+            stack.pop()
+            if not stack:
+                # The object already closed cleanly; this is not a truncation case.
+                return None
+
+    if start is None or not stack:
+        return None
+    candidate = raw[start:]
+    trailing_closers = ""
+    if in_string:
+        while candidate and candidate[-1] in {"}", "]"} and stack and stack[-1] == candidate[-1]:
+            trailing_closers = candidate[-1] + trailing_closers
+            stack.pop()
+            candidate = candidate[:-1]
+    suffix = ""
+    if in_string:
+        suffix = "\\\"" if escape else "\""
+    return candidate + suffix + trailing_closers + "".join(reversed(stack))
+
+
+def _extract_text_from_content_part(part: Any) -> str:
+    if isinstance(part, str):
+        return part
+    if isinstance(part, dict):
+        text_value = part.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        if isinstance(text_value, dict):
+            nested_value = text_value.get("value")
+            if isinstance(nested_value, str):
+                return nested_value
+        for key in ("value", "content", "output_text"):
+            candidate = part.get(key)
+            if isinstance(candidate, str):
+                return candidate
+    return ""
+
+
+def _extract_message_content(choice: Dict[str, Any]) -> str:
+    message = choice.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts = [_extract_text_from_content_part(part) for part in content]
+            return "\n".join(part for part in text_parts if part).strip()
+    for key in ("output_text", "content", "text"):
+        candidate = choice.get(key)
+        if isinstance(candidate, str):
+            return candidate
+    return ""
+
+
 def extract_json_payload_details(raw: str, required_keys: Optional[list[str]] = None) -> JsonExtractionResult:
     raw = (raw or "").strip()
     if not raw:
@@ -175,6 +250,19 @@ def extract_json_payload_details(raw: str, required_keys: Optional[list[str]] = 
             )
 
     if truncated:
+        repaired_candidate = _repair_truncated_json_object(raw)
+        if repaired_candidate:
+            try:
+                parsed = json.loads(repaired_candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return _finalize_extraction_result(
+                    parsed,
+                    stage="json_truncated_repaired",
+                    recovered=True,
+                    required_keys=required_keys,
+                )
         return _finalize_extraction_result(
             None,
             stage="json_truncated",
@@ -361,6 +449,27 @@ class LLMRunner:
         payload = json.dumps(prompt_bundle.get("input", {}), ensure_ascii=False, indent=2)
         schema_hint = json.dumps(step_spec.get("output_schema", {}), ensure_ascii=False, indent=2)
         instructions = (step_spec.get("instructions", "") or "").strip()
+        step_name = str(step_spec.get("name") or "").strip().lower()
+        if step_name == "context":
+            instructions = (
+                f"{instructions}\n\n"
+                "Additional hard requirements for this step:\n"
+                "- Return concise JSON only.\n"
+                "- `task_brief` and `contract_v2` must stay compact and structured.\n"
+                "- `draft_prompt` must be a short plain-text string, not a full document dump.\n"
+                "- If line breaks are needed inside `draft_prompt`, encode them as escaped \\n inside the JSON string.\n"
+                "- Do not include markdown fences, commentary, or raw multi-line prose outside the JSON object."
+            ).strip()
+        elif step_name in {"plan", "draft", "polish", "data-sync"}:
+            instructions = (
+                f"{instructions}\n\n"
+                "Additional hard requirements for this step:\n"
+                "- Return exactly one complete JSON object and nothing else.\n"
+                "- Do not use markdown fences, bullet lists, or explanatory prose outside the JSON object.\n"
+                "- Keep string fields concise enough to fit inside a single valid JSON response.\n"
+                "- Do not omit required keys, and do not rename contract fields.\n"
+                "- Before finishing, check that every string is properly closed and the full object is syntactically valid JSON."
+            ).strip()
 
         reference_docs = prompt_bundle.get("reference_documents", [])
         if reference_docs:
@@ -717,7 +826,7 @@ class OpenAICompatibleRunner(LLMRunner):
 
         output_file.write_text(raw_response, encoding="utf-8")
         parsed = json.loads(raw_response)
-        content = parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = _ensure_str(_extract_message_content(parsed.get("choices", [{}])[0]))
         structured_output = extract_json_payload(content)
         if structured_output is None:
             return StepResult(
@@ -730,7 +839,7 @@ class OpenAICompatibleRunner(LLMRunner):
                 structured_output=None,
                 prompt_file=str(prompt_file),
                 output_file=str(output_file),
-                error={"code": "INVALID_STEP_OUTPUT", "message": "LLM 输出中不包含有效 JSON 对象"},
+                error={"code": "INVALID_STEP_OUTPUT", "message": STEP_ERROR_MESSAGES["INVALID_STEP_OUTPUT"]},
             )
 
         return StepResult(
@@ -1000,7 +1109,7 @@ class OpenAICompatibleRunner(LLMRunner):
                     metadata=metadata,
                 )
 
-            content = _ensure_str(choices[0].get("message", {}).get("content", ""))
+            content = _ensure_str(_extract_message_content(choices[0]))
             extraction = extract_json_payload_details(content, required_keys=step_spec.get("required_output_keys"))
             metadata.update(
                 {
@@ -1195,6 +1304,25 @@ class CodexCliRunner(LLMRunner):
             },
         }
 
+    def _timeout_seconds_for_step(self, step_name: Any) -> int:
+        return max(1, self.timeout_ms // 1000)
+
+    def _base_metadata(self, step_name: Any) -> Dict[str, Any]:
+        return {
+            "attempt": 1,
+            "timeout_seconds": self._timeout_seconds_for_step(step_name),
+            "retry_count": 0,
+        }
+
+    def _parse_structured_output(self, step_spec: Dict[str, Any], content: str) -> tuple[JsonExtractionResult, Dict[str, Any]]:
+        extraction = extract_json_payload_details(content, required_keys=step_spec.get("required_output_keys"))
+        metadata = {
+            "parse_stage": extraction.stage,
+            "json_extraction_recovered": extraction.recovered,
+            "missing_required_keys": list(extraction.missing_required_keys),
+        }
+        return extraction, metadata
+
     def _execute(
         self,
         step_spec: Dict[str, Any],
@@ -1207,6 +1335,7 @@ class CodexCliRunner(LLMRunner):
     ) -> StepResult:
         binary, resolved_binary = self._discover_binary()
         self.binary = binary
+        base_metadata = self._base_metadata(step_spec.get("name"))
         if resolved_binary is None:
             return StepResult(
                 step_name=step_spec["name"],
@@ -1218,7 +1347,12 @@ class CodexCliRunner(LLMRunner):
                 structured_output=None,
                 prompt_file=str(prompt_file),
                 output_file=str(output_file),
-                error={"code": "CODEX_CLI_NOT_FOUND", "message": f"Missing CLI executable: {binary}"},
+                error={"code": "CODEX_CLI_NOT_FOUND", "message": STEP_ERROR_MESSAGES["CODEX_CLI_NOT_FOUND"]},
+                metadata=base_metadata | {
+                    "parse_stage": "not_started",
+                    "json_extraction_recovered": False,
+                    "missing_required_keys": [],
+                },
             )
 
         last_message_file = output_file.with_name("assistant-last-message.txt")
@@ -1240,18 +1374,21 @@ class CodexCliRunner(LLMRunner):
             assistant_message = ""
             if last_message_file.exists():
                 assistant_message = last_message_file.read_text(encoding="utf-8")
-            structured_output = extract_json_payload(assistant_message or partial_stdout)
-            if structured_output is not None:
+            content = assistant_message or partial_stdout
+            extraction, parse_metadata = self._parse_structured_output(step_spec, content)
+            metadata = base_metadata | parse_metadata
+            if extraction.payload is not None:
                 return StepResult(
                     step_name=step_spec["name"],
                     success=True,
                     return_code=0,
                     timing_ms=0,
-                    stdout=assistant_message or partial_stdout,
+                    stdout=content,
                     stderr=partial_stderr,
-                    structured_output=structured_output,
+                    structured_output=extraction.payload,
                     prompt_file=str(prompt_file),
                     output_file=str(output_file),
+                    metadata=metadata,
                 )
             return StepResult(
                 step_name=step_spec["name"],
@@ -1263,7 +1400,16 @@ class CodexCliRunner(LLMRunner):
                 structured_output=None,
                 prompt_file=str(prompt_file),
                 output_file=str(output_file),
-                error={"code": "CODEX_TIMEOUT", "message": f"步骤执行超时：{self.timeout_ms} 毫秒"},
+                error={
+                    "code": "CODEX_TIMEOUT",
+                    "message": STEP_ERROR_MESSAGES["CODEX_TIMEOUT"],
+                    "attempt": 1,
+                    "retryable": False,
+                    "timeout_seconds": metadata["timeout_seconds"],
+                    "parse_stage": parse_metadata["parse_stage"],
+                    "raw_output_present": bool(content.strip()),
+                },
+                metadata=metadata,
             )
         except OSError as exc:
             return StepResult(
@@ -1277,6 +1423,11 @@ class CodexCliRunner(LLMRunner):
                 prompt_file=str(prompt_file),
                 output_file=str(output_file),
                 error={"code": "CODEX_EXEC_ERROR", "message": str(exc)},
+                metadata=base_metadata | {
+                    "parse_stage": "not_started",
+                    "json_extraction_recovered": False,
+                    "missing_required_keys": [],
+                },
             )
 
         stdout = _ensure_str(completed.stdout)
@@ -1286,16 +1437,23 @@ class CodexCliRunner(LLMRunner):
         assistant_message = ""
         if last_message_file.exists():
             assistant_message = last_message_file.read_text(encoding="utf-8")
-        structured_output = extract_json_payload(assistant_message or stdout)
+        content = assistant_message or stdout
+        extraction, parse_metadata = self._parse_structured_output(step_spec, content)
+        metadata = base_metadata | parse_metadata
         error = None
         success = completed.returncode == 0
         if not success:
             error = self._map_error(stderr or stdout)
-        elif structured_output is None:
+        elif extraction.payload is None:
             success = False
             error = {
                 "code": "INVALID_STEP_OUTPUT",
-                "message": "Codex 输出中不包含有效 JSON 对象",
+                "message": STEP_ERROR_MESSAGES["INVALID_STEP_OUTPUT"],
+                "attempt": 1,
+                "retryable": False,
+                "timeout_seconds": metadata["timeout_seconds"],
+                "parse_stage": parse_metadata["parse_stage"],
+                "raw_output_present": bool(content.strip()),
             }
 
         return StepResult(
@@ -1303,12 +1461,13 @@ class CodexCliRunner(LLMRunner):
             success=success,
             return_code=int(completed.returncode),
             timing_ms=0,
-            stdout=assistant_message or stdout,
+            stdout=content,
             stderr=stderr,
-            structured_output=structured_output,
+            structured_output=extraction.payload,
             prompt_file=str(prompt_file),
             output_file=str(output_file),
             error=error,
+            metadata=metadata,
         )
 
     def _map_error(self, raw: str) -> Dict[str, str]:

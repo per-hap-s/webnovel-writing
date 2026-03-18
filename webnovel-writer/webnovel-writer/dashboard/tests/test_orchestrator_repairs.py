@@ -16,18 +16,27 @@ from dashboard.orchestrator import (
 from scripts.init_project import _build_master_outline, build_initial_planning_profile
 
 
-def step_result(step_name: str, payload: dict, *, success: bool = True) -> StepResult:
+def step_result(
+    step_name: str,
+    payload: dict,
+    *,
+    success: bool = True,
+    stdout: str | None = None,
+    error: dict | None = None,
+    metadata: dict | None = None,
+) -> StepResult:
     return StepResult(
         step_name=step_name,
         success=success,
         return_code=0 if success else 1,
         timing_ms=10,
-        stdout=json.dumps(payload, ensure_ascii=False),
+        stdout=stdout if stdout is not None else json.dumps(payload, ensure_ascii=False),
         stderr="",
         structured_output=payload,
         prompt_file="prompt.md",
         output_file="output.json",
-        error=None if success else {"code": "STEP_FAILED", "message": "failed"},
+        error=None if success else (error or {"code": "STEP_FAILED", "message": "failed"}),
+        metadata=metadata,
     )
 
 
@@ -49,6 +58,7 @@ class SequenceRunner:
     def __init__(self, mapping: dict[str, list[StepResult] | StepResult]):
         self.mapping = mapping
         self.calls: list[str] = []
+        self.prompt_bundles: list[tuple[str, dict]] = []
 
     def probe(self):
         return {"provider": "sequence-runner", "installed": True, "configured": True}
@@ -56,6 +66,7 @@ class SequenceRunner:
     def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
         step_name = step_spec["name"]
         self.calls.append(step_name)
+        self.prompt_bundles.append((step_name, prompt_bundle))
         payload = self.mapping[step_name]
         if isinstance(payload, list):
             assert payload, f"no queued result for {step_name}"
@@ -334,8 +345,8 @@ def test_write_data_sync_persists_chapter_index_and_canonical_word_count(tmp_pat
     assert chapter_record is not None
     assert chapter_record["title"] == "Chapter 1"
     assert chapter_record["word_count"] == actual_word_count
-    assert chapter_record["file_path"].endswith("ch0001.md")
-    assert (project_root / BODY_DIR_NAME / "ch0001.md").is_file()
+    assert chapter_record["file_path"] == service._default_chapter_file(1)
+    assert (project_root / service._default_chapter_file(1)).is_file()
     assert (project_root / ".webnovel" / "summaries" / "ch0001.md").is_file()
     metrics = service.index_manager.get_recent_review_metrics(limit=1)[0]
     assert metrics["start_chapter"] == 1
@@ -344,6 +355,51 @@ def test_write_data_sync_persists_chapter_index_and_canonical_word_count(tmp_pat
     assert (project_root / REVIEW_REPORT_DIR_NAME / "第1-1章审查报告.md").is_file()
     state = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
     assert state["review_checkpoints"][-1]["report"] == f"{REVIEW_REPORT_DIR_NAME}/第1-1章审查报告.md"
+
+
+def test_write_data_sync_uses_requested_chapter_as_only_write_target(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    bootstrap_service = make_service(project_root, MappingRunner({}))
+    chapter_one_path = project_root / bootstrap_service._default_chapter_file(1)
+    chapter_one_path.parent.mkdir(parents=True, exist_ok=True)
+    chapter_one_path.write_text("chapter-one-original", encoding="utf-8")
+
+    content = long_content("Chapter 2 canonical target")
+    actual_word_count = len("".join(content.split()))
+    wrong_chapter_file = bootstrap_service._default_chapter_file(1)
+    wrong_summary_file = bootstrap_service._default_summary_file(1)
+    runner = MappingRunner(
+        {
+            "context": {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"},
+            "draft": {"chapter_file": wrong_chapter_file, "content": content, "word_count": actual_word_count},
+            "consistency-review": review_payload(),
+            "continuity-review": review_payload(),
+            "ooc-review": review_payload(),
+            "polish": {"chapter_file": wrong_chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []},
+            "data-sync": {
+                "files_written": [wrong_chapter_file],
+                "summary_file": wrong_summary_file,
+                "state_updated": True,
+                "index_updated": True,
+                "chapter_meta": {"title": "Chapter 2", "location": "Night Rain City", "characters": ["Shen Yan"]},
+            },
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("write", {"chapter": 2, "require_manual_approval": False})
+
+    expected_chapter_path = project_root / service._default_chapter_file(2)
+    expected_summary_path = project_root / service._default_summary_file(2)
+    assert task["status"] == "completed"
+    assert chapter_one_path.read_text(encoding="utf-8") == "chapter-one-original"
+    assert expected_chapter_path.is_file()
+    assert expected_summary_path.is_file()
+    assert service.index_manager.get_chapter(2)["file_path"] == service._relative_project_path(expected_chapter_path)
+    metrics = service.index_manager.get_recent_review_metrics(limit=5)
+    assert any(item["start_chapter"] == 2 and item["end_chapter"] == 2 for item in metrics)
+    messages = [event["message"] for event in service.get_events(task["id"])]
+    assert "Write target normalized" in messages
 
 
 def test_write_data_sync_persists_structured_settings_into_state_and_index(tmp_path: Path):
@@ -460,6 +516,38 @@ def test_write_data_sync_rejects_truncated_or_bogus_word_count(tmp_path: Path):
     assert not (project_root / BODY_DIR_NAME / "ch0001.md").exists()
 
 
+def test_write_data_sync_fails_when_chapter_index_is_missing_after_writeback(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    bootstrap_service = make_service(project_root, MappingRunner({}))
+    chapter_file = bootstrap_service._default_chapter_file(2)
+    summary_file = bootstrap_service._default_summary_file(2)
+    content = long_content("Chapter 2")
+    runner = MappingRunner(
+        {
+            "context": {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"},
+            "draft": {"chapter_file": chapter_file, "content": content, "word_count": len("".join(content.split()))},
+            "consistency-review": review_payload(),
+            "continuity-review": review_payload(),
+            "ooc-review": review_payload(),
+            "polish": {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []},
+            "data-sync": {
+                "files_written": [chapter_file],
+                "summary_file": summary_file,
+                "state_updated": True,
+                "index_updated": True,
+                "chapter_meta": {"title": "Chapter 2", "location": "Night Rain City", "characters": ["Shen Yan"]},
+            },
+        }
+    )
+    service = make_service(project_root, runner)
+    service.index_manager.add_chapter = lambda chapter_meta: None
+
+    task = service.run_task_sync("write", {"chapter": 2, "require_manual_approval": False})
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "WRITEBACK_CONSISTENCY_ERROR"
+
+
 def test_review_range_loads_real_chapters_and_persists_aggregate_metrics(tmp_path: Path):
     project_root = make_project(tmp_path)
     (project_root / BODY_DIR_NAME / "ch0001.md").write_text(long_content("Chapter 1"), encoding="utf-8")
@@ -531,7 +619,7 @@ def test_resume_task_recovers_interrupted_write_from_data_sync(tmp_path: Path):
     assert resume_task["status"] == "completed"
     assert resume_task["resume_target_task_id"] == target["id"]
     assert resumed_target["status"] == "completed"
-    assert (project_root / BODY_DIR_NAME / "ch0004.md").is_file()
+    assert (project_root / service._default_chapter_file(4)).is_file()
     assert (project_root / ".webnovel" / "summaries" / "ch0004.md").is_file()
     assert service.index_manager.get_chapter(4) is not None
 
@@ -553,6 +641,174 @@ def test_plan_auto_retries_once_for_missing_required_keys(tmp_path: Path):
 
     assert task["status"] == "completed"
     assert runner.calls == ["plan", "plan"]
+    assert "step_auto_retried" in messages
+
+
+def test_write_context_auto_retries_once_and_compacts_context_payload_for_later_steps(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Chapter 1")
+    chapter_file = f"{BODY_DIR_NAME}/ch0001.md"
+    long_draft_prompt = "line\\n" * 900
+    runner = SequenceRunner(
+        {
+            "context": [
+                step_result(
+                    "context",
+                    {},
+                    success=False,
+                    stdout='{"task_brief": {"chapter": 1}',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_invalid",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_invalid",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "context",
+                    {
+                        "task_brief": {"chapter": 1, "goal": "Hook the opening accident"},
+                        "contract_v2": {
+                            "目标": "赶去街口救人",
+                            "阻力": "暴雨与信息不足",
+                            "代价": "可能暴露异常敏感",
+                            "本章变化": "从守店转为主动行动",
+                            "未闭合问题": "预警为何提前命中",
+                            "核心冲突一句话": "他必须先行动再验证。",
+                            "开头类型": "悬疑",
+                            "情绪节奏": "低到高",
+                            "信息密度": "medium",
+                            "是否过渡章": False,
+                            "额外长字段": "should be trimmed",
+                        },
+                        "draft_prompt": long_draft_prompt,
+                    },
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 150,
+                        "parse_stage": "strict_json",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+            "draft": step_result("draft", {"chapter_file": chapter_file, "content": content, "word_count": len("".join(content.split()))}),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+            "ooc-review": step_result("ooc-review", review_payload()),
+            "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
+            "data-sync": step_result(
+                "data-sync",
+                {
+                    "files_written": [chapter_file],
+                    "summary_file": ".webnovel/summaries/ch0001.md",
+                    "state_updated": True,
+                    "index_updated": True,
+                    "chapter_meta": {"title": "Chapter 1", "location": "Night Rain City", "characters": ["Shen Yan"]},
+                },
+            ),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+
+    assert task["status"] == "completed"
+    assert runner.calls[:2] == ["context", "context"]
+    messages = [event["message"] for event in service.get_events(task["id"])]
+    assert "step_auto_retried" in messages
+
+    draft_bundle = next(bundle for step_name, bundle in runner.prompt_bundles if step_name == "draft")
+    prior_context = draft_bundle["input"]["prior_step_results"]["context"]["structured_output"]
+    assert prior_context["draft_prompt"] == "[stored separately in project context]"
+    assert prior_context["draft_prompt_ref"] == ".webnovel/context/current-draft-prompt.txt"
+    assert "draft_prompt_preview" in prior_context
+    assert "额外长字段" not in prior_context["contract_v2"]
+
+    context_paths = [item["path"] for item in draft_bundle["project_context"]]
+    assert ".webnovel/context/current-draft-prompt.txt" in context_paths
+    assert ".webnovel/context/current-context-package.json" in context_paths
+
+
+def test_write_draft_auto_retries_once_after_invalid_json_output(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Chapter 1")
+    chapter_file = f"{BODY_DIR_NAME}/ch0001.md"
+    runner = SequenceRunner(
+        {
+            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "draft": [
+                step_result(
+                    "draft",
+                    {},
+                    success=False,
+                    stdout='{"chapter_file": "正文/当前请求章节正文.md"',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 240,
+                        "parse_stage": "json_invalid",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 240,
+                        "parse_stage": "json_invalid",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "draft",
+                    {"chapter_file": chapter_file, "content": content, "word_count": len("".join(content.split()))},
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 240,
+                        "parse_stage": "strict_json",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+            "ooc-review": step_result("ooc-review", review_payload()),
+            "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
+            "data-sync": step_result(
+                "data-sync",
+                {
+                    "files_written": [chapter_file],
+                    "summary_file": ".webnovel/summaries/ch0001.md",
+                    "state_updated": True,
+                    "index_updated": True,
+                    "chapter_meta": {"title": "Chapter 1", "location": "Night Rain City", "characters": ["Shen Yan"]},
+                },
+            ),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+
+    assert task["status"] == "completed"
+    assert runner.calls[:3] == ["context", "draft", "draft"]
+    messages = [event["message"] for event in service.get_events(task["id"])]
     assert "step_auto_retried" in messages
 
 
@@ -593,3 +849,202 @@ def test_service_startup_marks_stale_running_tasks_interrupted(tmp_path: Path):
 
     assert stale["status"] == "interrupted"
     assert stale["error"]["code"] == "TASK_INTERRUPTED"
+    assert "可从当前步骤继续处理" in stale["error"]["message"]
+
+
+def test_service_startup_auto_completes_stale_write_task_when_writeback_is_already_complete(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = make_service(project_root, MappingRunner({}))
+    chapter = 2
+    chapter_file = service._default_chapter_file(chapter)
+    summary_file = service._default_summary_file(chapter)
+    chapter_path = project_root / chapter_file
+    summary_path = project_root / summary_file
+    chapter_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    chapter_path.write_text("第2章正文\n", encoding="utf-8")
+    summary_path.write_text("# 第2章摘要\n", encoding="utf-8")
+
+    state_path = project_root / ".webnovel" / "state.json"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    state_data["progress"]["current_chapter"] = 2
+    state_data.setdefault("chapter_meta", {})["0002"] = {"title": "第二章"}
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with service.index_manager._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO chapters (chapter, title, location, word_count, characters, summary, file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (2, "第二章", "老城区", 3200, json.dumps(["沈言"], ensure_ascii=False), "摘要", chapter_file),
+        )
+        cursor.execute(
+            """
+            INSERT INTO review_metrics
+            (start_chapter, end_chapter, overall_score, dimension_scores, severity_counts, critical_issues, report_file, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (2, 2, 90, json.dumps({"plot": 90}, ensure_ascii=False), json.dumps({}, ensure_ascii=False), json.dumps([], ensure_ascii=False), "review.md", "ok"),
+        )
+        conn.commit()
+
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "data-sync", "type": "internal"}]}
+    task = service.store.create_task("write", {"chapter": 2}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow, approval_status="approved")
+    service.store.mark_running(task["id"], "data-sync")
+
+    restarted = make_service(project_root, MappingRunner({}))
+    recovered = restarted.get_task(task["id"])
+    events = restarted.get_events(task["id"])
+
+    assert recovered["status"] == "completed"
+    assert recovered["error"] is None
+    assert any(event["message"] == "服务重启后检测到写回已完成，任务已自动收口" for event in events)
+
+
+def test_service_startup_migrates_legacy_chapter_into_inferred_volume_without_using_current_volume(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    state_path = project_root / ".webnovel" / "state.json"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    state_data["progress"]["current_chapter"] = 120
+    state_data["progress"]["current_volume"] = 3
+    state_data["planning"]["latest_volume"] = "3"
+    state_data["progress"]["volumes_planned"] = []
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    legacy_path = project_root / BODY_DIR_NAME / "第0001章.md"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy chapter\n", encoding="utf-8")
+
+    restarted = make_service(project_root, MappingRunner({}))
+
+    migrated_path = project_root / BODY_DIR_NAME / "第1卷" / "第0001章.md"
+    wrong_path = project_root / BODY_DIR_NAME / "第3卷" / "第0001章.md"
+
+    assert restarted._resolve_volume_for_chapter(1) == 1
+    assert migrated_path.is_file()
+    assert not legacy_path.exists()
+    assert not wrong_path.exists()
+
+
+def test_write_data_sync_rolls_back_partial_mutations_on_consistency_failure(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = make_service(project_root, MappingRunner({}))
+    chapter = 1
+    chapter_file = service._default_chapter_file(chapter)
+    summary_file = service._default_summary_file(chapter)
+    chapter_path = project_root / chapter_file
+    summary_path = project_root / summary_file
+    chapter_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    chapter_path.write_text("旧正文内容\n", encoding="utf-8")
+    summary_path.write_text("# 旧摘要\n", encoding="utf-8")
+
+    state_path = project_root / ".webnovel" / "state.json"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    state_data["progress"] = {"current_chapter": 1, "total_words": 500}
+    state_data["chapter_meta"] = {
+        "0001": {"title": "旧标题", "location": "旧地点", "characters": ["旧角色"]}
+    }
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with service.index_manager._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO chapters (chapter, title, location, word_count, characters, summary, file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "旧标题", "旧地点", 500, json.dumps(["旧角色"], ensure_ascii=False), "旧摘要", chapter_file),
+        )
+        cursor.execute(
+            """
+            INSERT INTO review_metrics
+            (start_chapter, end_chapter, overall_score, dimension_scores, severity_counts, critical_issues, report_file, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, 1, 80, json.dumps({"consistency": 80}, ensure_ascii=False), json.dumps({}, ensure_ascii=False), json.dumps([], ensure_ascii=False), "旧报告.md", "旧审查"),
+        )
+        cursor.execute(
+            """
+            INSERT INTO entities
+            (id, type, canonical_name, tier, desc, current_json, first_appearance, last_appearance, is_protagonist, is_archived)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("shenyan", "角色", "沈言", "核心", "旧描述", json.dumps({"status": "old"}, ensure_ascii=False), 1, 1, 1, 0),
+        )
+        cursor.execute(
+            "INSERT INTO aliases (alias, entity_id, entity_type) VALUES (?, ?, ?)",
+            ("小沈", "shenyan", "角色"),
+        )
+        cursor.execute(
+            """
+            INSERT INTO relationships (from_entity, to_entity, type, description, chapter)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("shenyan", "bureau", "ally", "旧关系", 1),
+        )
+        conn.commit()
+
+    content = long_content("Rollback Chapter")
+    runner = SequenceRunner(
+        {
+            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "draft": step_result("draft", {"chapter_file": chapter_file, "content": content, "word_count": len("".join(content.split()))}),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+            "ooc-review": step_result("ooc-review", review_payload()),
+            "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
+            "data-sync": step_result(
+                "data-sync",
+                {
+                    "files_written": [chapter_file],
+                    "summary_file": summary_file,
+                    "state_updated": True,
+                    "index_updated": True,
+                    "chapter_meta": {"title": "新标题", "location": "新地点", "characters": ["沈言"]},
+                    "entities_new": [{"id": "shenyan", "name": "沈言", "type": "角色", "aliases": ["小沈", "阿言"], "summary": "新描述"}],
+                    "relationships_new": [{"from_entity": "shenyan", "to_entity": "bureau", "type": "ally", "description": "新关系"}],
+                },
+            ),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    with patch.object(service, "_validate_writeback_consistency", side_effect=ValueError("force consistency failure")):
+        task = service.run_task_sync("write", {"chapter": chapter, "require_manual_approval": False})
+
+    assert task["status"] == "failed"
+    assert chapter_path.read_text(encoding="utf-8") == "旧正文内容\n"
+    assert summary_path.read_text(encoding="utf-8") == "# 旧摘要\n"
+
+    rolled_back_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert rolled_back_state["progress"]["current_chapter"] == 1
+    assert rolled_back_state["chapter_meta"]["0001"]["title"] == "旧标题"
+
+    chapter_record = service.index_manager.get_chapter(1)
+    assert chapter_record["title"] == "旧标题"
+    assert chapter_record["file_path"] == chapter_file
+
+    review_metrics = service.index_manager.get_recent_review_metrics(limit=5)
+    assert any(record["report_file"] == "旧报告.md" for record in review_metrics)
+
+    with service.index_manager._get_conn() as conn:
+        cursor = conn.cursor()
+        entity = cursor.execute("SELECT canonical_name, desc FROM entities WHERE id = ?", ("shenyan",)).fetchone()
+        aliases = cursor.execute("SELECT alias FROM aliases WHERE entity_id = ? ORDER BY alias", ("shenyan",)).fetchall()
+        relationship = cursor.execute(
+            "SELECT description FROM relationships WHERE from_entity = ? AND to_entity = ? AND type = ?",
+            ("shenyan", "bureau", "ally"),
+        ).fetchone()
+
+    assert entity["canonical_name"] == "沈言"
+    assert entity["desc"] == "旧描述"
+    assert [row["alias"] for row in aliases] == ["小沈"]
+    assert relationship["description"] == "旧关系"
+
+    event_messages = [event["message"] for event in service.get_events(task["id"])]
+    assert "writeback_rollback_started" in event_messages
+    assert "writeback_rollback_finished" in event_messages

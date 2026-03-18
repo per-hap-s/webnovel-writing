@@ -37,16 +37,18 @@ def test_frontend_control_page_wires_rag_status():
     source = APP_PATH.read_text(encoding='utf-8-sig')
     assert "fetchJSON('/api/rag/status').then(setRagStatus).catch(() => setRagStatus(null))" in source
     assert 'label={formatRagStatusLabel(ragStatus)}' in source
-    assert '<MetricCard label="RAG"' in source
+    assert 'UI_COPY.retrievalEngine' in source
+    assert '<MetricCard label={UI_COPY.retrievalEngine}' in source
 
 
 def test_frontend_exposes_writing_model_status():
     source = APP_PATH.read_text(encoding='utf-8-sig')
     assert 'formatWritingModelPill' in source
     assert 'formatWritingModelDetail' in source
-    assert 'Codex CLI' in source
-    assert 'API / ${model}' in source
-    assert '<MetricCard label="' in source and 'formatWritingModelDetail(llmStatus)' in source
+    assert "llmStatus.mode === 'cli'" in source
+    assert "llmStatus.mode === 'api'" in source
+    assert '<MetricCard label={UI_COPY.writingEngine}' in source
+    assert 'formatWritingModelDetail(llmStatus)' in source
 
 
 def test_frontend_reads_project_info_from_state_json_shape():

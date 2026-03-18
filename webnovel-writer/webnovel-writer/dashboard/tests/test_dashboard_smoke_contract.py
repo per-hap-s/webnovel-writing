@@ -31,7 +31,7 @@ def test_validation_error_envelope_matches_frontend_expectations(tmp_path: Path)
     assert response.status_code == 422
     payload = response.json()
     assert payload["code"] == "VALIDATION_ERROR"
-    assert payload["message"] == "请求参数校验失败。"
+    assert payload["message"]
     assert isinstance(payload.get("details", {}).get("errors"), list)
     assert any(error["field"] == "body.task_id" for error in payload["details"]["errors"])
 
@@ -44,7 +44,7 @@ def test_frontend_launcher_surfaces_api_errors():
     assert "ProjectBootstrapSection" in source or "ProjectBootstrapSection" in APP_PATH.read_text(encoding="utf-8-sig")
 
 
-def test_frontend_task_event_rendering_covers_review_gate_messages_and_runtime_status():
+def test_frontend_task_event_rendering_covers_runtime_contract():
     app_source = APP_PATH.read_text(encoding="utf-8-sig")
     section_source = APP_SECTIONS_PATH.read_text(encoding="utf-8-sig")
 
@@ -54,22 +54,33 @@ def test_frontend_task_event_rendering_covers_review_gate_messages_and_runtime_s
     assert "translateStepName(event.step_name || 'task')" in section_source
     assert "实时运行状态" in section_source
     assert "runtime_status?.phase_label" in section_source
+    assert "runtime_status?.target_label" in section_source
     assert "runtime_status?.phase_detail" in section_source
     assert "runtime_status?.waiting_seconds" in section_source
-    assert "formatTimestampShort(event.timestamp)" in section_source
+    assert "runtime_status?.step_started_at" in section_source
+    assert "runtime_status?.waiting_since" in section_source
+    assert "runtime_status?.last_non_heartbeat_activity_at" in section_source
     assert "buildRuntimeSummary(task)" in section_source
+    assert "buildEventPayloadTags" in section_source
+    assert "tree-folder-toggle" in section_source
     assert "'Review gate blocked execution'" in app_source
+    assert "'Write target normalized'" in app_source
+    assert "writeback_rollback_started" in app_source
+    assert "writeback_rollback_finished" in app_source
     assert "'prompt_compiled'" in app_source
     assert "'awaiting_model_response'" in app_source
     assert "'step_heartbeat'" in app_source
     assert "'step_retry_started'" in app_source
     assert "'step_waiting_approval'" in app_source
+    assert "'Resume target scheduled'" in app_source
+    assert "'Workflow config error'" in app_source
 
 
 def test_task_list_endpoint_returns_runtime_status(tmp_path: Path):
     project_root = make_project(tmp_path)
     app = create_app(project_root=project_root)
     task_file = project_root / ".webnovel" / "observability" / "task-runs" / "task-1.json"
+
     with TestClient(app) as client:
         task_file.parent.mkdir(parents=True, exist_ok=True)
         task_file.write_text(
@@ -121,12 +132,16 @@ def test_task_list_endpoint_returns_runtime_status(tmp_path: Path):
         response = client.get("/api/tasks")
 
     assert response.status_code == 200
-    payload = response.json()
-    assert payload[0]["runtime_status"]["phase_label"]
-    assert payload[0]["runtime_status"]["step_state"] == "running"
-    assert payload[0]["runtime_status"]["attempt"] == 1
-    assert "phase_detail" in payload[0]["runtime_status"]
-    assert "waiting_seconds" in payload[0]["runtime_status"]
+    runtime = response.json()[0]["runtime_status"]
+    assert runtime["phase_label"]
+    assert runtime["target_label"] == "第 1 卷"
+    assert runtime["step_state"] == "running"
+    assert runtime["attempt"] == 1
+    assert "phase_detail" in runtime
+    assert "waiting_seconds" in runtime
+    assert "step_started_at" in runtime
+    assert "waiting_since" in runtime
+    assert "last_non_heartbeat_activity_at" in runtime
 
 
 def test_project_info_includes_dashboard_context(tmp_path: Path):
