@@ -35,6 +35,45 @@ def temp_project(tmp_path):
     )
     director_dir = cfg.project_root / ".webnovel" / "director"
     director_dir.mkdir(parents=True, exist_ok=True)
+    story_director_dir = cfg.project_root / ".webnovel" / "story-director"
+    story_director_dir.mkdir(parents=True, exist_ok=True)
+    (story_director_dir / "plan-ch0003.json").write_text(
+        json.dumps(
+            {
+                "anchor_chapter": 3,
+                "planning_horizon": 4,
+                "priority_threads": ["warning source", "trust fracture"],
+                "payoff_schedule": [{"thread": "rain warning", "target_chapter": 3, "mode": "major"}],
+                "defer_schedule": [{"thread": "final mastermind", "not_before_chapter": 6, "reason": "too early"}],
+                "risk_flags": ["Need to avoid another empty setup chapter."],
+                "transition_notes": ["Chapter 3 should convert the warning clue into visible action."],
+                "chapters": [
+                    {
+                        "chapter": 3,
+                        "role": "current-execution",
+                        "chapter_goal": "Turn the warning clue into visible action and cost.",
+                        "must_advance_threads": ["warning source", "trust fracture"],
+                        "optional_payoffs": ["rain warning"],
+                        "forbidden_resolutions": ["Do not fully explain the source this chapter."],
+                        "ending_hook_target": "Leave an actionable next-step clue at the end.",
+                    },
+                    {
+                        "chapter": 4,
+                        "role": "transition",
+                        "chapter_goal": "Carry the warning clue into the next confrontation.",
+                        "must_advance_threads": ["warning source", "trust fracture"],
+                        "optional_payoffs": ["tower clue"],
+                        "forbidden_resolutions": ["Do not reveal the mastermind in chapter 4."],
+                        "ending_hook_target": "Force Shen Yan to choose a side at the end of chapter 4.",
+                    }
+                ],
+                "rationale": "Keep the next few chapters focused on converting setup into movement.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     (director_dir / "ch0003.json").write_text(
         json.dumps(
             {
@@ -65,6 +104,10 @@ def test_context_manager_includes_director_brief_section(temp_project):
     manager = ContextManager(temp_project)
     payload = manager.build_context(3, use_snapshot=False, save_snapshot=False)
 
+    assert "story_plan" in payload["sections"]
+    story_plan = payload["sections"]["story_plan"]["content"]
+    assert story_plan["anchor_chapter"] == 3
+    assert story_plan["chapters"][0]["chapter_goal"] == "Turn the warning clue into visible action and cost."
     assert "director_brief" in payload["sections"]
     director_brief = payload["sections"]["director_brief"]["content"]
     assert director_brief["chapter"] == 3
@@ -76,7 +119,19 @@ def test_extract_chapter_context_payload_exposes_director_brief(temp_project):
 
     payload = build_chapter_context_payload(temp_project.project_root, 3)
 
+    assert payload["story_plan"]["anchor_chapter"] == 3
     assert payload["director_brief"]["chapter"] == 3
     rendered = _render_text(payload)
+    assert "Story Plan" in rendered
     assert "Director Brief" in rendered
     assert "chapter_goal" in rendered
+
+
+def test_extract_chapter_context_payload_reuses_covering_story_plan_for_followup_chapter(temp_project):
+    from extract_chapter_context import build_chapter_context_payload
+
+    payload = build_chapter_context_payload(temp_project.project_root, 4)
+
+    assert payload["story_plan"]["anchor_chapter"] == 3
+    assert any(item["chapter"] == 4 for item in payload["story_plan"]["chapters"])
+    assert payload["story_plan"]["chapters"][1]["chapter_goal"] == "Carry the warning clue into the next confrontation."

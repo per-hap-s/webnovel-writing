@@ -1,0 +1,38 @@
+{
+  "name": "guarded-write",
+  "version": 1,
+  "steps": [
+    {
+      "name": "guarded-chapter-runner",
+      "type": "internal",
+      "required_output_keys": [
+        "chapter",
+        "outcome",
+        "stop_step",
+        "safe_to_continue",
+        "next_action"
+      ],
+      "output_schema": {
+        "chapter": 1,
+        "outcome": "completed_one_chapter|blocked_story_refresh|blocked_by_review|stopped_for_approval",
+        "stop_step": "story-director|review-summary|approval-gate|data-sync",
+        "parent_task_id": "string",
+        "trigger_source": "string",
+        "child_task_id": "string",
+        "child_task_status": "string",
+        "safe_to_continue": false,
+        "story_refresh": {},
+        "review_summary": {},
+        "story_alignment": {},
+        "director_alignment": {},
+        "next_action": {
+          "can_enqueue_next": false,
+          "next_chapter": 2,
+          "next_recommended_chapter": 2,
+          "reason": "string",
+          "suggested_action": "string"
+        }
+      }
+    }
+  ]
+}

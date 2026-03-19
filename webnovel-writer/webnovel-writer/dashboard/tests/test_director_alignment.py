@@ -38,14 +38,14 @@ def make_project(tmp_path: Path) -> Path:
     return project_root
 
 
-def test_writeback_records_director_alignment(tmp_path: Path):
+def test_writeback_records_director_and_story_alignment(tmp_path: Path):
     project_root = make_project(tmp_path)
     service = OrchestrationService(project_root, runner=MappingRunner())
     service.index_manager.upsert_entity(
         EntityMeta(
             id="hero",
             type="角色",
-            canonical_name="沈言",
+            canonical_name="沈砚",
             tier="核心",
             current={},
             first_appearance=1,
@@ -53,16 +53,42 @@ def test_writeback_records_director_alignment(tmp_path: Path):
             is_protagonist=True,
         )
     )
+
     workflow = {"name": "write", "version": 1, "steps": []}
     task = service.store.create_task("write", {"chapter": 1}, workflow)
+
+    story_plan = {
+        "anchor_chapter": 1,
+        "planning_horizon": 4,
+        "priority_threads": ["雨夜警报", "信任裂缝"],
+        "payoff_schedule": [{"thread": "雨夜警报", "target_chapter": 1, "mode": "major"}],
+        "defer_schedule": [],
+        "risk_flags": [],
+        "transition_notes": ["本章要把警报转成可执行动作。"],
+        "chapters": [
+            {
+                "chapter": 1,
+                "role": "current-execution",
+                "chapter_goal": "把雨夜警报转成可见行动和代价。",
+                "must_advance_threads": ["雨夜警报", "信任裂缝"],
+                "optional_payoffs": ["雨夜警报"],
+                "forbidden_resolutions": ["不要公开幕后主使"],
+                "ending_hook_target": "章末逼主角进入观测塔。",
+            }
+        ],
+        "rationale": "当前窗口先完成动作化推进。",
+    }
+    service.store.save_step_result(task["id"], "story-director", {"success": True, "structured_output": story_plan})
+    service._write_story_plan(1, story_plan)
+
     director_brief = {
         "chapter": 1,
         "chapter_goal": "推进雨夜警报主线。",
-        "primary_conflict": "沈言必须在记忆继续受损前查出线索。",
+        "primary_conflict": "沈砚必须在记忆继续受损前查出线索。",
         "must_advance_threads": ["雨夜警报"],
         "payoff_targets": ["雨夜警报"],
         "setup_targets": ["观测塔线索"],
-        "must_use_entities": ["沈言"],
+        "must_use_entities": ["沈砚"],
         "relationship_moves": [],
         "knowledge_reveals": ["警报来源"],
         "forbidden_resolutions": ["不要一次性解释完所有疑点"],
@@ -75,9 +101,9 @@ def test_writeback_records_director_alignment(tmp_path: Path):
     service._write_director_brief(1, director_brief)
 
     payload = {
-        "content": ("沈言沿着雨夜警报留下的痕迹进入观测塔，确认警报来源并发现下一步入口。") * 20,
+        "content": ("沈砚沿着雨夜警报留下的痕迹进入观测塔，确认警报来源并发现下一步入口。") * 20,
         "summary_content": "# 第1章摘要\n\n测试摘要\n",
-        "chapter_meta": {"title": "第一章", "location": "观测塔", "characters": ["沈言"]},
+        "chapter_meta": {"title": "第一章", "location": "观测塔", "characters": ["沈砚"]},
         "foreshadowing_items": [
             {
                 "name": "雨夜警报",
@@ -114,8 +140,96 @@ def test_writeback_records_director_alignment(tmp_path: Path):
         service._apply_write_data_sync(task["id"], service.store.get_task(task["id"]) or task, payload)
 
     refreshed = service.store.get_task(task["id"]) or {}
-    alignment = (((refreshed.get("artifacts") or {}).get("writeback") or {}).get("director_alignment") or {})
-    assert "payoff:雨夜警报" in alignment["satisfied"]
-    assert "setup:观测塔线索" in alignment["satisfied"]
-    assert "entity:沈言" in alignment["satisfied"]
-    assert "knowledge:警报来源" in alignment["satisfied"]
+    story_alignment = (((refreshed.get("artifacts") or {}).get("writeback") or {}).get("story_alignment") or {})
+    director_alignment = (((refreshed.get("artifacts") or {}).get("writeback") or {}).get("director_alignment") or {})
+
+    assert "thread:雨夜警报" in story_alignment["satisfied"]
+    assert "payoff:雨夜警报" in story_alignment["satisfied"]
+    assert "thread:信任裂缝" in story_alignment["missed"]
+
+    assert "payoff:雨夜警报" in director_alignment["satisfied"]
+    assert "setup:观测塔线索" in director_alignment["satisfied"]
+    assert "entity:沈砚" in director_alignment["satisfied"]
+    assert "knowledge:警报来源" in director_alignment["satisfied"]
+
+
+def test_writeback_marks_story_refresh_when_missed_targets_accumulate(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+
+    previous_task = service.store.create_task("write", {"chapter": 1}, {"name": "write", "version": 1, "steps": []})
+    previous_artifacts = dict(previous_task.get("artifacts") or {})
+    previous_artifacts["writeback"] = {
+        "story_alignment": {
+            "satisfied": [],
+            "missed": ["thread:旧案真相"],
+            "deferred": [],
+        }
+    }
+    service.store.update_task(previous_task["id"], artifacts=previous_artifacts, status="completed")
+
+    task = service.store.create_task("write", {"chapter": 2}, {"name": "write", "version": 1, "steps": []})
+    story_plan = {
+        "anchor_chapter": 2,
+        "planning_horizon": 4,
+        "priority_threads": ["雨夜警报", "信任裂缝"],
+        "payoff_schedule": [],
+        "defer_schedule": [],
+        "risk_flags": [],
+        "transition_notes": [],
+        "chapters": [
+            {
+                "chapter": 2,
+                "role": "current-execution",
+                "chapter_goal": "推进调查，但不要停留在解释。",
+                "must_advance_threads": ["雨夜警报", "信任裂缝"],
+                "optional_payoffs": [],
+                "forbidden_resolutions": ["不要公开幕后主使"],
+                "ending_hook_target": "章末迫使主角继续追查。",
+            }
+        ],
+        "rationale": "当前窗口需要把调查线持续推进。",
+    }
+    service.store.save_step_result(task["id"], "story-director", {"success": True, "structured_output": story_plan})
+    service._write_story_plan(2, story_plan)
+    director_brief = {
+        "chapter": 2,
+        "chapter_goal": "推进调查。",
+        "primary_conflict": "主角必须继续追查。",
+        "must_advance_threads": ["雨夜警报"],
+        "payoff_targets": [],
+        "setup_targets": [],
+        "must_use_entities": [],
+        "relationship_moves": [],
+        "knowledge_reveals": [],
+        "forbidden_resolutions": ["不要公开幕后主使"],
+        "ending_hook_target": "章末继续追查。",
+        "tempo": "steady escalation",
+        "review_focus": ["检查调查线是否推进"],
+        "rationale": "维持推进。",
+    }
+    service.store.save_step_result(task["id"], "chapter-director", {"success": True, "structured_output": director_brief})
+    service._write_director_brief(2, director_brief)
+
+    payload = {
+        "content": ("沈砚进入观测塔外围，但仍未触及警报核心，只确认敌方已经提前布置陷阱。") * 20,
+        "summary_content": "# 第2章摘要\n\n测试摘要\n",
+        "chapter_meta": {"title": "第二章", "location": "观测塔外围", "characters": ["沈砚"]},
+        "foreshadowing_items": [],
+        "knowledge_states": [],
+    }
+
+    with patch.object(service, "_validate_writeback_consistency", return_value=None), patch.object(
+        service, "_sync_core_setting_docs", return_value=None
+    ):
+        service._apply_write_data_sync(task["id"], service.store.get_task(task["id"]) or task, payload)
+
+    refreshed = service.store.get_task(task["id"]) or {}
+    writeback = ((refreshed.get("artifacts") or {}).get("writeback") or {})
+    story_refresh = writeback.get("story_refresh") or {}
+    assert story_refresh["should_refresh"] is True
+    assert story_refresh["recommended_resume_from"] == "story-director"
+    assert story_refresh["consecutive_missed_chapters"] >= 2
+
+    events = service.store.get_events(task["id"])
+    assert any(event.get("message") == "Story plan refresh suggested" for event in events)

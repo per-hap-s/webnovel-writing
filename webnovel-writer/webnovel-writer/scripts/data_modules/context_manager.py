@@ -19,6 +19,7 @@ from .index_manager import IndexManager, WritingChecklistScoreMeta
 from .narrative_graph import NarrativeGraph
 from .context_ranker import ContextRanker
 from .snapshot_manager import SnapshotManager, SnapshotVersionMismatch
+from .story_plan_locator import load_story_plan_for_chapter
 from .context_weights import (
     DEFAULT_TEMPLATE as CONTEXT_DEFAULT_TEMPLATE,
     TEMPLATE_WEIGHTS as CONTEXT_TEMPLATE_WEIGHTS,
@@ -56,6 +57,7 @@ class ContextManager:
         "genre_profile",
         "writing_guidance",
         "narrative_state",
+        "story_plan",
         "director_brief",
     }
     SECTION_ORDER = [
@@ -66,6 +68,7 @@ class ContextManager:
         "genre_profile",
         "writing_guidance",
         "narrative_state",
+        "story_plan",
         "director_brief",
         "story_skeleton",
         "memory",
@@ -95,7 +98,26 @@ class ContextManager:
         if not isinstance(cached_template, str):
             return template == self.DEFAULT_TEMPLATE
 
-        return cached_template == template
+        if cached_template != template:
+            return False
+
+        required_sections = self._required_snapshot_sections(template)
+        if not required_sections:
+            return True
+
+        payload = cached.get("payload")
+        if not isinstance(payload, dict):
+            payload = cached
+        sections = payload.get("sections")
+        if not isinstance(sections, dict):
+            return False
+        return required_sections.issubset(sections.keys())
+
+    def _required_snapshot_sections(self, template: str) -> set[str]:
+        normalized_template = str(template or "").strip()
+        if normalized_template in {self.DEFAULT_TEMPLATE, "plot"}:
+            return {"story_plan", "director_brief"}
+        return set()
 
     def build_context(
         self,
@@ -227,6 +249,7 @@ class ContextManager:
         genre_profile = self._load_genre_profile(state)
         writing_guidance = self._build_writing_guidance(chapter, reader_signal, genre_profile)
         narrative_state = self.narrative_graph.summarize_for_context(chapter)
+        story_plan = self._load_story_plan(chapter)
         director_brief = self._load_director_brief(chapter)
 
         return {
@@ -238,6 +261,7 @@ class ContextManager:
             "genre_profile": genre_profile,
             "writing_guidance": writing_guidance,
             "narrative_state": narrative_state,
+            "story_plan": story_plan,
             "director_brief": director_brief,
             "story_skeleton": story_skeleton,
             "preferences": preferences,
@@ -263,6 +287,12 @@ class ContextManager:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _load_story_plan(self, chapter: int) -> Dict[str, Any]:
+        if chapter <= 0:
+            return {}
+        story_dir = self.config.project_root / ".webnovel" / "story-director"
+        return load_story_plan_for_chapter(story_dir, chapter)
 
     def _load_reader_signal(self, chapter: int) -> Dict[str, Any]:
         if not getattr(self.config, "context_reader_signal_enabled", True):

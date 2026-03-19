@@ -37,6 +37,10 @@ from scripts.init_project import (
 from .orchestrator import OrchestrationService
 from .path_guard import safe_resolve
 from .task_models import (
+    SupervisorBatchDismissRequest,
+    SupervisorChecklistSaveRequest,
+    SupervisorTrackingRequest,
+    SupervisorBatchUndismissRequest,
     BootstrapProjectRequest,
     CancelTaskRequest,
     ErrorResponse,
@@ -46,6 +50,7 @@ from .task_models import (
     RAGSettingsRequest,
     RetryRequest,
     ReviewDecisionRequest,
+    SupervisorDismissRequest,
     TaskRequest,
 )
 from .watcher import FileWatcher
@@ -999,6 +1004,10 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     async def create_write_task(http_request: Request, request: TaskRequest):
         return _create_task('write', request, http_request)
 
+    @app.post('/api/tasks/guarded-write')
+    async def create_guarded_write_task(http_request: Request, request: TaskRequest):
+        return _create_task('guarded-write', request, http_request)
+
     @app.post('/api/tasks/review')
     async def create_review_task(http_request: Request, request: TaskRequest):
         return _create_task('review', request, http_request)
@@ -1006,6 +1015,74 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     @app.post('/api/tasks/resume')
     async def create_resume_task(http_request: Request, request: TaskRequest):
         return _create_task('resume', request, http_request)
+
+    @app.get('/api/supervisor/recommendations')
+    def list_supervisor_recommendations(request: Request, limit: int = 4, include_dismissed: bool = False):
+        orchestrator = _get_request_orchestrator(request)
+        if include_dismissed:
+            return orchestrator.list_supervisor_recommendations(limit=limit, include_dismissed=True)
+        return orchestrator.list_supervisor_recommendations(limit=limit)
+
+    @app.post('/api/supervisor/dismiss')
+    async def dismiss_supervisor_recommendation(http_request: Request, request: SupervisorDismissRequest):
+        return _get_request_orchestrator(http_request).dismiss_supervisor_recommendation(
+            request.stable_key,
+            request.fingerprint,
+            reason=request.reason,
+            note=request.note,
+        )
+
+    @app.post('/api/supervisor/dismiss-batch')
+    async def dismiss_supervisor_recommendations_batch(http_request: Request, request: SupervisorBatchDismissRequest):
+        return _get_request_orchestrator(http_request).dismiss_supervisor_recommendations_batch(
+            [{"stable_key": item.stable_key, "fingerprint": item.fingerprint} for item in request.items],
+            reason=request.reason,
+            note=request.note,
+        )
+
+    @app.post('/api/supervisor/undismiss')
+    async def undismiss_supervisor_recommendation(http_request: Request, request: SupervisorDismissRequest):
+        return _get_request_orchestrator(http_request).undismiss_supervisor_recommendation(request.stable_key)
+
+    @app.post('/api/supervisor/undismiss-batch')
+    async def undismiss_supervisor_recommendations_batch(http_request: Request, request: SupervisorBatchUndismissRequest):
+        return _get_request_orchestrator(http_request).undismiss_supervisor_recommendations_batch(request.stable_keys)
+
+    @app.post('/api/supervisor/tracking')
+    async def set_supervisor_tracking(http_request: Request, request: SupervisorTrackingRequest):
+        payload = {
+            "status": request.status,
+            "note": request.note,
+        }
+        if request.linked_task_id:
+            payload["linked_task_id"] = request.linked_task_id
+        if request.linked_checklist_path:
+            payload["linked_checklist_path"] = request.linked_checklist_path
+        return _get_request_orchestrator(http_request).set_supervisor_recommendation_tracking(
+            request.stable_key,
+            request.fingerprint,
+            **payload,
+        )
+
+    @app.post('/api/supervisor/tracking/clear')
+    async def clear_supervisor_tracking(http_request: Request, request: SupervisorTrackingRequest):
+        return _get_request_orchestrator(http_request).clear_supervisor_recommendation_tracking(request.stable_key)
+
+    @app.post('/api/supervisor/checklists')
+    async def save_supervisor_checklist(http_request: Request, request: SupervisorChecklistSaveRequest):
+        return _get_request_orchestrator(http_request).save_supervisor_checklist(
+            request.content,
+            chapter=request.chapter,
+            selected_keys=request.selected_keys,
+            category_filter=request.category_filter,
+            sort_mode=request.sort_mode,
+            title=request.title,
+            note=request.note,
+        )
+
+    @app.get('/api/supervisor/checklists')
+    def list_supervisor_checklists(request: Request, limit: int = 10):
+        return _get_request_orchestrator(request).list_supervisor_checklists(limit=limit)
 
     @app.get('/api/tasks/{task_id}')
     def get_task(task_id: str, request: Request):
@@ -1239,6 +1316,11 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     def list_checklist_scores(request: Request, limit: int = 100):
         with closing(_get_db(_resolve_request_project_root(request))) as conn:
             return _fetchall_safe(conn, 'SELECT * FROM writing_checklist_scores ORDER BY chapter DESC LIMIT ?', (limit,))
+
+    @app.get('/api/story-plans')
+    def list_story_plans(request: Request, limit: int = 20):
+        project_root_value = _resolve_request_project_root(request)
+        return _list_story_plans(project_root_value, limit=limit)
 
     @app.get('/api/foreshadowing')
     def list_foreshadowing(request: Request, chapter: Optional[int] = None, entity: Optional[str] = None, limit: int = 100):
@@ -1507,6 +1589,49 @@ def _with_display_timestamps(item: dict[str, Any], *, fields: tuple[str, ...]) -
         if field in enriched and enriched.get(field):
             enriched[f'{field}_display'] = _format_display_datetime(enriched.get(field))
     return enriched
+
+
+def _list_story_plans(project_root: Path, limit: int = 20) -> list[dict[str, Any]]:
+    story_dir = project_root / '.webnovel' / 'story-director'
+    if not story_dir.is_dir():
+        return []
+
+    items: list[dict[str, Any]] = []
+    for path in sorted(story_dir.glob('plan-ch*.json'), reverse=True)[: max(1, int(limit))]:
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        chapters = [item for item in (payload.get('chapters') or []) if isinstance(item, dict)]
+        anchor_chapter = int(payload.get('anchor_chapter') or 0)
+        current_slot = next((item for item in chapters if int(item.get('chapter') or 0) == anchor_chapter), chapters[0] if chapters else {})
+        stat = path.stat()
+        updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        items.append(
+            _with_display_timestamps(
+                {
+                    'anchor_chapter': anchor_chapter,
+                    'planning_horizon': int(payload.get('planning_horizon') or 0),
+                    'priority_threads': payload.get('priority_threads') or [],
+                    'payoff_schedule': payload.get('payoff_schedule') or [],
+                    'defer_schedule': payload.get('defer_schedule') or [],
+                    'risk_flags': payload.get('risk_flags') or [],
+                    'transition_notes': payload.get('transition_notes') or [],
+                    'chapter_count': len(chapters),
+                    'current_role': str((current_slot or {}).get('role') or '').strip(),
+                    'current_goal': str((current_slot or {}).get('chapter_goal') or '').strip(),
+                    'current_hook': str((current_slot or {}).get('ending_hook_target') or '').strip(),
+                    'rationale': str(payload.get('rationale') or '').strip(),
+                    'path': f'.webnovel/story-director/{path.name}',
+                    'updated_at': updated_at,
+                },
+                fields=('updated_at',),
+            )
+        )
+    return items
 
 
 def _file_type_for_path(path: str) -> str:

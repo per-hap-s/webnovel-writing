@@ -38,10 +38,14 @@ def test_validation_error_envelope_matches_frontend_expectations(tmp_path: Path)
 
 def test_frontend_launcher_surfaces_api_errors():
     source = APP_SECTIONS_PATH.read_text(encoding="utf-8-sig")
+    app_source = APP_PATH.read_text(encoding="utf-8-sig")
 
     assert "setError(normalizeError(err))" in source
     assert "<ErrorNotice error={error} />" in source
-    assert "ProjectBootstrapSection" in source or "ProjectBootstrapSection" in APP_PATH.read_text(encoding="utf-8-sig")
+    assert "ProjectBootstrapSection" in source or "ProjectBootstrapSection" in app_source
+    assert "key: 'guarded-write'" in app_source
+    assert "'guarded-write':" in app_source
+    assert "ErrorNotice" in app_source
 
 
 def test_frontend_task_event_rendering_covers_runtime_contract():
@@ -52,7 +56,6 @@ def test_frontend_task_event_rendering_covers_runtime_contract():
     assert "translateEventMessage(event.message)" in section_source
     assert "translateEventLevel(event.level)" in section_source
     assert "translateStepName(event.step_name || 'task')" in section_source
-    assert "实时运行状态" in section_source
     assert "runtime_status?.phase_label" in section_source
     assert "runtime_status?.target_label" in section_source
     assert "runtime_status?.phase_detail" in section_source
@@ -74,6 +77,139 @@ def test_frontend_task_event_rendering_covers_runtime_contract():
     assert "'step_waiting_approval'" in app_source
     assert "'Resume target scheduled'" in app_source
     assert "'Workflow config error'" in app_source
+    assert "'Guarded runner blocked by story refresh'" in app_source
+    assert "'Guarded runner completed one chapter'" in app_source
+
+
+def test_frontend_task_detail_includes_guarded_runner_view():
+    section_source = APP_SECTIONS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "resolveGuardedRunnerResult" in section_source
+    assert "formatGuardedOutcome" in section_source
+    assert "launchTask('guarded-write'" in section_source
+    assert "launchTask('write'" in section_source
+
+
+def test_frontend_control_page_includes_supervisor_panel():
+    app_source = APP_PATH.read_text(encoding="utf-8-sig")
+
+    assert "{ id: 'supervisor'" in app_source
+    assert "{ id: 'supervisor-audit'" in app_source
+    assert "page === 'supervisor'" in app_source
+    assert "page === 'supervisor-audit'" in app_source
+    assert "<SupervisorPage" in app_source
+    assert "<SupervisorAuditPage" in app_source
+    assert "fetchJSON('/api/supervisor/recommendations?include_dismissed=true')" in app_source
+    assert "postJSON('/api/supervisor/dismiss'" in app_source
+    assert "postJSON('/api/supervisor/dismiss-batch'" in app_source
+    assert "postJSON('/api/supervisor/undismiss'" in app_source
+    assert "postJSON('/api/supervisor/undismiss-batch'" in app_source
+    assert "postJSON('/api/supervisor/tracking'" in app_source
+    assert "postJSON('/api/supervisor/tracking/clear'" in app_source
+    assert "postJSON('/api/supervisor/checklists'" in app_source
+    assert "fetchJSON('/api/supervisor/checklists'" in app_source
+    assert "rawSupervisorItems" in app_source
+    assert "setRawSupervisorItems" in app_source
+    assert "selectedSupervisorKeys" in app_source
+    assert "toggleSupervisorSelection" in app_source
+    assert "setSelectionForItems" in app_source
+    assert "handleBatchSupervisorDismiss" in app_source
+    assert "handleBatchSupervisorUndismiss" in app_source
+    assert "checklistMarkdown" in app_source
+    assert "buildSupervisorChecklistMarkdown" in app_source
+    assert "downloadTextFile" in app_source
+    assert "handleCopyChecklist" in app_source
+    assert "handleDownloadChecklist" in app_source
+    assert "handleSaveChecklistToProject" in app_source
+    assert "savedChecklistMeta" in app_source
+    assert "checklistTitle" in app_source
+    assert "checklistNote" in app_source
+    assert "trackingDrafts" in app_source
+    assert "resolveTrackingDraft" in app_source
+    assert "updateTrackingDraft" in app_source
+    assert "handleSupervisorTrackingSave" in app_source
+    assert "handleSupervisorTrackingClear" in app_source
+    assert "statusFilter" in app_source
+    assert "setStatusFilter" in app_source
+    assert "supervisorStatusSummary" in app_source
+    assert "recentChecklists" in app_source
+    assert "selectedChecklistPath" in app_source
+    assert "reloadSupervisorChecklists" in app_source
+    assert "handleDownloadSavedChecklist" in app_source
+    assert "batchDismissReason" in app_source
+    assert "batchDismissNote" in app_source
+    assert "categoryFilter" in app_source
+    assert "sortMode" in app_source
+    assert "SUPERVISOR_SORT_OPTIONS" in app_source
+    assert "SUPERVISOR_STATUS_FILTER_OPTIONS" in app_source
+    assert "supervisorItems.map((item) => {" in app_source
+    assert "dismissedSupervisorItems.map((item) => (" in app_source
+    assert "sortSupervisorItems" in app_source
+    assert "extractSupervisorChapter" in app_source
+    assert "item.categoryLabel" in app_source
+    assert "SUPERVISOR_DISMISS_REASON_OPTIONS" in app_source
+    assert "formatSupervisorDismissReason" in app_source
+    assert "formatSupervisorTrackingStatus" in app_source
+    assert "dismissalReason" in app_source
+    assert "dismissalNote" in app_source
+    assert "trackingStatus" in app_source
+    assert "trackingNote" in app_source
+    assert "linkedTaskId" in app_source
+    assert "linkedChecklistPath" in app_source
+    assert "SUPERVISOR_TRACKING_STATUS_OPTIONS" in app_source
+    assert "item.rationale" in app_source
+    assert "item.actionLabel" in app_source
+    assert "item.secondaryLabel" in app_source
+    assert "handleSupervisorDismiss" in app_source
+    assert "handleSupervisorUndismiss" in app_source
+    assert "item.title ||" in app_source
+    assert "item.note ?" in app_source
+    assert "selectedChecklist?.content" in app_source
+    assert "Supervisor Inbox" in app_source
+    assert "dismissedAt" in app_source
+    assert "handleSupervisorAction" in app_source
+
+
+def test_frontend_includes_supervisor_audit_view():
+    app_source = APP_PATH.read_text(encoding="utf-8-sig")
+
+    assert "function SupervisorAuditPage" in app_source
+    assert "auditItems" in app_source
+    assert "auditChecklists" in app_source
+    assert "auditCategoryFilter" in app_source
+    assert "auditStatusFilter" in app_source
+    assert "auditChapterFilter" in app_source
+    assert "linkedTask" in app_source
+    assert "linkedChecklist" in app_source
+    assert "Supervisor Audit" in app_source
+    assert "清单归档" in app_source or "\\u6e05\\u5355\\u5f52\\u6863" in app_source
+
+
+def test_frontend_data_page_includes_story_plan_view():
+    section_source = APP_SECTIONS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "fetchJSON('/api/story-plans'" in section_source
+    assert "Story Plans" in section_source
+    assert "current_goal" in section_source
+    assert "priority_threads" in section_source
+
+
+def test_frontend_task_detail_includes_story_refresh_view():
+    app_source = APP_PATH.read_text(encoding="utf-8-sig")
+    section_source = APP_SECTIONS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "story_refresh" in section_source
+    assert "normalizeStoryRefresh" in section_source
+    assert "resume_from_step: 'story-director'" in section_source
+    assert "'Story plan refresh suggested'" in app_source
+
+
+def test_frontend_task_detail_includes_task_lineage_view():
+    section_source = APP_SECTIONS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "parent_task_id" in section_source
+    assert "root_task_id" in section_source
+    assert "trigger_source" in section_source
 
 
 def test_task_list_endpoint_returns_runtime_status(tmp_path: Path):
@@ -134,7 +270,7 @@ def test_task_list_endpoint_returns_runtime_status(tmp_path: Path):
     assert response.status_code == 200
     runtime = response.json()[0]["runtime_status"]
     assert runtime["phase_label"]
-    assert runtime["target_label"] == "第 1 卷"
+    assert runtime["target_label"] == "\u7b2c 1 \u5377"
     assert runtime["step_state"] == "running"
     assert runtime["attempt"] == 1
     assert "phase_detail" in runtime

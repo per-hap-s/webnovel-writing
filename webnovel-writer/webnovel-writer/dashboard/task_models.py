@@ -59,6 +59,47 @@ class RetryRequest(BaseModel):
     resume_from_step: Optional[str] = None
 
 
+class SupervisorDismissRequest(BaseModel):
+    stable_key: str = Field(min_length=1)
+    fingerprint: str = ""
+    reason: str = ""
+    note: str = ""
+
+
+class SupervisorBatchItem(BaseModel):
+    stable_key: str = Field(min_length=1)
+    fingerprint: str = ""
+
+
+class SupervisorBatchDismissRequest(BaseModel):
+    items: List[SupervisorBatchItem] = Field(default_factory=list)
+    reason: str = ""
+    note: str = ""
+
+
+class SupervisorBatchUndismissRequest(BaseModel):
+    stable_keys: List[str] = Field(default_factory=list)
+
+
+class SupervisorTrackingRequest(BaseModel):
+    stable_key: str = Field(min_length=1)
+    fingerprint: str = ""
+    status: str = ""
+    note: str = ""
+    linked_task_id: str = ""
+    linked_checklist_path: str = ""
+
+
+class SupervisorChecklistSaveRequest(BaseModel):
+    content: str = Field(min_length=1)
+    chapter: int = 0
+    selected_keys: List[str] = Field(default_factory=list)
+    category_filter: str = "all"
+    sort_mode: str = "priority"
+    title: str = ""
+    note: str = ""
+
+
 class CancelTaskRequest(BaseModel):
     reason: str = ""
 

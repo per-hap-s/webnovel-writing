@@ -3,6 +3,32 @@
   "version": 1,
   "steps": [
     {
+      "name": "story-director",
+      "type": "internal",
+      "required_output_keys": [
+        "anchor_chapter",
+        "planning_horizon",
+        "chapters",
+        "priority_threads",
+        "payoff_schedule",
+        "defer_schedule",
+        "risk_flags",
+        "transition_notes",
+        "rationale"
+      ],
+      "output_schema": {
+        "anchor_chapter": 1,
+        "planning_horizon": 4,
+        "chapters": [],
+        "priority_threads": [],
+        "payoff_schedule": [],
+        "defer_schedule": [],
+        "risk_flags": [],
+        "transition_notes": [],
+        "rationale": "string"
+      }
+    },
+    {
       "name": "chapter-director",
       "type": "internal",
       "required_output_keys": [
@@ -48,12 +74,14 @@
         "references/reading-power-taxonomy.md"
       ],
       "required_output_keys": [
+        "story_plan",
         "director_brief",
         "task_brief",
         "contract_v2",
         "draft_prompt"
       ],
       "output_schema": {
+        "story_plan": {},
         "director_brief": {},
         "task_brief": {},
         "contract_v2": {},

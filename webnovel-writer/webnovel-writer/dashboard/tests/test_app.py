@@ -64,6 +64,7 @@ def mock_orchestrator() -> MagicMock:
         "connection_error": None,
     }
     orchestrator.list_tasks.return_value = []
+    orchestrator.list_supervisor_recommendations.return_value = []
     return orchestrator
 
 
@@ -207,6 +208,69 @@ def test_cancel_task_calls_orchestrator(client: TestClient, mock_orchestrator: M
     assert data["status"] == "interrupted"
     assert data["error"]["code"] == "TASK_CANCELLED"
     mock_orchestrator.cancel_task.assert_called_once_with("task-1", reason="由仪表盘手动停止任务")
+
+
+def test_retry_task_accepts_resume_from_step(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.retry_task.return_value = {"id": "task-1", "status": "queued"}
+
+    response = client.post("/api/tasks/task-1/retry", json={"resume_from_step": "story-director"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    mock_orchestrator.retry_task.assert_called_once_with("task-1", resume_from_step="story-director")
+
+
+def test_create_guarded_write_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):
+    mock_orchestrator.create_task.return_value = {"id": "task-guarded-1", "status": "queued", "task_type": "guarded-write"}
+
+    response = client.post("/api/tasks/guarded-write", json={"chapter": 2, "mode": "standard", "require_manual_approval": False})
+
+    assert response.status_code == 200
+    assert response.json()["task_type"] == "guarded-write"
+    mock_orchestrator.create_task.assert_called_once_with(
+        "guarded-write",
+        {
+            "project_root": str(mock_project_root),
+            "chapter": 2,
+            "chapter_range": None,
+            "volume": None,
+            "mode": "standard",
+            "require_manual_approval": False,
+            "options": {},
+        },
+    )
+
+
+def test_supervisor_recommendations_endpoint_returns_backend_payload(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.list_supervisor_recommendations.return_value = [
+        {
+            "stableKey": "approval:task-1",
+            "category": "approval",
+            "categoryLabel": "审批",
+            "priority": 10,
+            "tone": "warning",
+            "badge": "先处理",
+            "title": "第 3 章待回写审批",
+            "summary": "当前 write 子任务已经停在 approval-gate。",
+            "detail": "不先处理这个审批，护栏推进无法安全往后继续。",
+            "rationale": "人工审批是硬阻断。",
+            "sourceTaskId": "task-1",
+            "sourceUpdatedAt": "2026-03-19T10:00:00+00:00",
+            "fingerprint": "approval:task-1|task-1",
+            "action": {"type": "open-task", "taskId": "task-1"},
+            "actionLabel": "打开待审批任务",
+            "secondaryAction": None,
+            "secondaryLabel": None,
+        }
+    ]
+
+    response = client.get("/api/supervisor/recommendations")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["stableKey"] == "approval:task-1"
+    assert payload[0]["action"]["type"] == "open-task"
+    mock_orchestrator.list_supervisor_recommendations.assert_called_once_with(limit=4)
 
 
 def test_cancel_task_returns_not_found_when_missing(client: TestClient, mock_orchestrator: MagicMock):
@@ -522,6 +586,50 @@ def test_review_metrics_and_relationships_expose_display_helpers(client: TestCli
     assert metric["created_at_display"] == "2026-03-18 17:59:08"
 
 
+def test_story_plans_endpoint_reads_file_backed_story_director_payloads(client: TestClient, mock_project_root: Path):
+    story_dir = mock_project_root / ".webnovel" / "story-director"
+    story_dir.mkdir(parents=True, exist_ok=True)
+    (story_dir / "plan-ch0012.json").write_text(
+        json.dumps(
+            {
+                "anchor_chapter": 12,
+                "planning_horizon": 4,
+                "priority_threads": ["黑匣子真相", "信任裂缝"],
+                "payoff_schedule": [{"thread": "黑匣子真相", "target_chapter": 12, "mode": "major"}],
+                "defer_schedule": [{"thread": "终局身份揭露", "not_before_chapter": 18, "reason": "too early"}],
+                "risk_flags": ["最近两章信息揭露偏密"],
+                "transition_notes": ["第12章先把调查线切到家族线"],
+                "chapters": [
+                    {
+                        "chapter": 12,
+                        "role": "current-execution",
+                        "chapter_goal": "让主角确认黑匣子线索可信，但付出关系代价",
+                        "must_advance_threads": ["黑匣子真相", "信任裂缝"],
+                        "optional_payoffs": ["黑匣子真相"],
+                        "forbidden_resolutions": ["不要公开幕后主使"],
+                        "ending_hook_target": "章末迫使主角进入敌方地盘",
+                    }
+                ],
+                "rationale": "当前最需要解决的是中程驱动力不足。",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/story-plans")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["anchor_chapter"] == 12
+    assert payload[0]["current_role"] == "current-execution"
+    assert payload[0]["current_goal"] == "让主角确认黑匣子线索可信，但付出关系代价"
+    assert payload[0]["priority_threads"] == ["黑匣子真相", "信任裂缝"]
+    assert payload[0]["updated_at_display"]
+
+
 def test_foreshadowing_endpoint_supports_chapter_entity_and_limit(client: TestClient, mock_project_root: Path):
     _seed_narrative_tables(mock_project_root)
 
@@ -599,3 +707,257 @@ def test_knowledge_states_endpoint_supports_chapter_entity_and_limit(client: Tes
     assert len(payload) == 1
     assert payload[0]["fact"] == "secret-b"
     assert payload[0]["state"] == "confirmed"
+
+
+def test_supervisor_dismiss_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.dismiss_supervisor_recommendation.return_value = {
+        "stableKey": "approval:task-1",
+        "fingerprint": "approval:task-1|task-1",
+        "dismissedAt": "2026-03-19T10:00:00+00:00",
+        "dismissalReason": "defer",
+        "dismissalNote": "等本轮结束",
+        "dismissed": True,
+    }
+
+    response = client.post(
+        "/api/supervisor/dismiss",
+        json={
+            "stable_key": "approval:task-1",
+            "fingerprint": "approval:task-1|task-1",
+            "reason": "defer",
+            "note": "等本轮结束",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dismissed"] is True
+    assert payload["dismissalReason"] == "defer"
+    mock_orchestrator.dismiss_supervisor_recommendation.assert_called_once_with(
+        "approval:task-1",
+        "approval:task-1|task-1",
+        reason="defer",
+        note="等本轮结束",
+    )
+
+
+def test_supervisor_undismiss_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.undismiss_supervisor_recommendation.return_value = {
+        "stableKey": "approval:task-1",
+        "dismissed": False,
+    }
+
+    response = client.post(
+        "/api/supervisor/undismiss",
+        json={"stable_key": "approval:task-1", "fingerprint": ""},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dismissed"] is False
+    mock_orchestrator.undismiss_supervisor_recommendation.assert_called_once_with("approval:task-1")
+
+
+def test_supervisor_recommendations_endpoint_passes_include_dismissed(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.list_supervisor_recommendations.return_value = []
+
+    response = client.get("/api/supervisor/recommendations", params={"include_dismissed": "true"})
+
+    assert response.status_code == 200
+    mock_orchestrator.list_supervisor_recommendations.assert_called_once_with(limit=4, include_dismissed=True)
+
+
+def test_supervisor_batch_dismiss_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.dismiss_supervisor_recommendations_batch.return_value = {"updated": [], "count": 2}
+
+    response = client.post(
+        "/api/supervisor/dismiss-batch",
+        json={
+            "items": [
+                {"stable_key": "approval:task-1", "fingerprint": "fp-1"},
+                {"stable_key": "review:task-2", "fingerprint": "fp-2"},
+            ],
+            "reason": "batch_later",
+            "note": "统一稍后处理",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    mock_orchestrator.dismiss_supervisor_recommendations_batch.assert_called_once_with(
+        [
+            {"stable_key": "approval:task-1", "fingerprint": "fp-1"},
+            {"stable_key": "review:task-2", "fingerprint": "fp-2"},
+        ],
+        reason="batch_later",
+        note="统一稍后处理",
+    )
+
+
+def test_supervisor_batch_undismiss_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.undismiss_supervisor_recommendations_batch.return_value = {"updated": [], "count": 2}
+
+    response = client.post(
+        "/api/supervisor/undismiss-batch",
+        json={"stable_keys": ["approval:task-1", "review:task-2"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    mock_orchestrator.undismiss_supervisor_recommendations_batch.assert_called_once_with(["approval:task-1", "review:task-2"])
+
+
+def test_supervisor_tracking_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.set_supervisor_recommendation_tracking.return_value = {
+        "stableKey": "approval:task-1",
+        "trackingStatus": "in_progress",
+        "trackingLabel": "处理中",
+        "trackingNote": "等待审批",
+        "trackingUpdatedAt": "2026-03-19T10:05:00+00:00",
+    }
+
+    response = client.post(
+        "/api/supervisor/tracking",
+        json={
+            "stable_key": "approval:task-1",
+            "fingerprint": "fp-1",
+            "status": "in_progress",
+            "note": "等待审批",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["trackingStatus"] == "in_progress"
+    mock_orchestrator.set_supervisor_recommendation_tracking.assert_called_once_with(
+        "approval:task-1",
+        "fp-1",
+        status="in_progress",
+        note="等待审批",
+    )
+
+
+def test_supervisor_tracking_clear_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.clear_supervisor_recommendation_tracking.return_value = {
+        "stableKey": "approval:task-1",
+        "trackingStatus": "",
+        "trackingLabel": "",
+        "trackingNote": "",
+        "trackingUpdatedAt": None,
+    }
+
+    response = client.post(
+        "/api/supervisor/tracking/clear",
+        json={"stable_key": "approval:task-1", "fingerprint": "", "status": "", "note": ""},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["trackingStatus"] == ""
+    mock_orchestrator.clear_supervisor_recommendation_tracking.assert_called_once_with("approval:task-1")
+
+
+def test_supervisor_tracking_endpoint_accepts_task_and_checklist_links(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.set_supervisor_recommendation_tracking.return_value = {
+        "stableKey": "approval:task-1",
+        "trackingStatus": "completed",
+        "trackingLabel": "已处理",
+        "trackingNote": "linked-proof",
+        "linkedTaskId": "task-approval-1",
+        "linkedChecklistPath": ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md",
+        "trackingUpdatedAt": "2026-03-19T10:05:00+00:00",
+    }
+
+    response = client.post(
+        "/api/supervisor/tracking",
+        json={
+            "stable_key": "approval:task-1",
+            "fingerprint": "fp-1",
+            "status": "completed",
+            "note": "linked-proof",
+            "linked_task_id": "task-approval-1",
+            "linked_checklist_path": ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["linkedTaskId"] == "task-approval-1"
+    assert payload["linkedChecklistPath"] == ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md"
+    mock_orchestrator.set_supervisor_recommendation_tracking.assert_called_with(
+        "approval:task-1",
+        "fp-1",
+        status="completed",
+        note="linked-proof",
+        linked_task_id="task-approval-1",
+        linked_checklist_path=".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md",
+    )
+
+
+def test_supervisor_checklist_save_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.save_supervisor_checklist.return_value = {
+        "savedAt": "2026-03-19T10:10:00+00:00",
+        "chapter": 6,
+        "filename": "checklist-ch0006-20260319-181000.md",
+        "path": "/tmp/novel/.webnovel/supervisor/checklists/checklist-ch0006-20260319-181000.md",
+        "relativePath": ".webnovel/supervisor/checklists/checklist-ch0006-20260319-181000.md",
+        "selectedCount": 2,
+        "title": "第6章开写前清单",
+        "note": "本轮先处理审批和刷新建议",
+    }
+
+    response = client.post(
+        "/api/supervisor/checklists",
+        json={
+            "content": "# Supervisor Checklist\n\n- item",
+            "chapter": 6,
+            "selected_keys": ["approval:task-1", "review:task-2"],
+            "category_filter": "approval",
+            "sort_mode": "priority",
+            "title": "第6章开写前清单",
+            "note": "本轮先处理审批和刷新建议",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chapter"] == 6
+    assert payload["selectedCount"] == 2
+    assert payload["title"] == "第6章开写前清单"
+    mock_orchestrator.save_supervisor_checklist.assert_called_once_with(
+        "# Supervisor Checklist\n\n- item",
+        chapter=6,
+        selected_keys=["approval:task-1", "review:task-2"],
+        category_filter="approval",
+        sort_mode="priority",
+        title="第6章开写前清单",
+        note="本轮先处理审批和刷新建议",
+    )
+
+
+def test_supervisor_checklist_list_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.list_supervisor_checklists.return_value = [
+        {
+            "filename": "checklist-ch0006-20260319-181000.md",
+            "relativePath": ".webnovel/supervisor/checklists/checklist-ch0006-20260319-181000.md",
+            "chapter": 6,
+            "savedAt": "2026-03-19T10:10:00+00:00",
+            "categoryFilter": "all",
+            "sortMode": "priority",
+            "selectedCount": 2,
+            "title": "第6章开写前清单",
+            "note": "本轮先处理审批和刷新建议",
+            "selectedKeys": ["approval:task-1", "review:task-2"],
+            "content": "# Checklist",
+            "summary": "- item",
+        }
+    ]
+
+    response = client.get("/api/supervisor/checklists", params={"limit": 6})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["chapter"] == 6
+    assert payload[0]["selectedCount"] == 2
+    assert payload[0]["title"] == "第6章开写前清单"
+    mock_orchestrator.list_supervisor_checklists.assert_called_once_with(limit=6)

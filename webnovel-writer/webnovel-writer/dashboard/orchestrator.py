@@ -23,6 +23,7 @@ from scripts.data_modules.index_manager import ChapterMeta, EntityMeta, IndexMan
 from scripts.data_modules.narrative_graph import NarrativeGraph
 from scripts.data_modules.state_manager import StateManager
 from scripts.data_modules.state_validator import get_chapter_meta_entry
+from scripts.data_modules.story_plan_locator import load_story_plan_for_chapter
 
 from .llm_runner import LLMRunner, StepResult, create_default_runner
 from .task_store import TaskStore
@@ -34,6 +35,9 @@ BODY_DIR_NAME = "正文"
 OUTLINE_DIR_NAME = "大纲"
 OUTLINE_SUMMARY_FILE = "总纲.md"
 DIRECTOR_DIR_NAME = ".webnovel/director"
+STORY_DIRECTOR_DIR_NAME = ".webnovel/story-director"
+SUPERVISOR_DIR_NAME = ".webnovel/supervisor"
+SUPERVISOR_CHECKLISTS_DIR_NAME = f"{SUPERVISOR_DIR_NAME}/checklists"
 SUMMARY_SECTION_PLOT = "## 剧情摘要"
 SUMMARY_SECTION_REVIEW = "## 审查结果"
 SUMMARY_SECTION_ISSUES = "## 主要问题"
@@ -66,6 +70,9 @@ RUNTIME_PHASE_LABELS = {
     "init": "初始化分析",
     "plan": "卷规划",
     "resume": "流程恢复",
+    "guarded-chapter-runner": "护栏推进一章",
+    "story-director": "多章叙事规划",
+    "chapter-director": "单章导演决策",
     "context": "上下文准备",
     "draft": "草稿生成",
     "consistency-review": "一致性审查",
@@ -147,6 +154,670 @@ class OrchestrationService:
 
     def get_events(self, task_id: str, limit: int = 200) -> List[Dict[str, Any]]:
         return self.store.get_events(task_id, limit=limit)
+
+    def list_supervisor_recommendations(self, limit: int = 4, include_dismissed: bool = False) -> List[Dict[str, Any]]:
+        tasks = [self._with_runtime_status(task) for task in self.store.list_tasks(limit=200)]
+        tasks.sort(
+            key=lambda item: self._parse_iso_datetime(item.get("updated_at") or item.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        progress = (self._read_state_data().get("progress") or {})
+        try:
+            current_chapter = max(0, int(progress.get("current_chapter") or 0))
+        except (TypeError, ValueError):
+            current_chapter = 0
+
+        items: List[Dict[str, Any]] = []
+
+        pending_approval = next((task for task in tasks if task.get("task_type") == "write" and task.get("status") == "awaiting_writeback_approval"), None)
+        if pending_approval is not None:
+            chapter = int((pending_approval.get("request") or {}).get("chapter") or 0)
+            items.append(
+                self._build_supervisor_item(
+                    stable_key=f"approval:{pending_approval['id']}",
+                    category="approval",
+                    category_label="审批",
+                    priority=10,
+                    tone="warning",
+                    badge="先处理",
+                    title=f"第 {chapter or '-'} 章待回写审批",
+                    summary="当前 write 子任务已经停在 approval-gate。",
+                    detail="不先处理这个审批，护栏推进无法安全往后继续。",
+                    rationale="人工审批是硬阻断，优先级高于继续创建任何新章节任务。",
+                    source_task=pending_approval,
+                    action={"type": "open-task", "taskId": pending_approval["id"]},
+                    action_label="打开待审批任务",
+                )
+            )
+
+        review_blocked = next(
+            (
+                task
+                for task in tasks
+                if task.get("task_type") == "write"
+                and task.get("status") == "failed"
+                and str((task.get("error") or {}).get("code") or "") == "REVIEW_GATE_BLOCKED"
+            ),
+            None,
+        )
+        if review_blocked is not None:
+            chapter = int((review_blocked.get("request") or {}).get("chapter") or 0)
+            items.append(
+                self._build_supervisor_item(
+                    stable_key=f"review:{review_blocked['id']}",
+                    category="review_block",
+                    category_label="审查阻断",
+                    priority=20,
+                    tone="danger",
+                    badge="已阻断",
+                    title=f"第 {chapter or '-'} 章被审查关卡拦截",
+                    summary="当前章节存在 hard blocking issue。",
+                    detail="先修复审查问题，再考虑继续下一章。",
+                    rationale="审查硬阻断说明本章还不满足安全推进条件。",
+                    source_task=review_blocked,
+                    action={"type": "open-task", "taskId": review_blocked["id"]},
+                    action_label="打开阻断任务",
+                )
+            )
+
+        story_refresh_task = next(
+            (
+                task
+                for task in tasks
+                if task.get("task_type") == "write"
+                and bool((((task.get("artifacts") or {}).get("writeback") or {}).get("story_refresh") or (task.get("artifacts") or {}).get("story_refresh") or {}).get("should_refresh"))
+                and task.get("status") not in {"queued", "running", "awaiting_writeback_approval"}
+            ),
+            None,
+        )
+        if story_refresh_task is not None:
+            chapter = int((story_refresh_task.get("request") or {}).get("chapter") or (current_chapter + 1) or 1)
+            items.append(
+                self._build_supervisor_item(
+                    stable_key=f"refresh:chapter:{chapter}",
+                    category="story_refresh",
+                    category_label="重规划",
+                    priority=30,
+                    tone="warning",
+                    badge="建议重规划",
+                    title=f"第 {chapter} 章前建议刷新 Story Plan",
+                    summary="最近一章的 writeback 已明确建议从 story-director 重新规划。",
+                    detail="先刷新多章滚动规划，再决定是否继续当前或下一章。",
+                    rationale="这是叙事状态主动给出的刷新建议，优先级高于继续盲推章节。",
+                    source_task=story_refresh_task,
+                    action={"type": "retry-story", "taskId": story_refresh_task["id"]},
+                    action_label="从 Story Director 重试",
+                    secondary_action={
+                        "type": "create-task",
+                        "taskType": "write",
+                        "payload": self._build_supervisor_task_payload(story_refresh_task, chapter),
+                    },
+                    secondary_label="创建当前章常规写作",
+                )
+            )
+
+        guarded_continue = next(
+            (
+                task
+                for task in tasks
+                if task.get("task_type") == "guarded-write"
+                and self._is_supervisor_guarded_continue_candidate(task)
+            ),
+            None,
+        )
+        if guarded_continue is not None:
+            guarded_result = self._get_supervisor_guarded_result(guarded_continue)
+            next_chapter = int((guarded_result.get("next_action") or {}).get("next_chapter") or (current_chapter + 1) or 1)
+            items.append(
+                self._build_supervisor_item(
+                    stable_key=f"guarded-next:chapter:{next_chapter}",
+                    category="guarded_continue",
+                    category_label="继续推进",
+                    priority=40,
+                    tone="success",
+                    badge="可继续",
+                    title=f"第 {next_chapter} 章可以继续护栏推进",
+                    summary=f"上一条护栏任务已安全完成第 {int(guarded_result.get('chapter') or 0) or '-'} 章。",
+                    detail=str((guarded_result.get("next_action") or {}).get("suggested_action") or "可以继续一次只推进一章的护栏写作。"),
+                    rationale="上一章没有触发新的 refresh 或审批阻断，当前是最安全的继续窗口。",
+                    source_task=guarded_continue,
+                    action={
+                        "type": "create-task",
+                        "taskType": "guarded-write",
+                        "payload": self._build_supervisor_task_payload(guarded_continue, next_chapter),
+                    },
+                    action_label="继续护栏推进下一章",
+                    secondary_action={"type": "open-task", "taskId": guarded_continue["id"]},
+                    secondary_label="打开护栏任务",
+                )
+            )
+
+        visible_items = self._apply_supervisor_dismissals(self._dedupe_supervisor_items(items), include_dismissed=include_dismissed)
+        return visible_items[: max(1, int(limit or 4))]
+
+    def dismiss_supervisor_recommendation(self, stable_key: str, fingerprint: str = "", *, reason: str = "", note: str = "") -> Dict[str, Any]:
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key:
+            raise ValueError("stable_key is required")
+        normalized_fingerprint = str(fingerprint or normalized_key).strip() or normalized_key
+        normalized_reason = str(reason or "").strip()
+        normalized_note = str(note or "").strip()
+        state = self._read_supervisor_state()
+        dismissals = state.setdefault("dismissals", {})
+        dismissed_at = datetime.now(timezone.utc).isoformat()
+        dismissals[normalized_key] = {
+            "fingerprint": normalized_fingerprint,
+            "dismissed_at": dismissed_at,
+            "reason": normalized_reason,
+            "note": normalized_note,
+        }
+        self._write_supervisor_state(state)
+        return {
+            "stableKey": normalized_key,
+            "fingerprint": normalized_fingerprint,
+            "dismissedAt": dismissed_at,
+            "dismissalReason": normalized_reason,
+            "dismissalNote": normalized_note,
+            "dismissed": True,
+        }
+
+    def dismiss_supervisor_recommendations_batch(
+        self,
+        items: List[Dict[str, Any]],
+        *,
+        reason: str = "",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        updated: List[Dict[str, Any]] = []
+        for item in items or []:
+            stable_key = str((item or {}).get("stable_key") or "").strip()
+            if not stable_key:
+                continue
+            updated.append(
+                self.dismiss_supervisor_recommendation(
+                    stable_key,
+                    str((item or {}).get("fingerprint") or ""),
+                    reason=reason,
+                    note=note,
+                )
+            )
+        return {"updated": updated, "count": len(updated)}
+
+    def undismiss_supervisor_recommendation(self, stable_key: str) -> Dict[str, Any]:
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key:
+            raise ValueError("stable_key is required")
+        state = self._read_supervisor_state()
+        dismissals = state.setdefault("dismissals", {})
+        dismissals.pop(normalized_key, None)
+        self._write_supervisor_state(state)
+        return {
+            "stableKey": normalized_key,
+            "dismissed": False,
+        }
+
+    def undismiss_supervisor_recommendations_batch(self, stable_keys: List[str]) -> Dict[str, Any]:
+        updated: List[Dict[str, Any]] = []
+        for stable_key in stable_keys or []:
+            normalized_key = str(stable_key or "").strip()
+            if not normalized_key:
+                continue
+            updated.append(self.undismiss_supervisor_recommendation(normalized_key))
+        return {"updated": updated, "count": len(updated)}
+
+    def set_supervisor_recommendation_tracking(
+        self,
+        stable_key: str,
+        fingerprint: str = "",
+        *,
+        status: str = "",
+        note: str = "",
+        linked_task_id: str = "",
+        linked_checklist_path: str = "",
+    ) -> Dict[str, Any]:
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key:
+            raise ValueError("stable_key is required")
+        normalized_status = self._normalize_supervisor_tracking_status(status)
+        if not normalized_status:
+            raise ValueError("status is required")
+        normalized_fingerprint = str(fingerprint or normalized_key).strip() or normalized_key
+        normalized_note = str(note or "").strip()
+        normalized_linked_task_id = str(linked_task_id or "").strip()
+        normalized_linked_checklist_path = str(linked_checklist_path or "").strip()
+        updated_at = datetime.now(timezone.utc).isoformat()
+        state = self._read_supervisor_state()
+        tracking = state.setdefault("tracking", {})
+        tracking[normalized_key] = {
+            "fingerprint": normalized_fingerprint,
+            "status": normalized_status,
+            "note": normalized_note,
+            "linked_task_id": normalized_linked_task_id,
+            "linked_checklist_path": normalized_linked_checklist_path,
+            "updated_at": updated_at,
+        }
+        self._write_supervisor_state(state)
+        return {
+            "stableKey": normalized_key,
+            "fingerprint": normalized_fingerprint,
+            "trackingStatus": normalized_status,
+            "trackingLabel": self._format_supervisor_tracking_label(normalized_status),
+            "trackingNote": normalized_note,
+            "linkedTaskId": normalized_linked_task_id,
+            "linkedChecklistPath": normalized_linked_checklist_path,
+            "trackingUpdatedAt": updated_at,
+        }
+
+    def clear_supervisor_recommendation_tracking(self, stable_key: str) -> Dict[str, Any]:
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key:
+            raise ValueError("stable_key is required")
+        state = self._read_supervisor_state()
+        tracking = state.setdefault("tracking", {})
+        tracking.pop(normalized_key, None)
+        self._write_supervisor_state(state)
+        return {
+            "stableKey": normalized_key,
+            "trackingStatus": "",
+            "trackingLabel": "",
+            "trackingNote": "",
+            "linkedTaskId": "",
+            "linkedChecklistPath": "",
+            "trackingUpdatedAt": None,
+        }
+
+    def save_supervisor_checklist(
+        self,
+        content: str,
+        *,
+        chapter: int = 0,
+        selected_keys: Optional[List[str]] = None,
+        category_filter: str = "all",
+        sort_mode: str = "priority",
+        title: str = "",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            raise ValueError("content is required")
+        try:
+            normalized_chapter = max(0, int(chapter or 0))
+        except (TypeError, ValueError):
+            normalized_chapter = 0
+        if normalized_chapter <= 0:
+            progress = (self._read_state_data().get("progress") or {})
+            try:
+                normalized_chapter = max(0, int(progress.get("current_chapter") or 0))
+            except (TypeError, ValueError):
+                normalized_chapter = 0
+        normalized_selected_keys = [str(item or "").strip() for item in (selected_keys or []) if str(item or "").strip()]
+        saved_at = datetime.now(timezone.utc)
+        path = self._supervisor_checklist_path(normalized_chapter, saved_at)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        document = self._build_supervisor_checklist_document(
+            normalized_content,
+            saved_at=saved_at,
+            chapter=normalized_chapter,
+            selected_keys=normalized_selected_keys,
+            category_filter=str(category_filter or "all").strip() or "all",
+            sort_mode=str(sort_mode or "priority").strip() or "priority",
+            title=str(title or "").strip(),
+            note=str(note or "").strip(),
+        )
+        path.write_text(document, encoding="utf-8")
+        return {
+            "savedAt": saved_at.isoformat(),
+            "chapter": normalized_chapter,
+            "filename": path.name,
+            "path": str(path),
+            "relativePath": path.relative_to(self.project_root).as_posix(),
+            "selectedCount": len(normalized_selected_keys),
+            "title": str(title or "").strip(),
+            "note": str(note or "").strip(),
+        }
+
+    def list_supervisor_checklists(self, limit: int = 10) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for path in sorted(
+            self._supervisor_checklists_dir().glob("checklist-ch*.md"),
+            key=lambda candidate: candidate.stat().st_mtime if candidate.exists() else 0,
+            reverse=True,
+        )[: max(1, int(limit or 10))]:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            parsed = self._parse_supervisor_checklist_document(content)
+            stat = path.stat()
+            saved_at = str(parsed.get("saved_at") or datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat())
+            items.append(
+                {
+                    "filename": path.name,
+                    "path": str(path),
+                    "relativePath": path.relative_to(self.project_root).as_posix(),
+                    "chapter": int(parsed.get("chapter") or 0),
+                    "savedAt": saved_at,
+                    "categoryFilter": str(parsed.get("category_filter") or "all"),
+                    "sortMode": str(parsed.get("sort_mode") or "priority"),
+                    "selectedCount": int(parsed.get("selected_count") or 0),
+                    "title": str(parsed.get("title") or "").strip(),
+                    "note": str(parsed.get("note") or "").strip(),
+                    "selectedKeys": parsed.get("selected_keys") or [],
+                    "content": str(parsed.get("content") or ""),
+                    "summary": self._build_supervisor_checklist_summary(str(parsed.get("content") or "")),
+                }
+            )
+        return items
+
+    def _build_supervisor_item(
+        self,
+        *,
+        stable_key: str,
+        category: str,
+        category_label: str,
+        priority: int,
+        tone: str,
+        badge: str,
+        title: str,
+        summary: str,
+        detail: str,
+        rationale: str,
+        source_task: Dict[str, Any],
+        action: Dict[str, Any],
+        action_label: str,
+        secondary_action: Optional[Dict[str, Any]] = None,
+        secondary_label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "stableKey": stable_key,
+            "category": category,
+            "categoryLabel": category_label,
+            "priority": priority,
+            "tone": tone,
+            "badge": badge,
+            "title": title,
+            "summary": summary,
+            "detail": detail,
+            "rationale": rationale,
+            "sourceTaskId": source_task.get("id"),
+            "sourceUpdatedAt": source_task.get("updated_at") or source_task.get("created_at"),
+            "fingerprint": self._build_supervisor_fingerprint(stable_key, source_task),
+            "action": action,
+            "actionLabel": action_label,
+            "secondaryAction": secondary_action,
+            "secondaryLabel": secondary_label,
+        }
+
+    def _build_supervisor_fingerprint(self, stable_key: str, task: Dict[str, Any]) -> str:
+        error = task.get("error") or {}
+        return "|".join(
+            [
+                stable_key,
+                str(task.get("id") or ""),
+                str(task.get("status") or ""),
+                str(task.get("updated_at") or ""),
+                str(error.get("code") or ""),
+                str(task.get("approval_status") or ""),
+            ]
+        )
+
+    def _dedupe_supervisor_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            stable_key = str(item.get("stableKey") or "")
+            if not stable_key:
+                continue
+            existing = deduped.get(stable_key)
+            if existing is None:
+                deduped[stable_key] = item
+                continue
+            existing_priority = int(existing.get("priority") or 999)
+            current_priority = int(item.get("priority") or 999)
+            if current_priority < existing_priority:
+                deduped[stable_key] = item
+                continue
+            existing_ts = self._parse_iso_datetime(existing.get("sourceUpdatedAt")) or datetime.min.replace(tzinfo=timezone.utc)
+            current_ts = self._parse_iso_datetime(item.get("sourceUpdatedAt")) or datetime.min.replace(tzinfo=timezone.utc)
+            if current_priority == existing_priority and current_ts > existing_ts:
+                deduped[stable_key] = item
+        values = list(deduped.values())
+        values.sort(
+            key=lambda item: (
+                int(item.get("priority") or 999),
+                -int((self._parse_iso_datetime(item.get("sourceUpdatedAt")) or datetime.min.replace(tzinfo=timezone.utc)).timestamp()),
+            )
+        )
+        return values
+
+    def _supervisor_state_path(self) -> Path:
+        return self.project_root / SUPERVISOR_DIR_NAME / "state.json"
+
+    def _supervisor_checklists_dir(self) -> Path:
+        return self.project_root / SUPERVISOR_CHECKLISTS_DIR_NAME
+
+    def _supervisor_checklist_path(self, chapter: int, saved_at: datetime) -> Path:
+        return self._supervisor_checklists_dir() / f"checklist-ch{max(0, int(chapter or 0)):04d}-{saved_at.strftime('%Y%m%d-%H%M%S-%f')}.md"
+
+    def _build_supervisor_checklist_document(
+        self,
+        content: str,
+        *,
+        saved_at: datetime,
+        chapter: int,
+        selected_keys: List[str],
+        category_filter: str,
+        sort_mode: str,
+        title: str,
+        note: str,
+    ) -> str:
+        lines = [
+            "---",
+            f"saved_at: {saved_at.isoformat()}",
+            f"chapter: {max(0, int(chapter or 0))}",
+            f"category_filter: {category_filter}",
+            f"sort_mode: {sort_mode}",
+            f"selected_count: {len(selected_keys)}",
+            f"title: {json.dumps(str(title or '').strip(), ensure_ascii=False)}",
+            f"note: {json.dumps(str(note or '').strip(), ensure_ascii=False)}",
+        ]
+        if selected_keys:
+            lines.append("selected_keys:")
+            for key in selected_keys:
+                lines.append(f"  - {json.dumps(key, ensure_ascii=False)}")
+        else:
+            lines.append("selected_keys: []")
+        lines.extend(["---", "", str(content or "").strip(), ""])
+        return "\n".join(lines)
+
+    def _parse_supervisor_checklist_document(self, content: str) -> Dict[str, Any]:
+        text = str(content or "")
+        if not text.startswith("---\n"):
+            return {"content": text.strip()}
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {"content": text.strip()}
+        metadata: Dict[str, Any] = {}
+        body_start = 0
+        index = 1
+        while index < len(lines):
+            raw_line = lines[index]
+            stripped = raw_line.strip()
+            if stripped == "---":
+                body_start = index + 1
+                break
+            if raw_line.startswith("selected_keys:"):
+                values: List[str] = []
+                index += 1
+                while index < len(lines):
+                    entry = lines[index]
+                    if not entry.startswith("  - "):
+                        index -= 1
+                        break
+                    payload = entry[4:].strip()
+                    try:
+                        values.append(json.loads(payload))
+                    except json.JSONDecodeError:
+                        values.append(payload.strip('"'))
+                    index += 1
+                metadata["selected_keys"] = values
+            elif ":" in raw_line:
+                key, value = raw_line.split(":", 1)
+                normalized_key = key.strip()
+                normalized_value = value.strip()
+                if normalized_key in {"title", "note"}:
+                    try:
+                        metadata[normalized_key] = json.loads(normalized_value)
+                    except json.JSONDecodeError:
+                        metadata[normalized_key] = normalized_value.strip('"')
+                else:
+                    metadata[normalized_key] = normalized_value
+            index += 1
+        else:
+            body_start = len(lines)
+
+        metadata["content"] = "\n".join(lines[body_start:]).strip()
+        return metadata
+
+    def _build_supervisor_checklist_summary(self, content: str) -> str:
+        for line in str(content or "").splitlines():
+            normalized = line.strip()
+            if normalized and not normalized.startswith("#"):
+                return normalized[:140]
+        return "已保存的 Supervisor 清单"
+
+    def _read_supervisor_state(self) -> Dict[str, Any]:
+        path = self._supervisor_state_path()
+        if not path.exists():
+            return {"dismissals": {}, "tracking": {}}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"dismissals": {}, "tracking": {}}
+        dismissals = payload.get("dismissals") if isinstance(payload, dict) else {}
+        tracking = payload.get("tracking") if isinstance(payload, dict) else {}
+        return {
+            "dismissals": dismissals if isinstance(dismissals, dict) else {},
+            "tracking": tracking if isinstance(tracking, dict) else {},
+        }
+
+    def _write_supervisor_state(self, state: Dict[str, Any]) -> None:
+        path = self._supervisor_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "dismissals": state.get("dismissals") if isinstance(state.get("dismissals"), dict) else {},
+            "tracking": state.get("tracking") if isinstance(state.get("tracking"), dict) else {},
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _apply_supervisor_dismissals(self, items: List[Dict[str, Any]], *, include_dismissed: bool = False) -> List[Dict[str, Any]]:
+        state = self._read_supervisor_state()
+        dismissals = state.get("dismissals") or {}
+        tracking = state.get("tracking") or {}
+        next_dismissals = dict(dismissals) if isinstance(dismissals, dict) else {}
+        next_tracking = dict(tracking) if isinstance(tracking, dict) else {}
+        state_changed = False
+        visible_items: List[Dict[str, Any]] = []
+
+        for item in items:
+            stable_key = str(item.get("stableKey") or "").strip()
+            fingerprint = str(item.get("fingerprint") or stable_key).strip() or stable_key
+            dismissal = dismissals.get(stable_key) if stable_key else None
+            dismissed = False
+            dismissed_at = None
+            dismissed_reason = ""
+            dismissed_note = ""
+            tracking_status = ""
+            tracking_label = ""
+            tracking_note = ""
+            linked_task_id = ""
+            linked_checklist_path = ""
+            tracking_updated_at = None
+            if isinstance(dismissal, dict):
+                dismissed = str(dismissal.get("fingerprint") or "").strip() == fingerprint
+                dismissed_at = dismissal.get("dismissed_at") if dismissed else None
+                dismissed_reason = str(dismissal.get("reason") or "").strip() if dismissed else ""
+                dismissed_note = str(dismissal.get("note") or "").strip() if dismissed else ""
+                if dismissal.get("fingerprint") and not dismissed:
+                    next_dismissals.pop(stable_key, None)
+                    state_changed = True
+            elif stable_key and stable_key in next_dismissals:
+                next_dismissals.pop(stable_key, None)
+                state_changed = True
+
+            tracking_entry = tracking.get(stable_key) if stable_key else None
+            if isinstance(tracking_entry, dict):
+                entry_matches = str(tracking_entry.get("fingerprint") or "").strip() == fingerprint
+                normalized_status = self._normalize_supervisor_tracking_status(tracking_entry.get("status"))
+                if entry_matches and normalized_status:
+                    tracking_status = normalized_status
+                    tracking_label = self._format_supervisor_tracking_label(normalized_status)
+                    tracking_note = str(tracking_entry.get("note") or "").strip()
+                    linked_task_id = str(tracking_entry.get("linked_task_id") or "").strip()
+                    linked_checklist_path = str(tracking_entry.get("linked_checklist_path") or "").strip()
+                    tracking_updated_at = tracking_entry.get("updated_at")
+                elif tracking_entry.get("fingerprint") and not entry_matches:
+                    next_tracking.pop(stable_key, None)
+                    state_changed = True
+            elif stable_key and stable_key in next_tracking:
+                next_tracking.pop(stable_key, None)
+                state_changed = True
+
+            enriched = dict(item)
+            enriched["dismissed"] = dismissed
+            enriched["dismissedAt"] = dismissed_at
+            enriched["dismissalReason"] = dismissed_reason
+            enriched["dismissalNote"] = dismissed_note
+            enriched["trackingStatus"] = tracking_status
+            enriched["trackingLabel"] = tracking_label
+            enriched["trackingNote"] = tracking_note
+            enriched["linkedTaskId"] = linked_task_id
+            enriched["linkedChecklistPath"] = linked_checklist_path
+            enriched["trackingUpdatedAt"] = tracking_updated_at
+            if include_dismissed or not dismissed:
+                visible_items.append(enriched)
+
+        if state_changed:
+            self._write_supervisor_state({"dismissals": next_dismissals, "tracking": next_tracking})
+
+        return visible_items
+
+    def _normalize_supervisor_tracking_status(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in {"in_progress", "completed"} else ""
+
+    def _format_supervisor_tracking_label(self, status: str) -> str:
+        return {
+            "in_progress": "处理中",
+            "completed": "已处理",
+        }.get(str(status or "").strip(), "")
+
+    def _get_supervisor_guarded_result(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        artifacts = task.get("artifacts") or {}
+        guarded = artifacts.get("guarded_runner")
+        if isinstance(guarded, dict) and guarded:
+            return guarded
+        step_results = artifacts.get("step_results") or {}
+        step_payload = ((step_results.get("guarded-chapter-runner") or {}).get("structured_output") or {})
+        return step_payload if isinstance(step_payload, dict) else {}
+
+    def _is_supervisor_guarded_continue_candidate(self, task: Dict[str, Any]) -> bool:
+        guarded_result = self._get_supervisor_guarded_result(task)
+        if not guarded_result:
+            return False
+        if str(guarded_result.get("outcome") or "") != "completed_one_chapter":
+            return False
+        next_action = guarded_result.get("next_action") or {}
+        return bool(next_action.get("can_enqueue_next"))
+
+    def _build_supervisor_task_payload(self, task: Dict[str, Any], chapter: int) -> Dict[str, Any]:
+        request = task.get("request") or {}
+        return {
+            "chapter": max(1, int(chapter or 1)),
+            "mode": str(request.get("mode") or "standard"),
+            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "project_root": str(request.get("project_root") or self.project_root),
+            "options": request.get("options") if isinstance(request.get("options"), dict) else {},
+        }
 
     def _with_runtime_status(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_copy = dict(task)
@@ -254,6 +925,9 @@ class OrchestrationService:
                 volume = self._resolve_volume_for_chapter(chapter)
                 return f"第 {volume} 卷 · 第 {chapter} 章"
             return "目标章节未指定"
+        if task_type == "guarded-write":
+            chapter = int(request.get("chapter") or 0)
+            return f"护栏推进 · 第 {chapter} 章" if chapter > 0 else "护栏推进下一章"
         if task_type == "review":
             chapter_range = str(request.get("chapter_range") or "").strip()
             if chapter_range:
@@ -783,21 +1457,22 @@ class OrchestrationService:
         return self.rag_client.probe()
 
     def create_task(self, task_type: str, request: Dict[str, Any]) -> Dict[str, Any]:
-        workflow = self._load_workflow(task_type)
-        task = self.store.create_task(task_type, request, workflow)
-        task = self.store.update_task(task["id"], workflow_spec=workflow)
+        task = self._create_task_record(task_type, request)
         self._schedule(task["id"])
         return task
 
     def run_task_sync(self, task_type: str, request: Dict[str, Any], *, resume_from_step: Optional[str] = None) -> Dict[str, Any]:
-        workflow = self._load_workflow(task_type)
-        task = self.store.create_task(task_type, request, workflow)
-        task = self.store.update_task(task["id"], workflow_spec=workflow)
+        task = self._create_task_record(task_type, request)
         asyncio.run(self._run_task(task["id"], resume_from_step=resume_from_step))
         refreshed = self.store.get_task(task["id"])
         if refreshed is None:
             raise KeyError(task["id"])
         return refreshed
+
+    def _create_task_record(self, task_type: str, request: Dict[str, Any]) -> Dict[str, Any]:
+        workflow = self._load_workflow(task_type)
+        task = self.store.create_task(task_type, request, workflow)
+        return self.store.update_task(task["id"], workflow_spec=workflow)
 
     def retry_task(self, task_id: str, resume_from_step: Optional[str] = None) -> Dict[str, Any]:
         current_task = self.store.get_task(task_id)
@@ -1101,6 +1776,22 @@ class OrchestrationService:
         index: int,
     ) -> str:
         step_name = step["name"]
+        if step_name == "guarded-chapter-runner":
+            return await self._run_guarded_chapter_runner(task_id, task)
+
+        if step_name == "story-director":
+            plan = self._build_story_plan(task)
+            self._write_story_plan(int(plan.get("anchor_chapter") or 0), plan)
+            self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": plan})
+            self.store.append_event(
+                task_id,
+                "info",
+                "Story director prepared",
+                step_name=step_name,
+                payload={"anchor_chapter": plan.get("anchor_chapter"), "planning_horizon": plan.get("planning_horizon")},
+            )
+            return "ok"
+
         if step_name == "chapter-director":
             brief = self._build_chapter_director_brief(task)
             self._write_director_brief(int(brief.get("chapter") or 0), brief)
@@ -1160,6 +1851,231 @@ class OrchestrationService:
 
         self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": {"skipped": True}})
         return "ok"
+
+    async def _run_guarded_chapter_runner(self, task_id: str, task: Dict[str, Any]) -> str:
+        step_name = "guarded-chapter-runner"
+        request = dict(task.get("request") or {})
+        chapter = self._resolve_guarded_runner_chapter(request)
+        request["chapter"] = chapter
+        self.store.update_task(task_id, request=request, root_task_id=str(task.get("root_task_id") or task_id), trigger_source=str(task.get("trigger_source") or "manual"))
+
+        previous_refresh = self._load_previous_story_refresh(chapter)
+        if previous_refresh.get("should_refresh"):
+            result = {
+                "chapter": chapter,
+                "outcome": "blocked_story_refresh",
+                "stop_step": "story-director",
+                "parent_task_id": task_id,
+                "trigger_source": "guarded-chapter-runner",
+                "child_task_id": None,
+                "child_task_status": None,
+                "safe_to_continue": False,
+                "story_refresh": previous_refresh,
+                "next_action": {
+                    "can_enqueue_next": False,
+                    "next_chapter": chapter,
+                    "next_recommended_chapter": chapter,
+                    "reason": "上一章已建议先刷新 story plan，本次护栏推进停止。",
+                    "suggested_action": previous_refresh.get("suggested_action") or "先从 Story Director 重新规划，再决定是否继续下一章。",
+                },
+            }
+            self._persist_guarded_runner_result(task_id, result)
+            self.store.append_event(
+                task_id,
+                "warning",
+                "Guarded runner blocked by story refresh",
+                step_name=step_name,
+                payload={"chapter": chapter, "recommended_resume_from": previous_refresh.get("recommended_resume_from")},
+            )
+            return "ok"
+
+        root_task_id = str(task.get("root_task_id") or task_id)
+        child_task = self._create_task_record("write", request)
+        child_task = self.store.update_task(
+            child_task["id"],
+            parent_task_id=task_id,
+            parent_step_name=step_name,
+            root_task_id=root_task_id,
+            trigger_source="guarded-write",
+        )
+        self.store.append_event(
+            task_id,
+            "info",
+            "Guarded runner child task created",
+            step_name=step_name,
+            payload={"chapter": chapter, "child_task_id": child_task["id"]},
+        )
+        await self._run_task(child_task["id"])
+        child = self.store.get_task(child_task["id"]) or child_task
+        child_status = str(child.get("status") or "")
+        child_error = child.get("error") or {}
+        child_artifacts = child.get("artifacts") or {}
+        child_writeback = child_artifacts.get("writeback") or {}
+        child_review_summary = child_artifacts.get("review_summary") or {}
+        child_story_refresh = child_writeback.get("story_refresh") or {}
+
+        if child_status == "awaiting_writeback_approval":
+            result = {
+                "chapter": chapter,
+                "outcome": "stopped_for_approval",
+                "stop_step": "approval-gate",
+                "parent_task_id": task_id,
+                "trigger_source": "guarded-chapter-runner",
+                "child_task_id": child_task["id"],
+                "child_task_status": child_status,
+                "safe_to_continue": False,
+                "story_refresh": child_story_refresh,
+                "review_summary": child_review_summary,
+                "next_action": {
+                    "can_enqueue_next": False,
+                    "next_chapter": chapter + 1,
+                    "next_recommended_chapter": chapter + 1,
+                    "reason": "当前章节已进入人工审批关卡，护栏推进停止。",
+                    "suggested_action": "先批准或拒绝当前 write 子任务的回写，再决定是否继续。",
+                },
+            }
+            self._persist_guarded_runner_result(task_id, result)
+            self.store.append_event(
+                task_id,
+                "warning",
+                "Guarded runner stopped at approval gate",
+                step_name=step_name,
+                payload={"chapter": chapter, "child_task_id": child_task["id"]},
+            )
+            return "ok"
+
+        if child_status == "failed" and str(child_error.get("code") or "") == "REVIEW_GATE_BLOCKED":
+            result = {
+                "chapter": chapter,
+                "outcome": "blocked_by_review",
+                "stop_step": "review-summary",
+                "parent_task_id": task_id,
+                "trigger_source": "guarded-chapter-runner",
+                "child_task_id": child_task["id"],
+                "child_task_status": child_status,
+                "safe_to_continue": False,
+                "story_refresh": child_story_refresh,
+                "review_summary": child_review_summary,
+                "next_action": {
+                    "can_enqueue_next": False,
+                    "next_chapter": chapter + 1,
+                    "next_recommended_chapter": chapter + 1,
+                    "reason": str(child_error.get("message") or "审查关卡阻止继续执行。"),
+                    "suggested_action": "先修复子任务中的审查问题，再决定是否继续下一章。",
+                },
+            }
+            self._persist_guarded_runner_result(task_id, result)
+            self.store.append_event(
+                task_id,
+                "warning",
+                "Guarded runner blocked by review gate",
+                step_name=step_name,
+                payload={"chapter": chapter, "child_task_id": child_task["id"], "error_code": child_error.get("code")},
+            )
+            return "ok"
+
+        if child_status != "completed":
+            error_info = {
+                "code": str(child_error.get("code") or "GUARDED_CHILD_TASK_FAILED"),
+                "message": str(child_error.get("message") or f"护栏推进子任务未成功完成：{child_status or 'unknown'}"),
+            }
+            self.store.mark_failed(task_id, step_name, error_info)
+            self.store.append_event(
+                task_id,
+                "error",
+                "Guarded runner child task failed",
+                step_name=step_name,
+                payload={"chapter": chapter, "child_task_id": child_task["id"], "child_status": child_status, "error_code": error_info["code"]},
+            )
+            return "failed"
+
+        next_action = self._build_guarded_runner_next_action(chapter, child_story_refresh)
+        result = {
+            "chapter": chapter,
+            "outcome": "completed_one_chapter",
+            "stop_step": "data-sync",
+            "parent_task_id": task_id,
+            "trigger_source": "guarded-chapter-runner",
+            "child_task_id": child_task["id"],
+            "child_task_status": child_status,
+            "safe_to_continue": bool(next_action.get("can_enqueue_next")),
+            "story_refresh": child_story_refresh,
+            "director_alignment": child_writeback.get("director_alignment") or {},
+            "story_alignment": child_writeback.get("story_alignment") or {},
+            "review_summary": child_review_summary,
+            "next_action": next_action,
+        }
+        self._persist_guarded_runner_result(task_id, result)
+        self.store.append_event(
+            task_id,
+            "info",
+            "Guarded runner completed one chapter",
+            step_name=step_name,
+            payload={"chapter": chapter, "child_task_id": child_task["id"], "next_chapter": next_action.get("next_chapter")},
+        )
+        return "ok"
+
+    def _persist_guarded_runner_result(self, task_id: str, result: Dict[str, Any]) -> None:
+        self.store.save_step_result(task_id, "guarded-chapter-runner", {"success": True, "structured_output": result})
+        latest_task = self.store.get_task(task_id) or {}
+        artifacts = dict(latest_task.get("artifacts") or {})
+        artifacts["guarded_runner"] = result
+        self.store.update_task(task_id, artifacts=artifacts)
+
+    def _resolve_guarded_runner_chapter(self, request: Dict[str, Any]) -> int:
+        try:
+            requested = int(request.get("chapter") or 0)
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            return requested
+        progress = self._read_state_data().get("progress") or {}
+        try:
+            current_chapter = max(0, int(progress.get("current_chapter") or 0))
+        except (TypeError, ValueError):
+            current_chapter = 0
+        return max(1, current_chapter + 1)
+
+    def _load_previous_story_refresh(self, chapter: int) -> Dict[str, Any]:
+        if chapter <= 1:
+            return {}
+        previous_chapter = chapter - 1
+        candidates: List[Dict[str, Any]] = []
+        for candidate in self.store.list_tasks(limit=200):
+            if candidate.get("task_type") != "write":
+                continue
+            if candidate.get("project_root") != str(self.project_root):
+                continue
+            if int((candidate.get("request") or {}).get("chapter") or 0) != previous_chapter:
+                continue
+            refresh = (((candidate.get("artifacts") or {}).get("writeback") or {}).get("story_refresh") or {})
+            if refresh:
+                candidates.append({"task": candidate, "story_refresh": refresh})
+        if not candidates:
+            return {}
+        candidates.sort(
+            key=lambda item: self._parse_iso_datetime((item["task"] or {}).get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        return candidates[0]["story_refresh"]
+
+    def _build_guarded_runner_next_action(self, chapter: int, story_refresh: Dict[str, Any]) -> Dict[str, Any]:
+        next_chapter = max(1, int(chapter) + 1)
+        if story_refresh.get("should_refresh"):
+            return {
+                "can_enqueue_next": False,
+                "next_chapter": next_chapter,
+                "next_recommended_chapter": next_chapter,
+                "reason": "本章 data-sync 已建议刷新 story plan，暂不继续自动推进。",
+                "suggested_action": story_refresh.get("suggested_action") or "先从 Story Director 重新规划，再决定是否继续下一章。",
+            }
+        return {
+            "can_enqueue_next": True,
+            "next_chapter": next_chapter,
+            "next_recommended_chapter": next_chapter,
+            "reason": "本次仅成功推进一章，且未触发新的 story refresh 护栏。",
+            "suggested_action": f"如需继续，可手动创建第 {next_chapter} 章的护栏推进或常规 write 任务。",
+        }
 
     async def _run_external_step(self, task_id: str, task: Dict[str, Any], step: Dict[str, Any]) -> Optional[StepResult]:
         step_name = step["name"]
@@ -1830,6 +2746,12 @@ class OrchestrationService:
             self._append_context_contract_snapshot(project_docs, chapter)
             self._append_snapshot(
                 project_docs,
+                self._story_plan_path(chapter),
+                f"{STORY_DIRECTOR_DIR_NAME}/plan-ch{chapter:04d}.json",
+                12000,
+            )
+            self._append_snapshot(
+                project_docs,
                 self._director_brief_path(chapter),
                 f"{DIRECTOR_DIR_NAME}/ch{chapter:04d}.json",
                 12000,
@@ -2094,7 +3016,7 @@ class OrchestrationService:
         try:
             if task.get("task_type") == "write":
                 if step_name == "context":
-                    self._sync_context_director_brief(task_id, task, payload)
+                    self._sync_context_story_contract(task_id, task, payload)
                 elif step_name == "data-sync":
                     self._apply_write_data_sync(task_id, task, payload)
             elif task.get("task_type") == "plan" and step_name == "plan":
@@ -2120,6 +3042,236 @@ class OrchestrationService:
     def _write_polished_chapter(self, task_id: str, payload: Dict[str, Any]) -> Path:
         raise RuntimeError("旧的 polished chapter 直写入口已禁用，请统一走 data-sync 写回。")
 
+    def _load_recent_director_briefs(self, chapter: int, window: int = 3) -> List[Dict[str, Any]]:
+        briefs: List[Dict[str, Any]] = []
+        for prev_chapter in range(max(1, chapter - window), chapter):
+            brief = self._load_director_brief(prev_chapter)
+            if brief:
+                briefs.append(brief)
+        return briefs
+
+    def _load_recent_director_alignments(self, chapter: int, window: int = 3) -> List[Dict[str, Any]]:
+        history: List[Dict[str, Any]] = []
+        tasks = self.store.list_tasks(limit=50)
+        for task in reversed(tasks):
+            if str(task.get("task_type") or "").strip().lower() != "write":
+                continue
+            request = task.get("request") or {}
+            task_chapter = int(request.get("chapter") or 0)
+            if task_chapter <= 0 or task_chapter >= chapter or task_chapter < max(1, chapter - window):
+                continue
+            alignment = ((task.get("artifacts") or {}).get("writeback") or {}).get("director_alignment") or {}
+            if isinstance(alignment, dict) and alignment:
+                history.append({"chapter": task_chapter, "director_alignment": alignment})
+        return history[-window:]
+
+    def _load_recent_story_alignments(self, chapter: int, window: int = 3) -> List[Dict[str, Any]]:
+        history: List[Dict[str, Any]] = []
+        tasks = self.store.list_tasks(limit=50)
+        for task in reversed(tasks):
+            if str(task.get("task_type") or "").strip().lower() != "write":
+                continue
+            request = task.get("request") or {}
+            task_chapter = int(request.get("chapter") or 0)
+            if task_chapter <= 0 or task_chapter >= chapter or task_chapter < max(1, chapter - window):
+                continue
+            alignment = ((task.get("artifacts") or {}).get("writeback") or {}).get("story_alignment") or {}
+            if isinstance(alignment, dict) and alignment:
+                history.append({"chapter": task_chapter, "story_alignment": alignment})
+        return history[-window:]
+
+    def _get_story_plan_slot(self, story_plan: Dict[str, Any], chapter: int) -> Dict[str, Any]:
+        for item in (story_plan.get("chapters") or []):
+            if int((item or {}).get("chapter") or 0) == chapter:
+                return item
+        return self._normalize_story_plan_slot({}, chapter=chapter)
+
+    def _build_story_plan(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        request = task.get("request") or {}
+        chapter = int(request.get("chapter") or 0)
+        fallback = self._build_fallback_story_plan(chapter)
+        if chapter <= 0:
+            return fallback
+
+        try:
+            from scripts.extract_chapter_context import build_chapter_context_payload
+
+            context_payload = build_chapter_context_payload(self.project_root, chapter)
+        except Exception as exc:
+            logger.warning("Failed to build story director context for chapter %s: %s", chapter, exc, exc_info=True)
+            return fallback
+
+        planning_horizon = 4
+        narrative_state = context_payload.get("narrative_state") or {}
+        active_foreshadowing = [item for item in (narrative_state.get("active_foreshadowing") or []) if isinstance(item, dict)]
+        knowledge_conflicts = [item for item in (narrative_state.get("knowledge_conflicts") or []) if isinstance(item, dict)]
+        reader_signal = context_payload.get("reader_signal") or {}
+        review_trend = reader_signal.get("review_trend") or {}
+        outline = str(context_payload.get("outline") or "").strip()
+        previous_summaries = [str(item).strip() for item in (context_payload.get("previous_summaries") or []) if str(item).strip()]
+        recent_briefs = self._load_recent_director_briefs(chapter)
+        recent_alignments = self._load_recent_director_alignments(chapter)
+
+        priority_threads = self._normalize_director_text_list(
+            [item.get("name") for item in active_foreshadowing]
+            + [item.get("topic") for item in knowledge_conflicts]
+            + [thread.split(":", 1)[-1] for row in recent_alignments for thread in ((row.get("director_alignment") or {}).get("missed") or [])]
+            + [thread for brief in recent_briefs for thread in (brief.get("must_advance_threads") or [])],
+            limit=6,
+        )
+        if not priority_threads and outline:
+            priority_threads = ["推进当前卷主线", "保持章末钩子连续驱动"]
+
+        payoff_schedule: List[Dict[str, Any]] = []
+        defer_schedule: List[Dict[str, Any]] = []
+        for item in active_foreshadowing:
+            name = str(item.get("name") or "").strip()
+            payoff_chapter = int(item.get("planned_payoff_chapter") or 0)
+            if not name or payoff_chapter <= 0:
+                continue
+            if payoff_chapter <= chapter + planning_horizon - 1:
+                payoff_schedule.append(
+                    {
+                        "thread": name,
+                        "target_chapter": max(chapter, payoff_chapter),
+                        "mode": "major" if payoff_chapter <= chapter + 1 else "partial",
+                    }
+                )
+            else:
+                defer_schedule.append(
+                    {
+                        "thread": name,
+                        "not_before_chapter": payoff_chapter,
+                        "reason": "当前滚动窗口内优先保证主冲突推进，不提前清空长期承诺。",
+                    }
+                )
+
+        risk_flags = self._normalize_director_text_list(
+            [flag for flag in (reader_signal.get("low_score_ranges") or []) if isinstance(flag, dict)]
+            and ["最近若干章存在低分区间，需要避免继续空转铺垫。"]
+            or [],
+            limit=5,
+        )
+        overall_avg = review_trend.get("overall_avg")
+        if isinstance(overall_avg, (int, float)) and float(overall_avg) < 75:
+            risk_flags.append("近期审查均分偏低，当前窗口需优先保证动作推进和兑现密度。")
+        if not payoff_schedule:
+            risk_flags.append("当前窗口内缺少明确兑现目标，需用关系推进或压力升级补足驱动力。")
+        risk_flags = self._normalize_director_text_list(risk_flags, limit=5)
+
+        chapter_slots: List[Dict[str, Any]] = []
+        for offset in range(planning_horizon):
+            target_chapter = chapter + offset
+            slot_payoffs = [
+                str(item.get("thread") or "").strip()
+                for item in payoff_schedule
+                if int(item.get("target_chapter") or 0) == target_chapter and str(item.get("thread") or "").strip()
+            ]
+            slot_threads = priority_threads[offset : offset + 2] or priority_threads[:2] or ["推进当前主线"]
+            role = "pressure-escalation"
+            if offset == 0:
+                role = "current-execution"
+            elif slot_payoffs:
+                role = "payoff-push"
+            elif offset == 1:
+                role = "transition"
+            chapter_slots.append(
+                {
+                    "chapter": target_chapter,
+                    "role": role,
+                    "chapter_goal": (
+                        f"第{target_chapter}章优先推进“{slot_threads[0]}”并抬升下一步行动压力。"
+                        if not slot_payoffs
+                        else f"第{target_chapter}章围绕“{slot_payoffs[0]}”给出阶段性兑现，同时保留更高一层压力。"
+                    ),
+                    "must_advance_threads": slot_threads,
+                    "optional_payoffs": slot_payoffs[:2],
+                    "forbidden_resolutions": [
+                        f"不要在第{target_chapter}章彻底解决 {slot_threads[0]}"
+                    ] if slot_threads else ["不要过早清空长期冲突"],
+                    "ending_hook_target": (
+                        "章末把行动压力切到下一章的更高风险场景。"
+                        if offset < planning_horizon - 1
+                        else "章末留下下一轮滚动规划所需的新任务或更高代价。"
+                    ),
+                }
+            )
+
+        transition_notes = []
+        if previous_summaries:
+            transition_notes.append("先承接最近章节遗留压力，再完成从当前冲突到下一层冲突的转场。")
+        if payoff_schedule:
+            transition_notes.append(f"优先把 {payoff_schedule[0]['thread']} 接到可执行行动上，而不是只做解释性推进。")
+        if not transition_notes:
+            transition_notes.append("当前窗口以主线推进为先，避免多章停留在说明和准备。")
+
+        rationale = "当前 story plan 根据 active foreshadowing、knowledge conflicts、最近导演执行结果生成，用于稳定未来几章的推进顺序。"
+        if outline:
+            rationale += f" 本轮仍以当前大纲切片为硬约束。"
+
+        plan = {
+            "anchor_chapter": chapter,
+            "planning_horizon": planning_horizon,
+            "chapters": chapter_slots,
+            "priority_threads": priority_threads,
+            "payoff_schedule": payoff_schedule,
+            "defer_schedule": defer_schedule,
+            "risk_flags": risk_flags,
+            "transition_notes": transition_notes,
+            "rationale": rationale,
+        }
+        return self._normalize_story_plan(plan, chapter=chapter)
+
+    def _build_story_refresh_assessment(
+        self,
+        story_plan: Dict[str, Any],
+        story_alignment: Dict[str, List[str]],
+        *,
+        chapter: int,
+    ) -> Dict[str, Any]:
+        recent_history = self._load_recent_story_alignments(chapter, window=3)
+        current_missed = self._normalize_director_text_list((story_alignment or {}).get("missed"), limit=20)
+        current_satisfied = self._normalize_director_text_list((story_alignment or {}).get("satisfied"), limit=20)
+        current_deferred = self._normalize_director_text_list((story_alignment or {}).get("deferred"), limit=20)
+
+        consecutive_missed = 1 if current_missed else 0
+        for row in reversed(recent_history):
+            previous_missed = self._normalize_director_text_list(((row.get("story_alignment") or {}).get("missed") or []), limit=20)
+            if not previous_missed:
+                break
+            consecutive_missed += 1
+
+        reasons: List[str] = []
+        reason_codes: List[str] = []
+        if len(current_missed) >= 2:
+            reasons.append("当前章节有多个多章目标未命中，滚动规划已明显偏离执行结果。")
+            reason_codes.append("multiple_missed_targets")
+        if consecutive_missed >= 2:
+            reasons.append(f"连续 {consecutive_missed} 章出现 story alignment missed，建议重新规划未来章节顺序。")
+            reason_codes.append("consecutive_missed_chapters")
+        if current_missed and len(current_missed) > len(current_satisfied):
+            reasons.append("当前章节未满足的多章目标多于已满足目标，后续排期可信度下降。")
+            reason_codes.append("missed_outweighs_satisfied")
+
+        should_refresh = bool(reasons)
+        assessment = {
+            "should_refresh": should_refresh,
+            "recommended_resume_from": "story-director" if should_refresh else None,
+            "reason_codes": self._normalize_director_text_list(reason_codes, limit=6),
+            "reasons": self._normalize_director_text_list(reasons, limit=6),
+            "consecutive_missed_chapters": consecutive_missed,
+            "current_missed_count": len(current_missed),
+            "current_satisfied_count": len(current_satisfied),
+            "current_deferred_count": len(current_deferred),
+            "anchor_chapter": int((story_plan or {}).get("anchor_chapter") or chapter),
+            "planning_horizon": int((story_plan or {}).get("planning_horizon") or 0),
+        }
+        if should_refresh:
+            assessment["suggested_action"] = "建议从 story-director 重新生成滚动规划，再继续后续章节。"
+        else:
+            assessment["suggested_action"] = "当前滚动规划仍可继续使用。"
+        return assessment
+
     def _build_chapter_director_brief(self, task: Dict[str, Any]) -> Dict[str, Any]:
         request = task.get("request") or {}
         chapter = int(request.get("chapter") or 0)
@@ -2144,12 +3296,18 @@ class OrchestrationService:
         genre_profile = context_payload.get("genre_profile") or {}
         outline = str(context_payload.get("outline") or "").strip()
         previous_summaries = [str(item).strip() for item in (context_payload.get("previous_summaries") or []) if str(item).strip()]
+        story_plan = self._get_task_story_plan(task, chapter)
+        story_slot = self._get_story_plan_slot(story_plan, chapter)
 
-        must_advance_threads = [
+        must_advance_threads = self._normalize_director_text_list((story_slot.get("must_advance_threads") or []), limit=4)
+        must_advance_threads.extend(
+            [
             str(item.get("name") or "").strip()
             for item in active_foreshadowing[:3]
             if str(item.get("name") or "").strip()
-        ]
+            ]
+        )
+        must_advance_threads = self._normalize_director_text_list(must_advance_threads, limit=4)
         if not must_advance_threads:
             must_advance_threads = [
                 str(item.get("topic") or "").strip()
@@ -2159,13 +3317,17 @@ class OrchestrationService:
         if not must_advance_threads and outline:
             must_advance_threads = ["推进本章主线目标"]
 
-        payoff_targets = [
+        payoff_targets = self._normalize_director_text_list(story_slot.get("optional_payoffs"), limit=3)
+        payoff_targets.extend(
+            [
             str(item.get("name") or "").strip()
             for item in active_foreshadowing
             if str(item.get("name") or "").strip()
             and int(item.get("planned_payoff_chapter") or 0) > 0
             and int(item.get("planned_payoff_chapter") or 0) <= chapter + 1
-        ][:2]
+            ][:2]
+        )
+        payoff_targets = self._normalize_director_text_list(payoff_targets, limit=3)
 
         setup_targets = [
             str(item.get("name") or "").strip()
@@ -2187,17 +3349,21 @@ class OrchestrationService:
             if str(item.get("topic") or "").strip()
         ]
 
-        forbidden_resolutions = [
+        forbidden_resolutions = self._normalize_director_text_list(story_slot.get("forbidden_resolutions"), limit=4)
+        forbidden_resolutions.extend(
+            [
             f"不要在本章彻底回收 {name}"
             for name in must_advance_threads
             if name and name not in payoff_targets
-        ][:3]
+            ][:3]
+        )
+        forbidden_resolutions = self._normalize_director_text_list(forbidden_resolutions, limit=4)
         if not forbidden_resolutions and active_foreshadowing:
             forbidden_resolutions = [
                 f"不要一次性解释完 {str(active_foreshadowing[0].get('name') or '').strip()}"
             ]
 
-        chapter_goal = self._build_director_goal(
+        chapter_goal = str(story_slot.get("chapter_goal") or "").strip() or self._build_director_goal(
             chapter=chapter,
             payoff_targets=payoff_targets,
             setup_targets=setup_targets,
@@ -2205,10 +3371,18 @@ class OrchestrationService:
             outline=outline,
         )
         primary_conflict = self._build_director_primary_conflict(core_character_arcs, knowledge_conflicts, outline)
-        ending_hook_target = self._build_director_hook_target(payoff_targets, setup_targets, knowledge_reveals, must_advance_threads)
+        ending_hook_target = str(story_slot.get("ending_hook_target") or "").strip() or self._build_director_hook_target(
+            payoff_targets,
+            setup_targets,
+            knowledge_reveals,
+            must_advance_threads,
+        )
         tempo = self._build_director_tempo(writing_guidance, genre_profile)
         review_focus = self._build_director_review_focus(payoff_targets, must_use_entities, knowledge_reveals, forbidden_resolutions)
-        rationale = self._build_director_rationale(chapter, previous_summaries, must_advance_threads, knowledge_reveals)
+        rationale = (
+            f"本章 director brief 服从 story_plan 第{chapter}章槽位：{story_slot.get('role') or 'progression'}。"
+            f" {self._build_director_rationale(chapter, previous_summaries, must_advance_threads, knowledge_reveals)}"
+        )
 
         brief = {
             "chapter": chapter,
@@ -2429,6 +3603,114 @@ class OrchestrationService:
             return f"第{chapter}章需要延续上一章积累的压力，并把“{thread_hint}”与“{knowledge_reveals[0]}”绑定推进。{summary_hint}"
         return f"第{chapter}章需要延续上一章压力，优先推进“{thread_hint}”，避免空转铺垫。{summary_hint}"
 
+    def _story_plan_path(self, anchor_chapter: int) -> Path:
+        return self.project_root / STORY_DIRECTOR_DIR_NAME / f"plan-ch{anchor_chapter:04d}.json"
+
+    def _write_story_plan(self, anchor_chapter: int, plan: Dict[str, Any]) -> Path:
+        path = self._story_plan_path(anchor_chapter)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def _load_story_plan(self, chapter: int) -> Dict[str, Any]:
+        story_dir = self.project_root / STORY_DIRECTOR_DIR_NAME
+        return load_story_plan_for_chapter(story_dir, chapter)
+
+    def _normalize_story_plan_slot(self, slot: Dict[str, Any], *, chapter: int) -> Dict[str, Any]:
+        normalized = {
+            "chapter": int(slot.get("chapter") or chapter),
+            "role": str(slot.get("role") or "").strip() or "progression",
+            "chapter_goal": str(slot.get("chapter_goal") or "").strip() or "推进当前阶段主冲突并抬升下一步压力。",
+            "must_advance_threads": self._normalize_director_text_list(slot.get("must_advance_threads")),
+            "optional_payoffs": self._normalize_director_text_list(slot.get("optional_payoffs")),
+            "forbidden_resolutions": self._normalize_director_text_list(slot.get("forbidden_resolutions")),
+            "ending_hook_target": str(slot.get("ending_hook_target") or "").strip() or "章末留下下一步行动目标。",
+        }
+        if not normalized["must_advance_threads"]:
+            normalized["must_advance_threads"] = ["推进当前主线"]
+        return normalized
+
+    def _build_fallback_story_plan(self, chapter: int) -> Dict[str, Any]:
+        anchor = max(1, chapter)
+        plan = {
+            "anchor_chapter": anchor,
+            "planning_horizon": 4,
+            "priority_threads": ["推进当前主线", "维持章末钩子连续驱动"],
+            "payoff_schedule": [],
+            "defer_schedule": [],
+            "risk_flags": ["当前缺少稳定的多章规划输入，使用保底滚动计划。"],
+            "transition_notes": ["优先保证当前章有明确行动目标，并为后续章节保留升级空间。"],
+            "chapters": [
+                {
+                    "chapter": anchor,
+                    "role": "stabilize",
+                    "chapter_goal": "推进当前章节主冲突，并在章末抛出下一步行动压力。",
+                    "must_advance_threads": ["推进当前主线"],
+                    "optional_payoffs": [],
+                    "forbidden_resolutions": ["不要一次性解决所有长期悬念"],
+                    "ending_hook_target": "章末留下明确的下一步行动目标或更高代价。",
+                }
+            ],
+            "rationale": "当前尚无足够稳定的多章级规划输入，先使用最小 story plan 保持链路可运行。",
+        }
+        return self._normalize_story_plan(plan, chapter=anchor)
+
+    def _normalize_story_plan(self, plan: Dict[str, Any], *, chapter: int) -> Dict[str, Any]:
+        anchor_chapter = int(plan.get("anchor_chapter") or chapter or 1)
+        planning_horizon = max(1, min(5, int(plan.get("planning_horizon") or 4)))
+        raw_slots = [item for item in (plan.get("chapters") or []) if isinstance(item, dict)]
+        slots: List[Dict[str, Any]] = []
+        seen_chapters: set[int] = set()
+        for item in raw_slots:
+            slot = self._normalize_story_plan_slot(item, chapter=int(item.get("chapter") or anchor_chapter))
+            slot_chapter = int(slot.get("chapter") or 0)
+            if slot_chapter <= 0 or slot_chapter in seen_chapters:
+                continue
+            seen_chapters.add(slot_chapter)
+            slots.append(slot)
+            if len(slots) >= planning_horizon:
+                break
+        if anchor_chapter not in seen_chapters:
+            slots.append(
+                self._normalize_story_plan_slot(
+                    {
+                        "chapter": anchor_chapter,
+                        "role": "progression",
+                        "chapter_goal": "推进当前阶段主冲突并抬升下一步压力。",
+                        "must_advance_threads": plan.get("priority_threads") or ["推进当前主线"],
+                        "optional_payoffs": [],
+                        "forbidden_resolutions": ["不要过早清空长期冲突"],
+                        "ending_hook_target": "章末留下明确的下一步行动目标。",
+                    },
+                    chapter=anchor_chapter,
+                )
+            )
+        slots.sort(key=lambda item: int(item.get("chapter") or 0))
+        normalized = {
+            "anchor_chapter": anchor_chapter,
+            "planning_horizon": planning_horizon,
+            "chapters": slots[:planning_horizon],
+            "priority_threads": self._normalize_director_text_list(plan.get("priority_threads"), limit=8),
+            "payoff_schedule": [item for item in (plan.get("payoff_schedule") or []) if isinstance(item, dict)][:8],
+            "defer_schedule": [item for item in (plan.get("defer_schedule") or []) if isinstance(item, dict)][:8],
+            "risk_flags": self._normalize_director_text_list(plan.get("risk_flags"), limit=8),
+            "transition_notes": self._normalize_director_text_list(plan.get("transition_notes"), limit=8),
+            "rationale": str(plan.get("rationale") or "").strip() or "根据当前项目状态生成的多章滚动规划。",
+        }
+        if not normalized["priority_threads"]:
+            normalized["priority_threads"] = ["推进当前主线"]
+        return normalized
+
+    def _get_task_story_plan(self, task: Dict[str, Any], chapter: int) -> Dict[str, Any]:
+        step_results = ((task.get("artifacts") or {}).get("step_results") or {})
+        plan = ((step_results.get("story-director") or {}).get("structured_output") or {})
+        if isinstance(plan, dict) and plan:
+            return self._normalize_story_plan(plan, chapter=chapter)
+        stored = self._load_story_plan(chapter)
+        if stored:
+            return self._normalize_story_plan(stored, chapter=chapter)
+        return self._build_fallback_story_plan(chapter)
+
     def _director_brief_path(self, chapter: int) -> Path:
         return self.project_root / DIRECTOR_DIR_NAME / f"ch{chapter:04d}.json"
 
@@ -2458,19 +3740,21 @@ class OrchestrationService:
             return self._normalize_director_brief(stored, chapter=chapter)
         return self._build_fallback_director_brief(chapter)
 
-    def _sync_context_director_brief(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    def _sync_context_story_contract(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
         chapter = int(((task.get("request") or {}).get("chapter") or 0))
         if chapter <= 0:
             return
+        story_plan = self._get_task_story_plan(task, chapter)
         director_brief = self._get_task_director_brief(task, chapter)
         current_result = (((task.get("artifacts") or {}).get("step_results") or {}).get("context") or {})
         merged_output = dict(payload or {})
+        merged_output["story_plan"] = story_plan
         merged_output["director_brief"] = director_brief
         updated_result = dict(current_result)
         updated_result["success"] = True
         updated_result["structured_output"] = merged_output
         self.store.save_step_result(task_id, "context", updated_result)
-        self.store.append_event(task_id, "info", "Context director brief synced", step_name="context", payload={"chapter": chapter})
+        self.store.append_event(task_id, "info", "Context story contract synced", step_name="context", payload={"chapter": chapter})
 
     def _apply_write_data_sync(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
         request = task.get("request") or {}
@@ -2493,6 +3777,7 @@ class OrchestrationService:
         draft_output = (step_results.get("draft") or {}).get("structured_output") or {}
         polish_output = (step_results.get("polish") or {}).get("structured_output") or {}
         review_summary = artifacts.get("review_summary") or {}
+        story_plan = self._get_task_story_plan(task, chapter)
         director_brief = self._get_task_director_brief(task, chapter)
 
         requested_chapter_file = self._default_chapter_file(chapter)
@@ -2517,6 +3802,8 @@ class OrchestrationService:
         summary_content = payload.get("summary_content") or payload.get("summary_text")
         if not isinstance(summary_content, str) or not summary_content.strip():
             summary_content = self._build_summary_markdown(chapter, content, review_summary)
+        story_alignment = self._build_story_alignment(story_plan, payload, content, chapter)
+        story_refresh = self._build_story_refresh_assessment(story_plan, story_alignment, chapter=chapter)
         director_alignment = self._build_director_alignment(director_brief, payload, content)
 
         state_payload, structured_sync = self._normalize_state_payload(chapter, payload)
@@ -2590,6 +3877,14 @@ class OrchestrationService:
                     step_name="data-sync",
                     payload=warning_payload,
                 )
+            if story_refresh.get("should_refresh"):
+                self.store.append_event(
+                    task_id,
+                    "warning",
+                    "Story plan refresh suggested",
+                    step_name="data-sync",
+                    payload=story_refresh,
+                )
 
             self._validate_writeback_consistency(
                 chapter=chapter,
@@ -2619,10 +3914,13 @@ class OrchestrationService:
                     "index_updated": True,
                     "structured_sync": structured_sync["summary"],
                     "narrative_sync": narrative_sync["summary"],
+                    "story_alignment": story_alignment,
+                    "story_refresh": story_refresh,
                     "director_alignment": director_alignment,
                 }
             )
             latest_artifacts["writeback"] = writeback
+            latest_artifacts["story_refresh"] = story_refresh
             self.store.update_task(task_id, artifacts=latest_artifacts)
             self.store.append_event(
                 task_id,
@@ -3321,8 +4619,8 @@ class OrchestrationService:
     def _validate_output(self, step: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
         required = step.get("required_output_keys", [])
         missing = [key for key in required if key not in payload]
-        if str(step.get("name") or "").strip().lower() == "context" and "director_brief" in missing:
-            missing = [key for key in missing if key != "director_brief"]
+        if str(step.get("name") or "").strip().lower() == "context":
+            missing = [key for key in missing if key not in {"director_brief", "story_plan"}]
         if missing:
             return {
                 "code": "INVALID_STEP_OUTPUT",
@@ -4592,6 +5890,60 @@ class OrchestrationService:
                 payload={"chapter": chapter, **summary},
             )
             return
+
+    def _build_story_alignment(
+        self,
+        story_plan: Dict[str, Any],
+        payload: Dict[str, Any],
+        content: str,
+        chapter: int,
+    ) -> Dict[str, List[str]]:
+        alignment = {"satisfied": [], "missed": [], "deferred": []}
+        if not isinstance(story_plan, dict) or not story_plan:
+            return alignment
+
+        slot = self._get_story_plan_slot(story_plan, chapter)
+        text_evidence = "\n".join(
+            [
+                str(content or ""),
+                json.dumps(payload.get("foreshadowing_items") or [], ensure_ascii=False),
+                json.dumps(payload.get("timeline_events") or [], ensure_ascii=False),
+                json.dumps(payload.get("knowledge_states") or [], ensure_ascii=False),
+                json.dumps((payload.get("chapter_meta") or {}).get("characters") or [], ensure_ascii=False),
+            ]
+        ).casefold()
+
+        def has_text(target: str) -> bool:
+            normalized = str(target or "").strip().casefold()
+            return bool(normalized) and normalized in text_evidence
+
+        for target in self._normalize_director_text_list(slot.get("must_advance_threads")):
+            if has_text(target):
+                alignment["satisfied"].append(f"thread:{target}")
+            else:
+                alignment["missed"].append(f"thread:{target}")
+
+        for target in self._normalize_director_text_list(slot.get("optional_payoffs")):
+            if has_text(target):
+                alignment["satisfied"].append(f"payoff:{target}")
+            else:
+                alignment["deferred"].append(f"payoff:{target}")
+
+        for item in [row for row in (story_plan.get("payoff_schedule") or []) if isinstance(row, dict)]:
+            target = str(item.get("thread") or "").strip()
+            target_chapter = int(item.get("target_chapter") or 0)
+            if not target:
+                continue
+            if target_chapter > chapter:
+                alignment["deferred"].append(f"scheduled:{target}@{target_chapter}")
+            elif has_text(target):
+                alignment["satisfied"].append(f"scheduled:{target}@{target_chapter}")
+            else:
+                alignment["missed"].append(f"scheduled:{target}@{target_chapter}")
+
+        for key in alignment:
+            alignment[key] = self._normalize_director_text_list(alignment[key], limit=20)
+        return alignment
 
     def _build_director_alignment(self, director_brief: Dict[str, Any], payload: Dict[str, Any], content: str) -> Dict[str, List[str]]:
         alignment = {"satisfied": [], "missed": [], "deferred": []}

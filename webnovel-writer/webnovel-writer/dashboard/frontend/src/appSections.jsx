@@ -574,6 +574,7 @@ export function TaskCenterPageSection({
     const [actionError, setActionError] = useState(null)
     const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
     const [cancelSubmitting, setCancelSubmitting] = useState(false)
+    const [followupSubmitting, setFollowupSubmitting] = useState(false)
     const canRetryTask = ['failed', 'interrupted'].includes(selectedTask?.status) && selectedTask?.runtime_status?.retryable !== false
     const canCancelTask = ['queued', 'running', 'awaiting_writeback_approval'].includes(selectedTask?.status)
 
@@ -592,10 +593,28 @@ export function TaskCenterPageSection({
     async function perform(path, body) {
         setActionError(null)
         try {
-            await postJSON(path, body)
+            const response = await postJSON(path, body)
             onMutated()
+            return response
         } catch (err) {
             setActionError(normalizeError(err))
+            return null
+        }
+    }
+
+    async function launchTask(taskType, payload) {
+        setFollowupSubmitting(true)
+        setActionError(null)
+        try {
+            const response = await postJSON(`/api/tasks/${taskType}`, payload)
+            if (response?.id) onSelectTask(response.id)
+            onMutated()
+            return response
+        } catch (err) {
+            setActionError(normalizeError(err))
+            return null
+        } finally {
+            setFollowupSubmitting(false)
         }
     }
 
@@ -651,6 +670,33 @@ export function TaskCenterPageSection({
                 {!selectedTask && <div className="empty-state">请选择任务查看详情</div>}
                 {selectedTask && (() => {
                     const liveSelectedTask = withLiveRuntimeStatus(selectedTask, runtimeNow)
+                    const storyPlan = resolveStoryPlan(liveSelectedTask)
+                    const directorBrief = resolveDirectorBrief(liveSelectedTask)
+                    const guardedRun = resolveGuardedRunnerResult(liveSelectedTask)
+                    const writeback = liveSelectedTask.artifacts?.writeback || {}
+                    const storyAlignment = normalizeAlignment(writeback.story_alignment)
+                    const directorAlignment = normalizeAlignment(writeback.director_alignment)
+                    const storyRefresh = normalizeStoryRefresh(writeback.story_refresh || liveSelectedTask.artifacts?.story_refresh)
+                    const currentStorySlot = resolveStoryPlanSlot(storyPlan, Number(liveSelectedTask?.request?.chapter || 0))
+                    const guardedChildTask = guardedRun?.child_task_id ? (tasks.find((item) => item.id === guardedRun.child_task_id) || null) : null
+                    const parentTask = liveSelectedTask?.parent_task_id ? (tasks.find((item) => item.id === liveSelectedTask.parent_task_id) || null) : null
+                    const rootTask = liveSelectedTask?.root_task_id ? (tasks.find((item) => item.id === liveSelectedTask.root_task_id) || null) : null
+                    const guardedFollowupPayload = buildFollowupTaskPayload(liveSelectedTask, guardedRun?.next_action?.next_chapter || 0)
+                    const canLaunchNextGuarded = Boolean(
+                        guardedRun?.outcome === 'completed_one_chapter' &&
+                        guardedRun?.next_action?.can_enqueue_next &&
+                        guardedFollowupPayload.chapter > 0 &&
+                        !followupSubmitting
+                    )
+                    const canLaunchFallbackWrite = Boolean(
+                        guardedRun?.outcome === 'blocked_story_refresh' &&
+                        guardedFollowupPayload.chapter > 0 &&
+                        !followupSubmitting
+                    )
+                    const canRefreshStoryPlan = Boolean(
+                        storyRefresh?.should_refresh &&
+                        !['queued', 'running', 'awaiting_writeback_approval'].includes(liveSelectedTask.status)
+                    )
                     return (
                     <>
                         <div className="detail-grid">
@@ -695,6 +741,203 @@ export function TaskCenterPageSection({
                                 <MetricCard label="是否可重试" value={formatRetryableValue(liveSelectedTask.runtime_status?.retryable)} />
                             </div>
                         </div>
+                        {(liveSelectedTask.parent_task_id || liveSelectedTask.trigger_source || liveSelectedTask.root_task_id) ? (
+                            <div className="subsection">
+                                <div className="subsection-title">任务链路</div>
+                                <div className="detail-grid">
+                                    <MetricCard label="触发来源" value={liveSelectedTask.trigger_source || '-'} />
+                                    <MetricCard label="父任务" value={liveSelectedTask.parent_task_id || '-'} />
+                                    <MetricCard label="根任务" value={liveSelectedTask.root_task_id || '-'} />
+                                    <MetricCard label="父步骤" value={liveSelectedTask.parent_step_name ? translateStepName(liveSelectedTask.parent_step_name) : '-'} />
+                                </div>
+                                <div className="button-row">
+                                    {parentTask ? <button className="secondary-button" onClick={() => onSelectTask(parentTask.id)}>查看父任务</button> : null}
+                                    {rootTask && rootTask.id !== parentTask?.id ? <button className="secondary-button" onClick={() => onSelectTask(rootTask.id)}>查看根任务</button> : null}
+                                </div>
+                            </div>
+                        ) : null}
+                        {(storyPlan || directorBrief) && (
+                            <div className="subsection">
+                                <div className="subsection-title">叙事导演合同</div>
+                                {storyPlan ? (
+                                    <div className="planning-warning subtle">
+                                        <div className="detail-grid">
+                                            <MetricCard label="锚点章节" value={`第 ${storyPlan.anchor_chapter || '-'} 章`} />
+                                            <MetricCard label="规划窗口" value={`${storyPlan.planning_horizon || '-'} 章`} />
+                                            <MetricCard label="优先线程数" value={String((storyPlan.priority_threads || []).length)} />
+                                            <MetricCard label="兑现排期数" value={String((storyPlan.payoff_schedule || []).length)} />
+                                        </div>
+                                        {storyPlan.priority_threads?.length ? (
+                                            <div>
+                                                <div className="tiny">优先推进线程</div>
+                                                <div className="planning-tags">
+                                                    {storyPlan.priority_threads.map((item) => (
+                                                        <span key={item} className="planning-tag">{item}</span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : null}
+                                        {storyPlan.risk_flags?.length ? (
+                                            <div>
+                                                <div className="tiny">风险标记</div>
+                                                <div className="alignment-list">
+                                                    {storyPlan.risk_flags.map((item) => (
+                                                        <div key={item} className="alignment-chip missed">{item}</div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : null}
+                                        {storyPlan.transition_notes?.length ? (
+                                            <div>
+                                                <div className="tiny">转场说明</div>
+                                                <div className="alignment-list">
+                                                    {storyPlan.transition_notes.map((item) => (
+                                                        <div key={item} className="alignment-chip neutral">{item}</div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : null}
+                                        {currentStorySlot ? (
+                                            <div className="summary-card">
+                                                <div className="summary-card-title">当前章槽位: 第 {currentStorySlot.chapter} 章 / {currentStorySlot.role}</div>
+                                                <div className="summary-card-meta">目标：{currentStorySlot.chapter_goal || '-'}</div>
+                                                <div className="summary-card-meta">章末钩子：{currentStorySlot.ending_hook_target || '-'}</div>
+                                                {(currentStorySlot.must_advance_threads || []).length ? (
+                                                    <div className="planning-tags">
+                                                        {currentStorySlot.must_advance_threads.map((item) => (
+                                                            <span key={item} className="planning-tag">{item}</span>
+                                                        ))}
+                                                    </div>
+                                                ) : null}
+                                            </div>
+                                        ) : null}
+                                        {(storyPlan.chapters || []).length ? (
+                                            <div className="summary-grid">
+                                                {storyPlan.chapters.map((slot) => (
+                                                    <div key={`${slot.chapter}-${slot.role}`} className="summary-card">
+                                                        <div className="summary-card-title">第 {slot.chapter} 章</div>
+                                                        <div className="tiny">{slot.role || 'progression'}</div>
+                                                        <div className="summary-card-meta">{slot.chapter_goal || '-'}</div>
+                                                        <div className="summary-card-meta">Hook：{slot.ending_hook_target || '-'}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                                {directorBrief ? (
+                                    <div className="planning-warning subtle">
+                                        <div className="detail-grid">
+                                            <MetricCard label="单章目标" value={directorBrief.chapter_goal || '-'} />
+                                            <MetricCard label="主冲突" value={directorBrief.primary_conflict || '-'} />
+                                            <MetricCard label="章末钩子" value={directorBrief.ending_hook_target || '-'} />
+                                            <MetricCard label="节奏" value={directorBrief.tempo || '-'} />
+                                        </div>
+                                        {renderTagBlock('必须推进', directorBrief.must_advance_threads)}
+                                        {renderTagBlock('兑现目标', directorBrief.payoff_targets)}
+                                        {renderTagBlock('铺垫目标', directorBrief.setup_targets)}
+                                        {renderTagBlock('必须使用实体', directorBrief.must_use_entities)}
+                                    </div>
+                                ) : null}
+                            </div>
+                        )}
+                        {(hasAlignment(storyAlignment) || hasAlignment(directorAlignment)) && (
+                            <div className="subsection">
+                                <div className="subsection-title">执行对齐结果</div>
+                                <div className="summary-grid">
+                                    {hasAlignment(storyAlignment) ? (
+                                        <AlignmentCard title="Story Alignment" alignment={storyAlignment} />
+                                    ) : null}
+                                    {hasAlignment(directorAlignment) ? (
+                                        <AlignmentCard title="Director Alignment" alignment={directorAlignment} />
+                                    ) : null}
+                                </div>
+                            </div>
+                        )}
+                        {storyRefresh ? (
+                            <div className="subsection">
+                                <div className="subsection-title">滚动规划刷新建议</div>
+                                <div className={`planning-warning ${storyRefresh.should_refresh ? '' : 'subtle'}`}>
+                                    <div className="detail-grid">
+                                        <MetricCard label="是否建议刷新" value={storyRefresh.should_refresh ? '建议刷新' : '继续沿用'} />
+                                        <MetricCard label="建议起点" value={storyRefresh.recommended_resume_from || '-'} />
+                                        <MetricCard label="连续 miss 章节" value={String(storyRefresh.consecutive_missed_chapters || 0)} />
+                                        <MetricCard label="本章 missed" value={String(storyRefresh.current_missed_count || 0)} />
+                                    </div>
+                                    <div className="tiny">{storyRefresh.suggested_action || '-'}</div>
+                                    {storyRefresh.reasons?.length ? (
+                                        <div className="alignment-list">
+                                            {storyRefresh.reasons.map((item) => (
+                                                <div key={item} className={`alignment-chip ${storyRefresh.should_refresh ? 'missed' : 'neutral'}`}>{item}</div>
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                    {canRefreshStoryPlan ? (
+                                        <div className="button-row">
+                                            <button
+                                                className="primary-button"
+                                                onClick={() => perform(`/api/tasks/${liveSelectedTask.id}/retry`, { resume_from_step: 'story-director' })}
+                                            >
+                                                从 Story Director 重新规划
+                                            </button>
+                                        </div>
+                                    ) : null}
+                                </div>
+                            </div>
+                        ) : null}
+                        {guardedRun ? (
+                            <div className="subsection">
+                                <div className="subsection-title">护栏推进结果</div>
+                                <div className="planning-warning subtle">
+                                    <div className="detail-grid">
+                                        <MetricCard label="目标章节" value={`第 ${guardedRun.chapter || '-'} 章`} />
+                                        <MetricCard label="执行结果" value={formatGuardedOutcome(guardedRun.outcome)} />
+                                        <MetricCard label="停止步骤" value={translateStepName(guardedRun.stop_step || 'idle')} />
+                                        <MetricCard label="可继续排下一章" value={guardedRun.safe_to_continue ? '可以' : '不可以'} />
+                                    </div>
+                                    {guardedRun.next_action?.reason ? <div className="tiny">{guardedRun.next_action.reason}</div> : null}
+                                    {guardedRun.next_action?.suggested_action ? <div className="tiny">{guardedRun.next_action.suggested_action}</div> : null}
+                                    <div className="detail-grid">
+                                        <MetricCard label="子任务" value={guardedRun.child_task_id || '-'} />
+                                        <MetricCard label="子任务状态" value={guardedRun.child_task_status ? translateTaskStatus(guardedRun.child_task_status) : '-'} />
+                                        <MetricCard label="建议下一章" value={guardedRun.next_action?.next_chapter ? `第 ${guardedRun.next_action.next_chapter} 章` : '-'} />
+                                        <MetricCard label="建议排队" value={guardedRun.next_action?.can_enqueue_next ? '建议' : '暂停'} />
+                                    </div>
+                                    <div className="button-row">
+                                        {guardedChildTask ? (
+                                            <button className="secondary-button" onClick={() => onSelectTask(guardedChildTask.id)}>查看子任务</button>
+                                        ) : null}
+                                        {canLaunchNextGuarded ? (
+                                            <button
+                                                className="primary-button"
+                                                onClick={() => launchTask('guarded-write', guardedFollowupPayload)}
+                                                disabled={followupSubmitting}
+                                            >
+                                                {followupSubmitting ? '创建中...' : '继续护栏推进下一章'}
+                                            </button>
+                                        ) : null}
+                                        {guardedRun?.outcome === 'completed_one_chapter' && guardedFollowupPayload.chapter > 0 ? (
+                                            <button
+                                                className="secondary-button"
+                                                onClick={() => launchTask('write', guardedFollowupPayload)}
+                                                disabled={followupSubmitting}
+                                            >
+                                                创建下一章常规写作
+                                            </button>
+                                        ) : null}
+                                        {canLaunchFallbackWrite ? (
+                                            <button
+                                                className="primary-button"
+                                                onClick={() => launchTask('write', buildFollowupTaskPayload(liveSelectedTask, guardedRun.chapter || 0))}
+                                                disabled={followupSubmitting}
+                                            >
+                                                {followupSubmitting ? '创建中...' : '创建当前章常规写作（含重规划）'}
+                                            </button>
+                                        ) : null}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : null}
                         <div className="button-row">
                             {canRetryTask ? <button className="secondary-button" onClick={() => perform(`/api/tasks/${liveSelectedTask.id}/retry`, {})}>重试</button> : null}
                             {canCancelTask ? (
@@ -750,15 +993,143 @@ export function TaskCenterPageSection({
     )
 }
 
+function resolveStoryPlan(task) {
+    const stepResults = task?.artifacts?.step_results || {}
+    const storyStep = stepResults['story-director']?.structured_output
+    if (storyStep && typeof storyStep === 'object') return storyStep
+    const contextStoryPlan = stepResults.context?.structured_output?.story_plan
+    if (contextStoryPlan && typeof contextStoryPlan === 'object' && Object.keys(contextStoryPlan).length > 0) return contextStoryPlan
+    return null
+}
+
+function resolveDirectorBrief(task) {
+    const stepResults = task?.artifacts?.step_results || {}
+    const directorStep = stepResults['chapter-director']?.structured_output
+    if (directorStep && typeof directorStep === 'object') return directorStep
+    const contextDirectorBrief = stepResults.context?.structured_output?.director_brief
+    if (contextDirectorBrief && typeof contextDirectorBrief === 'object' && Object.keys(contextDirectorBrief).length > 0) return contextDirectorBrief
+    return null
+}
+
+function resolveGuardedRunnerResult(task) {
+    const stepResults = task?.artifacts?.step_results || {}
+    const guardedStep = stepResults['guarded-chapter-runner']?.structured_output
+    if (guardedStep && typeof guardedStep === 'object') return guardedStep
+    const guardedArtifact = task?.artifacts?.guarded_runner
+    if (guardedArtifact && typeof guardedArtifact === 'object') return guardedArtifact
+    return null
+}
+
+function resolveStoryPlanSlot(storyPlan, chapter) {
+    if (!storyPlan || !Array.isArray(storyPlan.chapters)) return null
+    return storyPlan.chapters.find((item) => Number(item?.chapter || 0) === Number(chapter || 0)) || null
+}
+
+function formatGuardedOutcome(value) {
+    if (value === 'completed_one_chapter') return '已推进一章'
+    if (value === 'blocked_story_refresh') return '因刷新建议而停止'
+    if (value === 'blocked_by_review') return '被审查关卡拦截'
+    if (value === 'stopped_for_approval') return '停在人工审批'
+    return value || '-'
+}
+
+function buildFollowupTaskPayload(task, chapter) {
+    const request = task?.request || {}
+    const nextChapter = Math.max(0, Number(chapter || 0))
+    return {
+        chapter: nextChapter,
+        mode: request.mode || 'standard',
+        require_manual_approval: request.require_manual_approval !== false,
+        project_root: request.project_root || '',
+        options: request.options || {},
+    }
+}
+
+function normalizeAlignment(value) {
+    const alignment = value && typeof value === 'object' ? value : {}
+    return {
+        satisfied: Array.isArray(alignment.satisfied) ? alignment.satisfied : [],
+        missed: Array.isArray(alignment.missed) ? alignment.missed : [],
+        deferred: Array.isArray(alignment.deferred) ? alignment.deferred : [],
+    }
+}
+
+function hasAlignment(alignment) {
+    return Boolean(alignment && (alignment.satisfied.length || alignment.missed.length || alignment.deferred.length))
+}
+
+function normalizeStoryRefresh(value) {
+    if (!value || typeof value !== 'object') return null
+    return {
+        should_refresh: Boolean(value.should_refresh),
+        recommended_resume_from: value.recommended_resume_from || null,
+        reasons: Array.isArray(value.reasons) ? value.reasons : [],
+        reason_codes: Array.isArray(value.reason_codes) ? value.reason_codes : [],
+        consecutive_missed_chapters: Number(value.consecutive_missed_chapters || 0),
+        current_missed_count: Number(value.current_missed_count || 0),
+        current_satisfied_count: Number(value.current_satisfied_count || 0),
+        current_deferred_count: Number(value.current_deferred_count || 0),
+        suggested_action: value.suggested_action || '',
+    }
+}
+
+function renderTagBlock(label, items) {
+    if (!Array.isArray(items) || items.length === 0) return null
+    return (
+        <div>
+            <div className="tiny">{label}</div>
+            <div className="planning-tags">
+                {items.map((item) => (
+                    <span key={`${label}-${item}`} className="planning-tag">{item}</span>
+                ))}
+            </div>
+        </div>
+    )
+}
+
+function AlignmentCard({ title, alignment }) {
+    return (
+        <div className="summary-card">
+            <div className="summary-card-title">{title}</div>
+            <div className="alignment-section">
+                <div className="tiny">已满足</div>
+                <div className="alignment-list">
+                    {alignment.satisfied.length ? alignment.satisfied.map((item) => (
+                        <div key={`s-${item}`} className="alignment-chip satisfied">{item}</div>
+                    )) : <div className="tiny">无</div>}
+                </div>
+            </div>
+            <div className="alignment-section">
+                <div className="tiny">已延期</div>
+                <div className="alignment-list">
+                    {alignment.deferred.length ? alignment.deferred.map((item) => (
+                        <div key={`d-${item}`} className="alignment-chip deferred">{item}</div>
+                    )) : <div className="tiny">无</div>}
+                </div>
+            </div>
+            <div className="alignment-section">
+                <div className="tiny">未满足</div>
+                <div className="alignment-list">
+                    {alignment.missed.length ? alignment.missed.map((item) => (
+                        <div key={`m-${item}`} className="alignment-chip missed">{item}</div>
+                    )) : <div className="tiny">无</div>}
+                </div>
+            </div>
+        </div>
+    )
+}
+
 export function DataPageSection({ SimpleTable, refreshToken }) {
     const [entities, setEntities] = useState([])
     const [relationships, setRelationships] = useState([])
     const [chapters, setChapters] = useState([])
+    const [storyPlans, setStoryPlans] = useState([])
 
     useEffect(() => {
         fetchJSON('/api/entities').then(setEntities).catch(() => setEntities([]))
         fetchJSON('/api/relationships', { limit: 80 }).then(setRelationships).catch(() => setRelationships([]))
         fetchJSON('/api/chapters').then(setChapters).catch(() => setChapters([]))
+        fetchJSON('/api/story-plans', { limit: 12 }).then(setStoryPlans).catch(() => setStoryPlans([]))
     }, [refreshToken])
 
     const chapterSummaryData = buildChapterSummaries(chapters, entities, relationships)
@@ -778,6 +1149,38 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
                                 <div className="tiny">{item.title || '未命名章节'}</div>
                                 <div className="summary-card-meta">{chapterSummaryData.entityLabel}：{item.entityCount}</div>
                                 <div className="summary-card-meta">{chapterSummaryData.relationshipLabel}：{item.relationshipCount}</div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </section>
+            <section className="panel full-span">
+                <div className="panel-title">Story Plans</div>
+                {storyPlans.length === 0 ? (
+                    <div className="tiny">当前还没有可展示的多章滚动规划；请先运行带 `story-director` 的写作任务。</div>
+                ) : (
+                    <div className="summary-grid">
+                        {storyPlans.map((plan) => (
+                            <div key={plan.path || plan.anchor_chapter} className="summary-card">
+                                <div className="summary-card-title">锚点第 {plan.anchor_chapter} 章</div>
+                                <div className="tiny">窗口 {plan.planning_horizon || '-'} 章 · 更新时间 {formatTimestampShort(plan.updated_at_display || plan.updated_at || '-')}</div>
+                                <div className="summary-card-meta">当前槽位：{plan.current_role || 'progression'}</div>
+                                <div className="summary-card-meta">{plan.current_goal || '-'}</div>
+                                <div className="summary-card-meta">Hook：{plan.current_hook || '-'}</div>
+                                {Array.isArray(plan.priority_threads) && plan.priority_threads.length ? (
+                                    <div className="planning-tags">
+                                        {plan.priority_threads.slice(0, 4).map((item) => (
+                                            <span key={`${plan.anchor_chapter}-${item}`} className="planning-tag">{item}</span>
+                                        ))}
+                                    </div>
+                                ) : null}
+                                {Array.isArray(plan.risk_flags) && plan.risk_flags.length ? (
+                                    <div className="alignment-list">
+                                        {plan.risk_flags.slice(0, 2).map((item) => (
+                                            <div key={`${plan.anchor_chapter}-risk-${item}`} className="alignment-chip missed">{item}</div>
+                                        ))}
+                                    </div>
+                                ) : null}
                             </div>
                         ))}
                     </div>
@@ -1147,7 +1550,7 @@ function Field({ label, children }) {
     )
 }
 
-function ErrorNotice({ error, title = '操作失败' }) {
+export function ErrorNotice({ error, title = '操作失败' }) {
     if (!error) return null
 
     const normalized = normalizeError(error)

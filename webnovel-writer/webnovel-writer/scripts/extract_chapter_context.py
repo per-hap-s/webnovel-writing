@@ -383,6 +383,7 @@ def _load_contract_context(project_root: Path, chapter_num: int) -> Dict[str, An
         "genre_profile": (sections.get("genre_profile") or {}).get("content", {}),
         "writing_guidance": (sections.get("writing_guidance") or {}).get("content", {}),
         "narrative_state": (sections.get("narrative_state") or {}).get("content", {}),
+        "story_plan": (sections.get("story_plan") or {}).get("content", {}),
         "director_brief": (sections.get("director_brief") or {}).get("content", {}),
     }
 
@@ -411,6 +412,7 @@ def build_chapter_context_payload(project_root: Path, chapter_num: int) -> Dict[
         "genre_profile": contract_context.get("genre_profile", {}),
         "writing_guidance": contract_context.get("writing_guidance", {}),
         "narrative_state": contract_context.get("narrative_state", {}),
+        "story_plan": contract_context.get("story_plan", {}),
         "director_brief": contract_context.get("director_brief", {}),
         "rag_assist": rag_assist,
     }
@@ -562,6 +564,24 @@ def _render_text(payload: Dict[str, Any]) -> str:
                 lines.append("")
 
     director_brief = payload.get("director_brief") or {}
+    story_plan = payload.get("story_plan") or {}
+    if isinstance(story_plan, dict) and story_plan:
+        lines.append("## Story Plan")
+        lines.append("")
+        lines.append(f"- anchor_chapter: {story_plan.get('anchor_chapter')}")
+        lines.append(f"- planning_horizon: {story_plan.get('planning_horizon')}")
+        priority_threads = story_plan.get("priority_threads") or []
+        if priority_threads:
+            lines.append(f"- priority_threads: {', '.join(str(item) for item in priority_threads[:5])}")
+        for slot in (story_plan.get("chapters") or [])[:3]:
+            if not isinstance(slot, dict):
+                continue
+            lines.append(
+                f"- ch{slot.get('chapter')}: role={slot.get('role')}, goal={slot.get('chapter_goal')}, "
+                f"hook={slot.get('ending_hook_target')}"
+            )
+        lines.append("")
+
     if isinstance(director_brief, dict) and director_brief:
         lines.append("## Director Brief")
         lines.append("")

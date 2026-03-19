@@ -130,6 +130,113 @@ def test_context_snapshot_respects_template(temp_project):
     assert battle_payload.get("template") == "battle"
 
 
+def test_context_manager_rebuilds_current_version_snapshot_missing_story_contract_sections(temp_project):
+    temp_project.state_file.write_text(
+        json.dumps(
+            {
+                "project_info": {"title": "Snapshot Repair", "genre": "mystery"},
+                "progress": {"current_chapter": 3},
+                "chapter_meta": {},
+                "disambiguation_warnings": [],
+                "disambiguation_pending": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    director_dir = temp_project.project_root / ".webnovel" / "director"
+    story_director_dir = temp_project.project_root / ".webnovel" / "story-director"
+    director_dir.mkdir(parents=True, exist_ok=True)
+    story_director_dir.mkdir(parents=True, exist_ok=True)
+    (story_director_dir / "plan-ch0003.json").write_text(
+        json.dumps(
+            {
+                "anchor_chapter": 3,
+                "planning_horizon": 4,
+                "chapters": [{"chapter": 3, "chapter_goal": "repair snapshot"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (director_dir / "ch0003.json").write_text(
+        json.dumps({"chapter": 3, "chapter_goal": "repair brief"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    SnapshotManager(temp_project).save_snapshot(
+        3,
+        {
+            "template": "plot",
+            "sections": {
+                "core": {"content": {"legacy": True}},
+            },
+        },
+        meta={"template": "plot"},
+    )
+
+    payload = ContextManager(temp_project).build_context(3, template="plot", use_snapshot=True, save_snapshot=True)
+
+    assert "story_plan" in payload["sections"]
+    assert "director_brief" in payload["sections"]
+    assert payload["sections"]["story_plan"]["content"]["anchor_chapter"] == 3
+    assert payload["sections"]["core"]["content"].get("legacy") is None
+
+
+def test_context_manager_rebuilds_old_snapshot_version_with_current_contract(temp_project):
+    temp_project.state_file.write_text(
+        json.dumps(
+            {
+                "project_info": {"title": "Version Repair", "genre": "mystery"},
+                "progress": {"current_chapter": 3},
+                "chapter_meta": {},
+                "disambiguation_warnings": [],
+                "disambiguation_pending": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    director_dir = temp_project.project_root / ".webnovel" / "director"
+    story_director_dir = temp_project.project_root / ".webnovel" / "story-director"
+    director_dir.mkdir(parents=True, exist_ok=True)
+    story_director_dir.mkdir(parents=True, exist_ok=True)
+    (story_director_dir / "plan-ch0003.json").write_text(
+        json.dumps(
+            {
+                "anchor_chapter": 3,
+                "planning_horizon": 4,
+                "chapters": [{"chapter": 3, "chapter_goal": "rebuild from old version"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (director_dir / "ch0003.json").write_text(
+        json.dumps({"chapter": 3, "chapter_goal": "old version brief"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    SnapshotManager(temp_project, version="1.1").save_snapshot(
+        3,
+        {
+            "template": "plot",
+            "sections": {
+                "core": {"content": {"legacy": True}},
+            },
+        },
+        meta={"template": "plot"},
+    )
+
+    payload = ContextManager(temp_project).build_context(3, template="plot", use_snapshot=True, save_snapshot=True)
+    current_manager = SnapshotManager(temp_project)
+    saved = current_manager.load_snapshot(3)
+
+    assert "story_plan" in payload["sections"]
+    assert saved["version"] == current_manager.version
+    assert saved["payload"]["sections"]["story_plan"]["content"]["anchor_chapter"] == 3
+
+
 def test_context_manager_applies_ranker_and_contract_meta(temp_project):
     state = {
         "protagonist_state": {"name": "萧炎"},
