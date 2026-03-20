@@ -11,6 +11,36 @@ import {
     TaskCenterPageSection,
     TaskLauncherSection,
 } from './appSections.jsx'
+import {
+    AUDIT_REPAIR_REPORT_SORT_OPTIONS,
+    SUPERVISOR_AUDIT_PREFERENCES_KEY,
+    SUPERVISOR_AUDIT_QUERY_KEYS,
+    buildInitialSupervisorAuditViewState,
+    buildSupervisorAuditPreferencePayload,
+    buildSupervisorAuditQueryPayload,
+    buildSupervisorAuditQueryString,
+    readSupervisorAuditQueryStateFromSearch,
+    resolveVisibleAuditRepairReportPath,
+} from './supervisorAuditState.js'
+import {
+    resolveSupervisorItemOperatorActions,
+} from './operatorAction.js'
+import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
+import {
+    resolveSupervisorRecoverySemantics,
+} from './recoverySemantics.js'
+import {
+    SupervisorActiveCard,
+    SupervisorDismissedCard,
+} from './supervisorCards.jsx'
+import {
+    SupervisorAuditChecklistArchivePanel,
+    SupervisorAuditFilterPanel,
+    SupervisorAuditHealthPanel,
+    SupervisorAuditRepairArchivePanel,
+    SupervisorAuditRepairPreviewPanel,
+    SupervisorAuditTimelinePanel,
+} from './supervisorAuditPanels.jsx'
 
 const NAV_ITEMS = [
     { id: 'control', label: '\u603b\u89c8' },
@@ -33,6 +63,7 @@ const TASK_TEMPLATES = [
     { key: 'plan', title: '\u89c4\u5212\u5377', fields: ['volume', 'mode'] },
     { key: 'write', title: '\u64b0\u5199\u7ae0\u8282', fields: ['chapter', 'mode', 'require_manual_approval'] },
     { key: 'guarded-write', title: '\u62a4\u680f\u63a8\u8fdb\u4e00\u7ae0', fields: ['chapter', 'mode', 'require_manual_approval'] },
+    { key: 'guarded-batch-write', title: '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb', fields: ['start_chapter', 'max_chapters', 'mode', 'require_manual_approval'] },
     { key: 'review', title: '\u6267\u884c\u5ba1\u67e5', fields: ['chapter_range', 'mode'] },
     { key: 'resume', title: '\u6062\u590d\u4efb\u52a1', fields: ['mode'] },
 ]
@@ -50,9 +81,12 @@ const TASK_TYPE_LABELS = {
     plan: '\u89c4\u5212\u5377',
     write: '\u64b0\u5199\u7ae0\u8282',
     'guarded-write': '\u62a4\u680f\u63a8\u8fdb',
+    'guarded-batch-write': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb',
     review: '\u6267\u884c\u5ba1\u67e5',
     resume: '\u6062\u590d\u4efb\u52a1',
 }
+
+const DASHBOARD_PAGE_QUERY_KEY = 'page'
 
 const STATUS_LABELS = {
     queued: '\u5df2\u6392\u961f',
@@ -76,6 +110,7 @@ const STEP_LABELS = {
     plan: '\u89c4\u5212',
     resume: '\u6062\u590d',
     'guarded-chapter-runner': '\u62a4\u680f\u63a8\u8fdb\u4e00\u7ae0',
+    'guarded-batch-runner': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb',
     'story-director': '\u591a\u7ae0\u53d9\u4e8b\u89c4\u5212',
     'chapter-director': '\u5355\u7ae0\u5bfc\u6f14\u51b3\u7b56',
     context: '\u4e0a\u4e0b\u6587\u51c6\u5907',
@@ -164,6 +199,10 @@ const EXACT_EVENT_MESSAGES = {
     'Guarded runner blocked by review gate': '\u62a4\u680f\u63a8\u8fdb\u88ab\u5ba1\u67e5\u5173\u5361\u62e6\u622a',
     'Guarded runner child task failed': '\u62a4\u680f\u63a8\u8fdb\u5b50\u4efb\u52a1\u5931\u8d25',
     'Guarded runner completed one chapter': '\u62a4\u680f\u63a8\u8fdb\u5df2\u5b8c\u6210\u4e00\u7ae0',
+    'Guarded batch child task created': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u5df2\u521b\u5efa\u5b50\u4efb\u52a1',
+    'Guarded batch stopped by child outcome': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u56e0\u5b50\u4efb\u52a1\u7ed3\u679c\u800c\u505c\u6b62',
+    'Guarded batch child task failed': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u5b50\u4efb\u52a1\u5931\u8d25',
+    'Guarded batch completed requested chapters': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u5df2\u5b8c\u6210\u8bf7\u6c42\u7ae0\u6570',
     'Review summary persisted': '\u5ba1\u67e5\u6c47\u603b\u5df2\u5199\u5165',
     'Review gate blocked execution': '\u5ba1\u67e5\u95f8\u95e8\u963b\u6b62\u7ee7\u7eed\u6267\u884c',
     'Waiting for writeback approval': '\u7b49\u5f85\u56de\u5199\u5ba1\u6279',
@@ -228,7 +267,7 @@ const UI_COPY = {
 }
 
 export default function App() {
-    const [page, setPage] = useState('control')
+    const [page, setPage] = useState(() => readDashboardPageFromQuery())
     const [projectInfo, setProjectInfo] = useState(null)
     const [llmStatus, setLlmStatus] = useState(null)
     const [ragStatus, setRagStatus] = useState(null)
@@ -242,6 +281,10 @@ export default function App() {
     useEffect(() => {
         reloadCore()
     }, [refreshToken])
+
+    useEffect(() => {
+        writeDashboardPageToQuery(page)
+    }, [page])
 
     useEffect(() => {
         reloadServiceStatus()
@@ -369,10 +412,17 @@ export default function App() {
                     <SupervisorAuditPage
                         projectInfo={projectInfo}
                         tasks={tasks}
+                        onTaskCreated={(task) => {
+                            setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
+                            setSelectedTaskId(task.id)
+                            setPage('tasks')
+                            setRefreshToken((value) => value + 1)
+                        }}
                         onOpenTask={(taskId) => {
                             setSelectedTaskId(taskId)
                             setPage('tasks')
                         }}
+                        onTasksMutated={() => setRefreshToken((value) => value + 1)}
                     />
                 )}
                 {page === 'tasks' && (
@@ -503,6 +553,83 @@ const SUPERVISOR_STATUS_FILTER_OPTIONS = [
     { value: 'completed', label: '\u5df2\u5904\u7406' },
     { value: 'dismissed', label: '\u5df2\u5ffd\u7565' },
 ]
+
+function readDashboardPageFromQuery() {
+    if (typeof window === 'undefined') return 'control'
+    const params = new URLSearchParams(window.location.search || '')
+    const value = String(params.get(DASHBOARD_PAGE_QUERY_KEY) || '').trim()
+    return NAV_ITEMS.some((item) => item.id === value) ? value : 'control'
+}
+
+function writeDashboardPageToQuery(page) {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search || '')
+    const value = String(page || 'control').trim()
+    if (!value || value === 'control') {
+        params.delete(DASHBOARD_PAGE_QUERY_KEY)
+    } else {
+        params.set(DASHBOARD_PAGE_QUERY_KEY, value)
+    }
+    const query = params.toString()
+    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`
+    window.history.replaceState({}, '', nextUrl)
+}
+
+function readSupervisorAuditPreferences() {
+    if (typeof window === 'undefined' || !window.localStorage) return {}
+    try {
+        const raw = window.localStorage.getItem(SUPERVISOR_AUDIT_PREFERENCES_KEY)
+        if (!raw) return {}
+        return buildSupervisorAuditPreferencePayload(JSON.parse(raw))
+    } catch {
+        return {}
+    }
+}
+
+function writeSupervisorAuditPreferences(viewState) {
+    if (typeof window === 'undefined' || !window.localStorage) return
+    const payload = buildSupervisorAuditPreferencePayload(viewState)
+    window.localStorage.setItem(SUPERVISOR_AUDIT_PREFERENCES_KEY, JSON.stringify(payload))
+}
+
+function readSupervisorAuditQueryState() {
+    if (typeof window === 'undefined') return {}
+    return readSupervisorAuditQueryStateFromSearch(window.location.search || '')
+}
+
+function writeSupervisorAuditQueryState(viewState) {
+    if (typeof window === 'undefined') return
+    const query = buildSupervisorAuditQueryString({
+        search: window.location.search || '',
+        viewState,
+        dashboardPageKey: DASHBOARD_PAGE_QUERY_KEY,
+        dashboardPageValue: 'supervisor-audit',
+    })
+    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`
+    window.history.replaceState({}, '', nextUrl)
+}
+
+function renderOperatorActionButtons(actions, onAction, submitting, fallbackLabel = '') {
+    const normalizedActions = Array.isArray(actions) ? actions.filter(Boolean) : []
+    if (!normalizedActions.length) {
+        return fallbackLabel ? [(
+            <button key={`operator-fallback:${fallbackLabel}`} className="secondary-button" disabled>
+                {fallbackLabel}
+            </button>
+        )] : []
+    }
+    return normalizedActions.map((action) => (
+        <button
+            key={action.id || `${action.kind}:${action.taskId || action.taskType || action.label}`}
+            className={action.variant === 'secondary' ? 'secondary-button' : 'primary-button'}
+            onClick={() => onAction?.(action)}
+            disabled={Boolean(submitting || action.disabled)}
+            title={action.reason || action.label || '\u6267\u884c\u64cd\u4f5c'}
+        >
+            {submitting ? '\u5904\u7406\u4e2d...' : (action.label || fallbackLabel || '\u6267\u884c\u64cd\u4f5c')}
+        </button>
+    ))
+}
 
 function ControlPage({ projectInfo, llmStatus, ragStatus, onTaskCreated, onProjectBootstrapped }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
@@ -769,25 +896,19 @@ function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, onTasks
         })
     }
 
-    async function handleSupervisorAction(item) {
+    async function handleSupervisorAction(item, overrideAction = null) {
         if (!item || supervisorSubmitting) return
+        const action = overrideAction || item.action
         setSupervisorSubmitting(true)
         setSupervisorError(null)
         try {
-            if (item.action?.type === 'open-task' && item.action.taskId) {
-                onOpenTask(item.action.taskId)
-                return
-            }
-            if (item.action?.type === 'retry-story' && item.action.taskId) {
-                await postJSON(`/api/tasks/${item.action.taskId}/retry`, { resume_from_step: 'story-director' })
-                onTasksMutated()
-                onOpenTask(item.action.taskId)
-                return
-            }
-            if (item.action?.type === 'create-task' && item.action.taskType && item.action.payload) {
-                const response = await postJSON(`/api/tasks/${item.action.taskType}`, item.action.payload)
-                onTaskCreated(response)
-            }
+            await executeRuntimeOperatorAction({
+                action,
+                postJSON,
+                onOpenTask,
+                onTaskCreated: (response, nextAction) => onTaskCreated(response, nextAction),
+                onTasksMutated: () => onTasksMutated(),
+            })
         } catch (err) {
             setSupervisorError(normalizeError(err))
         } finally {
@@ -1204,108 +1325,32 @@ function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, onTasks
                     {supervisorItems.map((item) => {
                         const draft = resolveDismissDraft(item)
                         const trackingDraft = resolveTrackingDraft(item)
+                        const operatorActions = resolveSupervisorItemOperatorActions(item)
+                        const recoverySemantics = resolveSupervisorRecoverySemantics(item)
                         return (
-                            <div key={item.stableKey} className={`supervisor-card ${item.tone}`}>
-                                <div className="supervisor-card-header">
-                                    <div className="supervisor-title">
-                                        <label className="checkbox-row">
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedSupervisorKeys.includes(item.stableKey)}
-                                                onChange={() => toggleSupervisorSelection(item.stableKey)}
-                                            />
-                                            <span>{item.title}</span>
-                                        </label>
-                                    </div>
-                                    <span className={`runtime-badge ${item.tone}`}>{item.badge}</span>
-                                </div>
-                                <div className="tiny">{'\u7c7b\u578b\uff1a'}{item.categoryLabel || item.category || '-'}</div>
-                                <div className="supervisor-meta">{item.summary}</div>
-                                <div className="tiny">{item.detail}</div>
-                                <div className="tiny">{'\u4e3a\u4ec0\u4e48\u63a8\u8350\uff1a'}{item.rationale}</div>
-                                {item.trackingStatus ? <div className="tiny">{`\u5904\u7406\u72b6\u6001\uff1a${item.trackingLabel || formatSupervisorTrackingStatus(item.trackingStatus)} / ${formatTimestampShort(item.trackingUpdatedAt)}`}</div> : null}
-                                {item.trackingNote ? <div className="tiny">{`\u72b6\u6001\u5907\u6ce8\uff1a${item.trackingNote}`}</div> : null}
-                                {item.linkedTaskId ? <div className="tiny">{`\u5173\u8054\u4efb\u52a1\uff1a${item.linkedTaskId}`}</div> : null}
-                                {item.linkedChecklistPath ? <div className="tiny">{`\u5173\u8054\u6e05\u5355\uff1a${item.linkedChecklistPath}`}</div> : null}
-                                <div className="field-stack">
-                                    <label className="field">
-                                        <span>{'\u5904\u7406\u72b6\u6001'}</span>
-                                        <select value={trackingDraft.status} onChange={(event) => updateTrackingDraft(item.stableKey, { status: event.target.value })}>
-                                            <option value="">{'\u8bf7\u9009\u62e9\u72b6\u6001'}</option>
-                                            {SUPERVISOR_TRACKING_STATUS_OPTIONS.map((option) => (
-                                                <option key={option.value} value={option.value}>{option.label}</option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                    <label className="field">
-                                        <span>{'\u72b6\u6001\u5907\u6ce8'}</span>
-                                        <textarea
-                                            value={trackingDraft.note}
-                                            onChange={(event) => updateTrackingDraft(item.stableKey, { note: event.target.value })}
-                                            placeholder={'\u53ef\u9009\uff0c\u8bb0\u5f55\u8fd9\u6761\u5efa\u8bae\u5f53\u524d\u5904\u7406\u5230\u54ea\u4e00\u6b65'}
-                                        />
-                                    </label>
-                                    <label className="field">
-                                        <span>{'\u5173\u8054\u4efb\u52a1 ID'}</span>
-                                        <input
-                                            value={trackingDraft.linkedTaskId}
-                                            onChange={(event) => updateTrackingDraft(item.stableKey, { linkedTaskId: event.target.value })}
-                                            placeholder={'\u53ef\u9009\uff0c\u5982 task-123'}
-                                        />
-                                    </label>
-                                    <label className="field">
-                                        <span>{'\u5173\u8054\u6e05\u5355'}</span>
-                                        <select value={trackingDraft.linkedChecklistPath} onChange={(event) => updateTrackingDraft(item.stableKey, { linkedChecklistPath: event.target.value })}>
-                                            <option value="">{'\u4e0d\u5173\u8054\u6e05\u5355'}</option>
-                                            {recentChecklists.map((checklist) => (
-                                                <option key={checklist.relativePath} value={checklist.relativePath}>
-                                                    {checklist.title || checklist.relativePath}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                </div>
-                                <div className="button-row">
-                                    <button className="secondary-button" onClick={() => handleSupervisorTrackingSave(item)} disabled={supervisorSubmitting || !trackingDraft.status}>
-                                        {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : '\u5199\u5165\u72b6\u6001'}
-                                    </button>
-                                    <button className="secondary-button" onClick={() => handleSupervisorTrackingClear(item)} disabled={supervisorSubmitting || !item.trackingStatus}>
-                                        {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : '\u6e05\u9664\u72b6\u6001'}
-                                    </button>
-                                </div>
-                                <div className="field-stack">
-                                    <label className="field">
-                                        <span>{'\u5ffd\u7565\u539f\u56e0'}</span>
-                                        <select value={draft.reason} onChange={(event) => updateDismissDraft(item.stableKey, { reason: event.target.value })}>
-                                            <option value="">{'\u8bf7\u9009\u62e9\u539f\u56e0'}</option>
-                                            {SUPERVISOR_DISMISS_REASON_OPTIONS.map((option) => (
-                                                <option key={option.value} value={option.value}>{option.label}</option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                    <label className="field">
-                                        <span>{'\u624b\u52a8\u5907\u6ce8'}</span>
-                                        <textarea
-                                            value={draft.note}
-                                            onChange={(event) => updateDismissDraft(item.stableKey, { note: event.target.value })}
-                                            placeholder={'\u53ef\u9009\uff0c\u8bb0\u5f55\u4f60\u4e3a\u4ec0\u4e48\u6682\u65f6\u4e0d\u5904\u7406\u8fd9\u6761\u5efa\u8bae'}
-                                        />
-                                    </label>
-                                </div>
-                                <div className="button-row">
-                                    <button className={item.action?.variant === 'secondary' ? 'secondary-button' : 'primary-button'} onClick={() => handleSupervisorAction(item)} disabled={supervisorSubmitting}>
-                                        {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : item.actionLabel}
-                                    </button>
-                                    {item.secondaryAction ? (
-                                        <button className="secondary-button" onClick={() => handleSupervisorAction({ ...item, action: item.secondaryAction })} disabled={supervisorSubmitting}>
-                                            {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : item.secondaryLabel}
-                                        </button>
-                                    ) : null}
-                                    <button className="secondary-button" onClick={() => handleSupervisorDismiss(item)} disabled={supervisorSubmitting || !draft.reason}>
-                                        {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : '\u5ffd\u7565\u5e76\u5199\u5165\u5907\u6ce8'}
-                                    </button>
-                                </div>
-                            </div>
+                            <SupervisorActiveCard
+                                key={item.stableKey}
+                                item={item}
+                                draft={draft}
+                                trackingDraft={trackingDraft}
+                                operatorActions={operatorActions}
+                                recoverySemantics={recoverySemantics}
+                                recentChecklists={recentChecklists}
+                                supervisorSubmitting={supervisorSubmitting}
+                                selectedSupervisorKeys={selectedSupervisorKeys}
+                                toggleSupervisorSelection={toggleSupervisorSelection}
+                                updateTrackingDraft={updateTrackingDraft}
+                                updateDismissDraft={updateDismissDraft}
+                                handleSupervisorTrackingSave={handleSupervisorTrackingSave}
+                                handleSupervisorTrackingClear={handleSupervisorTrackingClear}
+                                handleSupervisorAction={handleSupervisorAction}
+                                handleSupervisorDismiss={handleSupervisorDismiss}
+                                renderOperatorActionButtons={renderOperatorActionButtons}
+                                formatSupervisorTrackingStatus={formatSupervisorTrackingStatus}
+                                formatTimestampShort={formatTimestampShort}
+                                SUPERVISOR_TRACKING_STATUS_OPTIONS={SUPERVISOR_TRACKING_STATUS_OPTIONS}
+                                SUPERVISOR_DISMISS_REASON_OPTIONS={SUPERVISOR_DISMISS_REASON_OPTIONS}
+                            />
                         )
                     })}
                     {supervisorItems.length === 0 ? (
@@ -1317,44 +1362,28 @@ function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, onTasks
                 <div className="panel-title">{'Supervisor Inbox'}</div>
                 <div className="empty-state">{'\u8fd9\u91cc\u663e\u793a\u5df2\u5ffd\u7565\u7684\u5efa\u8bae\u548c\u5ffd\u7565\u7406\u7531\uff0c\u53ef\u4ee5\u6062\u590d\u5230\u5f85\u5904\u7406\u5217\u8868\u3002'}</div>
                 <div className="supervisor-grid">
-                    {dismissedSupervisorItems.map((item) => (
-                        <div key={`${item.stableKey}:dismissed`} className={`supervisor-card ${item.tone}`}>
-                            <div className="supervisor-card-header">
-                                <div className="supervisor-title">
-                                    <label className="checkbox-row">
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedSupervisorKeys.includes(item.stableKey)}
-                                            onChange={() => toggleSupervisorSelection(item.stableKey)}
-                                        />
-                                        <span>{item.title}</span>
-                                    </label>
-                                </div>
-                                <span className="runtime-badge">{'\u5df2\u5ffd\u7565'}</span>
-                            </div>
-                            <div className="tiny">{'\u7c7b\u578b\uff1a'}{item.categoryLabel || item.category || '-'}</div>
-                            <div className="supervisor-meta">{item.summary}</div>
-                            <div className="tiny">{item.detail}</div>
-                            {item.trackingStatus ? <div className="tiny">{`\u5904\u7406\u72b6\u6001\uff1a${item.trackingLabel || formatSupervisorTrackingStatus(item.trackingStatus)} / ${formatTimestampShort(item.trackingUpdatedAt)}`}</div> : null}
-                            {item.trackingNote ? <div className="tiny">{`\u72b6\u6001\u5907\u6ce8\uff1a${item.trackingNote}`}</div> : null}
-                            {item.linkedTaskId ? <div className="tiny">{`\u5173\u8054\u4efb\u52a1\uff1a${item.linkedTaskId}`}</div> : null}
-                            {item.linkedChecklistPath ? <div className="tiny">{`\u5173\u8054\u6e05\u5355\uff1a${item.linkedChecklistPath}`}</div> : null}
-                            <div className="tiny">{'\u5ffd\u7565\u65f6\u95f4\uff1a'}{formatTimestampShort(item.dismissedAt)}</div>
-                            <div className="tiny">{'\u5ffd\u7565\u539f\u56e0\uff1a'}{formatSupervisorDismissReason(item.dismissalReason)}</div>
-                            {item.dismissalNote ? <div className="tiny">{'\u624b\u52a8\u5907\u6ce8\uff1a'}{item.dismissalNote}</div> : null}
-                            <div className="button-row">
-                                <button className="secondary-button" onClick={() => handleSupervisorUndismiss(item)} disabled={supervisorSubmitting}>
-                                    {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : '\u6062\u590d\u5230\u5f85\u5904\u7406'}
-                                </button>
-                                <button className="secondary-button" onClick={() => handleSupervisorTrackingClear(item)} disabled={supervisorSubmitting || !item.trackingStatus}>
-                                    {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : '\u6e05\u9664\u72b6\u6001'}
-                                </button>
-                                <button className="secondary-button" onClick={() => handleSupervisorAction(item)} disabled={supervisorSubmitting}>
-                                    {supervisorSubmitting ? '\u5904\u7406\u4e2d...' : item.actionLabel}
-                                </button>
-                            </div>
-                        </div>
-                    ))}
+                    {dismissedSupervisorItems.map((item) => {
+                        const operatorActions = resolveSupervisorItemOperatorActions(item)
+                        const recoverySemantics = resolveSupervisorRecoverySemantics(item)
+                        return (
+                            <SupervisorDismissedCard
+                                key={`${item.stableKey}:dismissed`}
+                                item={item}
+                                operatorActions={operatorActions}
+                                recoverySemantics={recoverySemantics}
+                                selectedSupervisorKeys={selectedSupervisorKeys}
+                                toggleSupervisorSelection={toggleSupervisorSelection}
+                                handleSupervisorUndismiss={handleSupervisorUndismiss}
+                                handleSupervisorTrackingClear={handleSupervisorTrackingClear}
+                                handleSupervisorAction={handleSupervisorAction}
+                                renderOperatorActionButtons={renderOperatorActionButtons}
+                                supervisorSubmitting={supervisorSubmitting}
+                                formatSupervisorTrackingStatus={formatSupervisorTrackingStatus}
+                                formatSupervisorDismissReason={formatSupervisorDismissReason}
+                                formatTimestampShort={formatTimestampShort}
+                            />
+                        )
+                    })}
                     {dismissedSupervisorItems.length === 0 ? (
                         <div className="empty-state">{'\u6682\u65f6\u6ca1\u6709\u5df2\u5ffd\u7565\u7684\u5efa\u8bae\u3002'}</div>
                     ) : null}
@@ -1370,74 +1399,245 @@ function formatSupervisorDismissReason(value) {
     return matched?.label || value || '\u672a\u8bb0\u5f55'
 }
 
-function SupervisorAuditPage({ projectInfo, tasks, onOpenTask }) {
+function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenTask, onTasksMutated }) {
     const [auditError, setAuditError] = useState(null)
+    const [auditSubmitting, setAuditSubmitting] = useState(false)
     const [auditItems, setAuditItems] = useState([])
+    const [auditLogEntries, setAuditLogEntries] = useState([])
+    const [auditHealth, setAuditHealth] = useState(null)
+    const [auditRepairPreview, setAuditRepairPreview] = useState(null)
+    const [auditRepairReports, setAuditRepairReports] = useState([])
     const [auditChecklists, setAuditChecklists] = useState([])
-    const [auditCategoryFilter, setAuditCategoryFilter] = useState('all')
-    const [auditStatusFilter, setAuditStatusFilter] = useState('all')
-    const [auditChapterFilter, setAuditChapterFilter] = useState('all')
+    const [auditRefreshToken, setAuditRefreshToken] = useState(0)
+    const initialAuditViewState = useMemo(
+        () => buildInitialSupervisorAuditViewState({
+            persisted: readSupervisorAuditPreferences(),
+            query: readSupervisorAuditQueryState(),
+        }),
+        [],
+    )
+    const [auditCategoryFilter, setAuditCategoryFilter] = useState(initialAuditViewState.category)
+    const [auditActionFilter, setAuditActionFilter] = useState(initialAuditViewState.action)
+    const [auditStatusFilter, setAuditStatusFilter] = useState(initialAuditViewState.status)
+    const [auditChapterFilter, setAuditChapterFilter] = useState(initialAuditViewState.chapter)
+    const [auditViewMode, setAuditViewMode] = useState(initialAuditViewState.view_mode)
+    const [auditGroupFocus, setAuditGroupFocus] = useState(initialAuditViewState.group_focus)
+    const [auditFocusedStableKey, setAuditFocusedStableKey] = useState(initialAuditViewState.stable_key)
+    const [auditRepairReportFilter, setAuditRepairReportFilter] = useState(initialAuditViewState.report_filter)
+    const [auditRepairReportSortMode, setAuditRepairReportSortMode] = useState(initialAuditViewState.report_sort)
+    const [selectedAuditRepairReportPath, setSelectedAuditRepairReportPath] = useState(initialAuditViewState.report_path)
+    const [selectedAuditChecklistPath, setSelectedAuditChecklistPath] = useState('')
+
+    const auditViewState = {
+        category: auditCategoryFilter,
+        action: auditActionFilter,
+        status: auditStatusFilter,
+        chapter: auditChapterFilter,
+        view_mode: auditViewMode,
+        group_focus: auditGroupFocus,
+        stable_key: auditFocusedStableKey,
+        report_filter: auditRepairReportFilter,
+        report_sort: auditRepairReportSortMode,
+        report_path: selectedAuditRepairReportPath,
+    }
+
+    useEffect(() => {
+        writeSupervisorAuditPreferences(auditViewState)
+    }, [
+        auditCategoryFilter,
+        auditActionFilter,
+        auditStatusFilter,
+        auditChapterFilter,
+        auditViewMode,
+        auditGroupFocus,
+        auditRepairReportFilter,
+        auditRepairReportSortMode,
+        selectedAuditRepairReportPath,
+    ])
+
+    useEffect(() => {
+        writeSupervisorAuditQueryState(auditViewState)
+    }, [
+        auditCategoryFilter,
+        auditActionFilter,
+        auditStatusFilter,
+        auditChapterFilter,
+        auditViewMode,
+        auditGroupFocus,
+        auditFocusedStableKey,
+        auditRepairReportFilter,
+        auditRepairReportSortMode,
+        selectedAuditRepairReportPath,
+    ])
 
     useEffect(() => {
         let active = true
         Promise.all([
             fetchJSON('/api/supervisor/recommendations?include_dismissed=true'),
             fetchJSON('/api/supervisor/checklists', { limit: 20 }),
+            fetchJSON('/api/supervisor/audit-log', { limit: 200 }),
+            fetchJSON('/api/supervisor/audit-health', { issue_limit: 20 }),
+            fetchJSON('/api/supervisor/audit-repair-preview', { proposal_limit: 20 }),
+            fetchJSON('/api/supervisor/audit-repair-reports', { limit: 20 }),
         ])
-            .then(([items, checklists]) => {
+            .then(([items, checklists, logEntries, healthPayload, repairPreviewPayload, repairReportsPayload]) => {
                 if (!active) return
                 setAuditItems(Array.isArray(items) ? items : [])
                 setAuditChecklists(Array.isArray(checklists) ? checklists : [])
+                setAuditLogEntries(Array.isArray(logEntries) ? logEntries : [])
+                setAuditHealth(healthPayload || null)
+                setAuditRepairPreview(repairPreviewPayload || null)
+                setAuditRepairReports(Array.isArray(repairReportsPayload) ? repairReportsPayload : [])
                 setAuditError(null)
             })
             .catch((err) => {
                 if (!active) return
                 setAuditItems([])
                 setAuditChecklists([])
+                setAuditLogEntries([])
+                setAuditHealth(null)
+                setAuditRepairPreview(null)
+                setAuditRepairReports([])
                 setAuditError(normalizeError(err))
             })
         return () => {
             active = false
         }
-    }, [tasks, projectInfo?.progress?.current_chapter])
+    }, [tasks, projectInfo?.progress?.current_chapter, auditRefreshToken])
 
     const auditCategoryOptions = useMemo(() => {
         const seen = new Map()
-        auditItems.forEach((item) => {
+        ;[...auditItems, ...auditLogEntries].forEach((item) => {
             const key = item?.category || 'unknown'
             if (!seen.has(key)) {
                 seen.set(key, item?.categoryLabel || key)
             }
         })
         return [{ value: 'all', label: '\u5168\u90e8\u7c7b\u578b' }, ...[...seen.entries()].map(([value, label]) => ({ value, label }))]
-    }, [auditItems])
+    }, [auditItems, auditLogEntries])
+
+    const auditActionOptions = useMemo(() => {
+        const seen = new Map()
+        auditLogEntries.forEach((entry) => {
+            const value = String(entry?.action || '').trim()
+            if (value && !seen.has(value)) {
+                seen.set(value, formatSupervisorAuditAction(value))
+            }
+        })
+        return [{ value: 'all', label: '\u5168\u90e8\u52a8\u4f5c' }, ...[...seen.entries()].map(([value, label]) => ({ value, label }))]
+    }, [auditLogEntries])
 
     const auditChapterOptions = useMemo(() => {
-        const chapters = [...new Set(auditItems.map((item) => extractSupervisorChapter(item)).filter((value) => Number.isFinite(value) && value < 999999))]
+        const chapters = [...new Set(
+            [...auditItems, ...auditLogEntries]
+                .map((item) => extractSupervisorChapter(item))
+                .filter((value) => Number.isFinite(value) && value < 999999),
+        )]
         chapters.sort((left, right) => left - right)
         return [{ value: 'all', label: '\u5168\u90e8\u7ae0\u8282' }, ...chapters.map((chapter) => ({ value: String(chapter), label: `\u7b2c ${chapter} \u7ae0` }))]
+    }, [auditItems, auditLogEntries])
+
+    const auditGroupFocusOptions = useMemo(() => ([
+        { value: 'all', label: '\u5168\u90e8\u5206\u7ec4' },
+        { value: 'actionable', label: '\u53ef\u76f4\u63a5\u6267\u884c' },
+        { value: 'open', label: '\u5f85\u5904\u7406' },
+        { value: 'in_progress', label: '\u5904\u7406\u4e2d' },
+        { value: 'completed', label: '\u5df2\u5904\u7406' },
+        { value: 'dismissed', label: '\u5df2\u4ece Inbox \u79fb\u9664' },
+        { value: 'archived', label: '\u4ec5\u5386\u53f2\u5f52\u6863' },
+    ]), [])
+
+    const auditItemsByStableKey = useMemo(() => {
+        const map = new Map()
+        auditItems.forEach((item) => {
+            if (item?.stableKey) map.set(item.stableKey, item)
+        })
+        return map
     }, [auditItems])
 
-    const filteredAuditItems = useMemo(() => {
-        return sortSupervisorItems(
-            auditItems.filter((item) => {
-                if (auditCategoryFilter !== 'all' && item?.category !== auditCategoryFilter) {
-                    return false
-                }
-                if (auditStatusFilter !== 'all') {
-                    if (auditStatusFilter === 'dismissed' && !item?.dismissed) return false
-                    if (auditStatusFilter === 'open' && (item?.dismissed || item?.trackingStatus)) return false
-                    if (auditStatusFilter === 'in_progress' && item?.trackingStatus !== 'in_progress') return false
-                    if (auditStatusFilter === 'completed' && item?.trackingStatus !== 'completed') return false
-                }
-                if (auditChapterFilter !== 'all' && String(extractSupervisorChapter(item)) !== auditChapterFilter) {
-                    return false
-                }
-                return true
-            }),
-            'priority',
-        )
-    }, [auditItems, auditCategoryFilter, auditStatusFilter, auditChapterFilter])
+    const filteredAuditLogEntries = useMemo(() => (
+        auditLogEntries.filter((entry) => {
+            const currentAuditItem = auditItemsByStableKey.get(entry?.stableKey) || null
+            const statusValue = resolveCurrentAuditGroupState(currentAuditItem)
+            const chapterValue = extractSupervisorChapter(entry?.chapter ? entry : currentAuditItem || entry)
+            if (auditCategoryFilter !== 'all' && (entry?.category || currentAuditItem?.category) !== auditCategoryFilter) {
+                return false
+            }
+            if (auditActionFilter !== 'all' && String(entry?.action || '').trim() !== auditActionFilter) {
+                return false
+            }
+            if (auditStatusFilter !== 'all' && statusValue !== auditStatusFilter) {
+                return false
+            }
+            if (auditChapterFilter !== 'all' && String(chapterValue) !== auditChapterFilter) {
+                return false
+            }
+            return true
+        })
+    ), [auditLogEntries, auditItemsByStableKey, auditCategoryFilter, auditActionFilter, auditStatusFilter, auditChapterFilter])
+
+    const groupedAuditLogEntries = useMemo(
+        () => buildSupervisorAuditGroups(filteredAuditLogEntries, auditItems),
+        [filteredAuditLogEntries, auditItems],
+    )
+
+    const filteredGroupedAuditLogEntries = useMemo(
+        () => groupedAuditLogEntries.filter((group) => {
+            if (auditFocusedStableKey && group.stableKey !== auditFocusedStableKey) {
+                return false
+            }
+            if (auditGroupFocus === 'all' || auditFocusedStableKey) return true
+            if (auditGroupFocus === 'actionable') return Boolean(group.actionable)
+            return group.currentState === auditGroupFocus
+        }),
+        [groupedAuditLogEntries, auditFocusedStableKey, auditGroupFocus],
+    )
+
+    const filteredAuditRepairReports = useMemo(
+        () => auditRepairReports.filter((item) => {
+            if (auditRepairReportFilter === 'changed') return Boolean(item?.changed)
+            if (auditRepairReportFilter === 'manual_only') return !item?.changed && Number(item?.manualReviewCount || 0) > 0
+            if (auditRepairReportFilter === 'unchanged') return !item?.changed
+            return true
+        }),
+        [auditRepairReports, auditRepairReportFilter],
+    )
+
+    const auditRepairReportSummary = useMemo(() => ({
+        visible: filteredAuditRepairReports.length,
+        changed: filteredAuditRepairReports.filter((item) => item?.changed).length,
+        manualOnly: filteredAuditRepairReports.filter((item) => !item?.changed && Number(item?.manualReviewCount || 0) > 0).length,
+        unchanged: filteredAuditRepairReports.filter((item) => !item?.changed).length,
+    }), [filteredAuditRepairReports])
+
+    const sortedAuditRepairReports = useMemo(() => {
+        const list = [...filteredAuditRepairReports]
+        list.sort((left, right) => {
+            if (auditRepairReportSortMode === 'impact') {
+                return buildAuditRepairReportImpactScore(right) - buildAuditRepairReportImpactScore(left)
+            }
+            if (auditRepairReportSortMode === 'manual') {
+                return Number(right?.manualReviewCount || 0) - Number(left?.manualReviewCount || 0)
+            }
+            if (auditRepairReportSortMode === 'changed') {
+                return Number(Boolean(right?.changed)) - Number(Boolean(left?.changed))
+            }
+            return parseIsoTimestamp(right?.generatedAt) - parseIsoTimestamp(left?.generatedAt)
+        })
+        return list
+    }, [filteredAuditRepairReports, auditRepairReportSortMode])
+
+    const nextVisiblePath = resolveVisibleAuditRepairReportPath(sortedAuditRepairReports, selectedAuditRepairReportPath)
+    useEffect(() => {
+        if (selectedAuditRepairReportPath !== nextVisiblePath) {
+            setSelectedAuditRepairReportPath(nextVisiblePath)
+        }
+    }, [selectedAuditRepairReportPath, nextVisiblePath])
+
+    const selectedVisibleAuditRepairReport = useMemo(
+        () => sortedAuditRepairReports.find((item) => item?.relativePath === nextVisiblePath) || null,
+        [sortedAuditRepairReports, nextVisiblePath],
+    )
 
     const auditSummary = useMemo(() => {
         const linkedTaskCount = auditItems.filter((item) => item?.linkedTaskId).length
@@ -1461,10 +1661,241 @@ function SupervisorAuditPage({ projectInfo, tasks, onOpenTask }) {
         return map
     }, [auditChecklists])
 
+    const selectedAuditChecklist = useMemo(
+        () => auditChecklists.find((item) => item.relativePath === selectedAuditChecklistPath) || auditChecklists[0] || null,
+        [auditChecklists, selectedAuditChecklistPath],
+    )
+
+    const auditFocusState = useMemo(() => {
+        if (!auditFocusedStableKey) return null
+        if (auditViewMode !== 'grouped') {
+            return { kind: 'view_mode_conflict', message: '\u5f53\u524d\u6df1\u94fe\u63a5\u9700\u8981\u5207\u56de\u201c\u6309\u5efa\u8bae\u5206\u7ec4\u201d\u89c6\u56fe\u3002' }
+        }
+        const existsAfterBaseFilters = groupedAuditLogEntries.some((group) => group.stableKey === auditFocusedStableKey)
+        if (!existsAfterBaseFilters) {
+            return { kind: 'event_filters_conflict', message: '\u5f53\u524d\u57fa\u7840\u7b5b\u9009\u6761\u4ef6\u5df2\u6392\u9664\u8fd9\u6761\u65f6\u95f4\u7ebf\u3002' }
+        }
+        const existsAfterGroupFocus = filteredGroupedAuditLogEntries.some((group) => group.stableKey === auditFocusedStableKey)
+        if (!existsAfterGroupFocus) {
+            return { kind: 'group_focus_conflict', message: '\u5f53\u524d\u5de5\u4f5c\u53f0\u7b5b\u9009\u6ca1\u6709\u8986\u76d6\u8fd9\u6761\u65f6\u95f4\u7ebf\u3002' }
+        }
+        return null
+    }, [auditFocusedStableKey, auditViewMode, groupedAuditLogEntries, filteredGroupedAuditLogEntries])
+
+    async function executeAuditOperatorAction(action) {
+        if (!action || auditSubmitting || action.disabled) return
+        setAuditSubmitting(true)
+        setAuditError(null)
+        try {
+            await executeRuntimeOperatorAction({
+                action,
+                postJSON,
+                onOpenTask,
+                onTaskCreated: (response, nextAction) => {
+                    if (typeof onTaskCreated === 'function') {
+                        onTaskCreated(response, nextAction)
+                        return
+                    }
+                    if (response?.id) {
+                        onOpenTask(response.id)
+                    }
+                },
+                onTasksMutated: () => {
+                    if (typeof onTasksMutated === 'function') {
+                        onTasksMutated()
+                    }
+                },
+            })
+        } catch (err) {
+            setAuditError(normalizeError(err))
+        } finally {
+            setAuditSubmitting(false)
+        }
+    }
+
+    async function handleAuditGroupAction(item, action) {
+        const operatorAction = action || resolveSupervisorItemOperatorActions(item)[0] || null
+        await executeAuditOperatorAction(operatorAction)
+    }
+
+    async function handleAuditGroupTracking(item, status) {
+        if (!item?.stableKey || auditSubmitting) return
+        setAuditSubmitting(true)
+        setAuditError(null)
+        try {
+            await postJSON('/api/supervisor/tracking', {
+                stable_key: item.stableKey,
+                fingerprint: item.fingerprint || item.stableKey,
+                status,
+                note: item.trackingNote || '',
+                linked_task_id: item.linkedTaskId || '',
+                linked_checklist_path: item.linkedChecklistPath || '',
+            })
+            setAuditItems((current) => current.map((candidate) => (
+                candidate.stableKey === item.stableKey
+                    ? {
+                        ...candidate,
+                        trackingStatus: status,
+                        trackingLabel: formatSupervisorTrackingStatus(status),
+                        trackingUpdatedAt: new Date().toISOString(),
+                    }
+                    : candidate
+            )))
+            setAuditRefreshToken((current) => current + 1)
+        } catch (err) {
+            setAuditError(normalizeError(err))
+        } finally {
+            setAuditSubmitting(false)
+        }
+    }
+
+    async function handleAuditGroupUndismiss(item) {
+        if (!item?.stableKey || auditSubmitting) return
+        setAuditSubmitting(true)
+        setAuditError(null)
+        try {
+            await postJSON('/api/supervisor/undismiss', {
+                stable_key: item.stableKey,
+                fingerprint: item.fingerprint || item.stableKey,
+            })
+            setAuditItems((current) => current.map((candidate) => (
+                candidate.stableKey === item.stableKey
+                    ? {
+                        ...candidate,
+                        dismissed: false,
+                        dismissedAt: null,
+                        dismissalReason: '',
+                        dismissalNote: '',
+                    }
+                    : candidate
+            )))
+            setAuditRefreshToken((current) => current + 1)
+        } catch (err) {
+            setAuditError(normalizeError(err))
+        } finally {
+            setAuditSubmitting(false)
+        }
+    }
+
+    async function handleAuditGroupTrackingClear(item) {
+        if (!item?.stableKey || auditSubmitting) return
+        setAuditSubmitting(true)
+        setAuditError(null)
+        try {
+            await postJSON('/api/supervisor/tracking/clear', {
+                stable_key: item.stableKey,
+                fingerprint: item.fingerprint || item.stableKey,
+            })
+            setAuditItems((current) => current.map((candidate) => (
+                candidate.stableKey === item.stableKey
+                    ? {
+                        ...candidate,
+                        trackingStatus: '',
+                        trackingLabel: '',
+                        trackingNote: '',
+                        linkedTaskId: '',
+                        linkedChecklistPath: '',
+                        trackingUpdatedAt: null,
+                    }
+                    : candidate
+            )))
+            setAuditRefreshToken((current) => current + 1)
+        } catch (err) {
+            setAuditError(normalizeError(err))
+        } finally {
+            setAuditSubmitting(false)
+        }
+    }
+
+    async function handleCopyAuditGroupLink(stableKey) {
+        const nextState = { ...auditViewState, view_mode: 'grouped', stable_key: stableKey }
+        const query = buildSupervisorAuditQueryString({
+            search: window.location.search || '',
+            viewState: nextState,
+            dashboardPageKey: DASHBOARD_PAGE_QUERY_KEY,
+            dashboardPageValue: 'supervisor-audit',
+        })
+        const nextUrl = `${window.location.origin}${window.location.pathname}${query ? `?${query}` : ''}`
+        try {
+            await navigator.clipboard.writeText(nextUrl)
+            setAuditFocusedStableKey(stableKey)
+            writeSupervisorAuditQueryState(nextState)
+        } catch (err) {
+            setAuditError(normalizeError(err))
+        }
+    }
+
+    function handleResetAuditEventFilters() {
+        setAuditCategoryFilter('all')
+        setAuditActionFilter('all')
+        setAuditStatusFilter('all')
+        setAuditChapterFilter('all')
+    }
+
+    function handleResetAuditGroupFilters() {
+        setAuditGroupFocus('all')
+        setAuditFocusedStableKey('')
+    }
+
+    function handleDownloadAuditMarkdown() {
+        downloadTextFile(
+            `supervisor-audit-ch${String(projectInfo?.progress?.current_chapter || 0).padStart(4, '0')}.md`,
+            buildSupervisorAuditMarkdown({
+                projectInfo,
+                entries: filteredAuditLogEntries,
+                tasks,
+                filters: {
+                    category: auditCategoryFilter,
+                    action: auditActionFilter,
+                    status: auditStatusFilter,
+                    chapter: auditChapterFilter,
+                    view_mode: auditViewMode,
+                    group_focus: auditGroupFocus,
+                },
+            }),
+            'text/markdown;charset=utf-8',
+        )
+    }
+
+    function handleDownloadAuditJson() {
+        downloadTextFile('supervisor-audit.json', JSON.stringify(filteredAuditLogEntries, null, 2), 'application/json;charset=utf-8')
+    }
+
+    function handleDownloadAuditHealthMarkdown() {
+        downloadTextFile('supervisor-audit-health.md', buildSupervisorAuditHealthMarkdown({ projectInfo, health: auditHealth }), 'text/markdown;charset=utf-8')
+    }
+
+    function handleDownloadAuditHealthJson() {
+        downloadTextFile('supervisor-audit-health.json', JSON.stringify(auditHealth || {}, null, 2), 'application/json;charset=utf-8')
+    }
+
+    function handleDownloadAuditRepairPreviewMarkdown() {
+        downloadTextFile(
+            'supervisor-audit-repair-preview.md',
+            buildSupervisorAuditRepairPreviewMarkdown({ projectInfo, preview: auditRepairPreview }),
+            'text/markdown;charset=utf-8',
+        )
+    }
+
+    function handleDownloadAuditRepairPreviewJson() {
+        downloadTextFile('supervisor-audit-repair-preview.json', JSON.stringify(auditRepairPreview || {}, null, 2), 'application/json;charset=utf-8')
+    }
+
+    function handleDownloadAuditRepairReport(item) {
+        if (!item) return
+        downloadTextFile(item.filename || 'repair-report.json', JSON.stringify(item.content || item, null, 2), 'application/json;charset=utf-8')
+    }
+
+    function handleDownloadAuditChecklist(item) {
+        if (!item?.content) return
+        downloadTextFile(item.filename || 'supervisor-checklist.md', item.content, 'text/markdown;charset=utf-8')
+    }
+
     return (
         <div className="page-grid">
             <section className="panel hero-panel">
                 <div className="panel-title">{'Supervisor Audit \u5ba1\u8ba1\u89c6\u56fe'}</div>
+                <div className="tiny">{'\u5efa\u8bae\u65f6\u95f4\u7ebf\u4e0e\u539f\u59cb\u4e8b\u4ef6\u6d41\u5728\u8fd9\u91cc\u7edf\u4e00\u67e5\u770b\u3002'}</div>
                 <div className="metric-grid">
                     <MetricCard label={'\u5efa\u8bae\u603b\u6570'} value={formatNumber(auditSummary.total)} />
                     <MetricCard label={'\u5df2\u5904\u7406'} value={formatNumber(auditSummary.completedCount)} />
@@ -1474,112 +1905,300 @@ function SupervisorAuditPage({ projectInfo, tasks, onOpenTask }) {
                     <MetricCard label={'\u5df2\u4fdd\u5b58\u6e05\u5355'} value={formatNumber(auditChecklists.length)} />
                 </div>
             </section>
-            <section className="panel full-span">
-                <div className="panel-title">{'\u5ba1\u8ba1\u7b5b\u9009'}</div>
-                <div className="detail-grid">
-                    <label className="field">
-                        <span>{'\u5efa\u8bae\u7c7b\u578b'}</span>
-                        <select value={auditCategoryFilter} onChange={(event) => setAuditCategoryFilter(event.target.value)}>
-                            {auditCategoryOptions.map((option) => (
-                                <option key={option.value} value={option.value}>{option.label}</option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className="field">
-                        <span>{'\u72b6\u6001'}</span>
-                        <select value={auditStatusFilter} onChange={(event) => setAuditStatusFilter(event.target.value)}>
-                            {SUPERVISOR_STATUS_FILTER_OPTIONS.map((option) => (
-                                <option key={option.value} value={option.value}>{option.label}</option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className="field">
-                        <span>{'\u7ae0\u8282'}</span>
-                        <select value={auditChapterFilter} onChange={(event) => setAuditChapterFilter(event.target.value)}>
-                            {auditChapterOptions.map((option) => (
-                                <option key={option.value} value={option.value}>{option.label}</option>
-                            ))}
-                        </select>
-                    </label>
-                </div>
-            </section>
-            <section className="panel full-span">
-                <div className="panel-title">{'\u5efa\u8bae\u5ba1\u8ba1\u6d41'}</div>
-                <div className="empty-state">{'\u8fd9\u91cc\u805a\u5408\u5efa\u8bae\u72b6\u6001\u3001\u5ffd\u7565\u8bb0\u5f55\uff0c\u4ee5\u53ca\u5173\u8054\u4efb\u52a1 / \u6e05\u5355\u5f15\u7528\u3002'}</div>
-                <div className="supervisor-grid">
-                    {filteredAuditItems.map((item) => {
-                        const linkedTask = tasks.find((task) => task.id === item.linkedTaskId) || null
-                        const linkedChecklist = checklistLookup.get(item.linkedChecklistPath) || null
-                        return (
-                            <div key={`audit:${item.stableKey}`} className={`supervisor-card ${item.tone}`}>
-                                <div className="supervisor-card-header">
-                                    <div className="supervisor-title">
-                                        <span>{item.title}</span>
-                                    </div>
-                                    <span className={`runtime-badge ${item.tone}`}>{item.badge}</span>
-                                </div>
-                                <div className="tiny">{`\u7c7b\u578b\uff1a${item.categoryLabel || item.category || '-'}`}</div>
-                                <div className="supervisor-meta">{item.summary}</div>
-                                <div className="tiny">{item.detail}</div>
-                                <div className="tiny">{`\u72b6\u6001\uff1a${item.dismissed ? '\u5df2\u5ffd\u7565' : (item.trackingLabel || formatSupervisorTrackingStatus(item.trackingStatus) || '\u5f85\u5904\u7406')}`}</div>
-                                {item.trackingUpdatedAt ? <div className="tiny">{`\u72b6\u6001\u66f4\u65b0\uff1a${formatTimestampShort(item.trackingUpdatedAt)}`}</div> : null}
-                                {item.trackingNote ? <div className="tiny">{`\u72b6\u6001\u5907\u6ce8\uff1a${item.trackingNote}`}</div> : null}
-                                {item.dismissedAt ? <div className="tiny">{`\u5ffd\u7565\u65f6\u95f4\uff1a${formatTimestampShort(item.dismissedAt)}`}</div> : null}
-                                {item.dismissalReason ? <div className="tiny">{`\u5ffd\u7565\u539f\u56e0\uff1a${formatSupervisorDismissReason(item.dismissalReason)}`}</div> : null}
-                                {item.dismissalNote ? <div className="tiny">{`\u5ffd\u7565\u5907\u6ce8\uff1a${item.dismissalNote}`}</div> : null}
-                                <div className="tiny">{`\u6765\u6e90\u4efb\u52a1\uff1a${item.sourceTaskId || '-'}`}</div>
-                                {item.sourceTaskId ? (
-                                    <div className="button-row">
-                                        <button className="secondary-button" onClick={() => onOpenTask(item.sourceTaskId)}>
-                                            {'\u6253\u5f00\u6765\u6e90\u4efb\u52a1'}
-                                        </button>
-                                    </div>
-                                ) : null}
-                                {item.linkedTaskId ? <div className="tiny">{`\u5173\u8054\u4efb\u52a1\uff1a${item.linkedTaskId}`}</div> : null}
-                                {linkedTask ? <div className="tiny">{`\u5173\u8054\u4efb\u52a1\u72b6\u6001\uff1a${translateTaskStatus(linkedTask.status)}`}</div> : null}
-                                {item.linkedTaskId ? (
-                                    <div className="button-row">
-                                        <button className="secondary-button" onClick={() => onOpenTask(item.linkedTaskId)}>
-                                            {'\u6253\u5f00\u5173\u8054\u4efb\u52a1'}
-                                        </button>
-                                    </div>
-                                ) : null}
-                                {item.linkedChecklistPath ? <div className="tiny">{`\u5173\u8054\u6e05\u5355\uff1a${item.linkedChecklistPath}`}</div> : null}
-                                {linkedChecklist?.title ? <div className="tiny">{`\u6e05\u5355\u6807\u9898\uff1a${linkedChecklist.title}`}</div> : null}
-                                {linkedChecklist?.summary ? <div className="tiny">{`\u6e05\u5355\u6458\u8981\uff1a${linkedChecklist.summary}`}</div> : null}
-                            </div>
-                        )
-                    })}
-                    {filteredAuditItems.length === 0 ? <div className="empty-state">{'\u5f53\u524d\u7b5b\u9009\u6761\u4ef6\u4e0b\u6682\u65e0\u5ba1\u8ba1\u8bb0\u5f55\u3002'}</div> : null}
-                </div>
-                {auditError ? <ErrorNotice error={auditError} /> : null}
-            </section>
-            <section className="panel full-span">
-                <div className="panel-title">{'\u6e05\u5355\u5f52\u6863'}</div>
-                <div className="supervisor-grid">
-                    {auditChecklists.map((item) => (
-                        <div key={`audit-checklist:${item.relativePath}`} className="supervisor-card success">
-                            <div className="supervisor-card-header">
-                                <div className="supervisor-title">
-                                    <span>{item.title || `\u7b2c ${item.chapter || 0} \u7ae0\u6e05\u5355`}</span>
-                                </div>
-                                <span className="runtime-badge">{formatTimestampShort(item.savedAt)}</span>
-                            </div>
-                            <div className="tiny">{`\u8def\u5f84\uff1a${item.relativePath}`}</div>
-                            {item.note ? <div className="tiny">{`\u5907\u6ce8\uff1a${item.note}`}</div> : null}
-                            <div className="supervisor-meta">{item.summary || '\u5df2\u4fdd\u5b58\u7684 Supervisor \u6e05\u5355'}</div>
-                        </div>
-                    ))}
-                    {auditChecklists.length === 0 ? <div className="empty-state">{'\u6682\u65f6\u8fd8\u6ca1\u6709\u53ef\u7528\u7684\u5ba1\u8ba1\u6e05\u5355\u3002'}</div> : null}
-                </div>
-            </section>
+            <SupervisorAuditFilterPanel
+                auditCategoryFilter={auditCategoryFilter}
+                setAuditCategoryFilter={setAuditCategoryFilter}
+                auditCategoryOptions={auditCategoryOptions}
+                auditActionFilter={auditActionFilter}
+                setAuditActionFilter={setAuditActionFilter}
+                auditActionOptions={auditActionOptions}
+                auditStatusFilter={auditStatusFilter}
+                setAuditStatusFilter={setAuditStatusFilter}
+                SUPERVISOR_STATUS_FILTER_OPTIONS={SUPERVISOR_STATUS_FILTER_OPTIONS}
+                auditChapterFilter={auditChapterFilter}
+                setAuditChapterFilter={setAuditChapterFilter}
+                auditChapterOptions={auditChapterOptions}
+                auditViewMode={auditViewMode}
+                setAuditViewMode={setAuditViewMode}
+                auditGroupFocus={auditGroupFocus}
+                setAuditGroupFocus={setAuditGroupFocus}
+                auditGroupFocusOptions={auditGroupFocusOptions}
+                auditFocusedStableKey={auditFocusedStableKey}
+                setAuditFocusedStableKey={setAuditFocusedStableKey}
+                handleDownloadAuditMarkdown={handleDownloadAuditMarkdown}
+                handleDownloadAuditJson={handleDownloadAuditJson}
+            />
+            <SupervisorAuditTimelinePanel
+                auditFocusState={auditFocusState}
+                setAuditViewMode={setAuditViewMode}
+                handleResetAuditEventFilters={handleResetAuditEventFilters}
+                handleResetAuditGroupFilters={handleResetAuditGroupFilters}
+                setAuditFocusedStableKey={setAuditFocusedStableKey}
+                auditViewMode={auditViewMode}
+                filteredGroupedAuditLogEntries={filteredGroupedAuditLogEntries}
+                filteredAuditLogEntries={filteredAuditLogEntries}
+                auditItemsByStableKey={auditItemsByStableKey}
+                tasks={tasks}
+                checklistLookup={checklistLookup}
+                selectedAuditChecklist={selectedAuditChecklist}
+                auditFocusedStableKey={auditFocusedStableKey}
+                auditSubmitting={auditSubmitting}
+                formatNumber={formatNumber}
+                formatTimestampShort={formatTimestampShort}
+                formatSupervisorAuditStatusSnapshot={formatSupervisorAuditStatusSnapshot}
+                formatSupervisorDismissReason={formatSupervisorDismissReason}
+                formatSupervisorTrackingStatus={formatSupervisorTrackingStatus}
+                formatSupervisorAuditAction={formatSupervisorAuditAction}
+                buildSupervisorAuditSchemaLabel={buildSupervisorAuditSchemaLabel}
+                buildSupervisorAuditGroupAnchorId={buildSupervisorAuditGroupAnchorId}
+                buildAuditTaskRuntimeSummary={buildAuditTaskRuntimeSummary}
+                renderOperatorActionButtons={renderOperatorActionButtons}
+                handleCopyAuditGroupLink={handleCopyAuditGroupLink}
+                onOpenTask={onOpenTask}
+                setSelectedAuditChecklistPath={setSelectedAuditChecklistPath}
+                handleAuditGroupAction={handleAuditGroupAction}
+                handleAuditGroupTracking={handleAuditGroupTracking}
+                handleAuditGroupUndismiss={handleAuditGroupUndismiss}
+                handleAuditGroupTrackingClear={handleAuditGroupTrackingClear}
+                handleDownloadAuditChecklist={handleDownloadAuditChecklist}
+                auditError={auditError}
+            />
+            <SupervisorAuditHealthPanel
+                auditHealth={auditHealth}
+                formatNumber={formatNumber}
+                formatTimestampShort={formatTimestampShort}
+                formatSupervisorAuditHealthIssueLabel={formatSupervisorAuditHealthIssueLabel}
+                handleDownloadAuditHealthMarkdown={handleDownloadAuditHealthMarkdown}
+                handleDownloadAuditHealthJson={handleDownloadAuditHealthJson}
+            />
+            <SupervisorAuditRepairPreviewPanel
+                auditRepairPreview={auditRepairPreview}
+                formatNumber={formatNumber}
+                formatSupervisorAuditRepairActionLabel={formatSupervisorAuditRepairActionLabel}
+                formatSupervisorAuditHealthIssueLabel={formatSupervisorAuditHealthIssueLabel}
+                handleDownloadAuditRepairPreviewMarkdown={handleDownloadAuditRepairPreviewMarkdown}
+                handleDownloadAuditRepairPreviewJson={handleDownloadAuditRepairPreviewJson}
+            />
+            <SupervisorAuditRepairArchivePanel
+                auditRepairReportFilter={auditRepairReportFilter}
+                setAuditRepairReportFilter={setAuditRepairReportFilter}
+                auditRepairReportSortMode={auditRepairReportSortMode}
+                setAuditRepairReportSortMode={setAuditRepairReportSortMode}
+                AUDIT_REPAIR_REPORT_SORT_OPTIONS={AUDIT_REPAIR_REPORT_SORT_OPTIONS}
+                auditRepairReportSummary={auditRepairReportSummary}
+                auditRepairReports={auditRepairReports}
+                sortedAuditRepairReports={sortedAuditRepairReports}
+                selectedVisibleAuditRepairReport={selectedVisibleAuditRepairReport}
+                setSelectedAuditRepairReportPath={setSelectedAuditRepairReportPath}
+                handleDownloadAuditRepairReport={handleDownloadAuditRepairReport}
+                formatTimestampShort={formatTimestampShort}
+                formatNumber={formatNumber}
+                formatAuditRepairReportSummary={formatAuditRepairReportSummary}
+            />
+            <SupervisorAuditChecklistArchivePanel
+                auditChecklists={auditChecklists}
+                selectedAuditChecklist={selectedAuditChecklist}
+                setSelectedAuditChecklistPath={setSelectedAuditChecklistPath}
+                handleDownloadAuditChecklist={handleDownloadAuditChecklist}
+                formatTimestampShort={formatTimestampShort}
+            />
         </div>
     )
 }
 
+
 function formatSupervisorTrackingStatus(value) {
     const matched = SUPERVISOR_TRACKING_STATUS_OPTIONS.find((item) => item.value === value)
     return matched?.label || value || '\u672a\u8bb0\u5f55'
+}
+
+const AUDIT_HEALTH_ISSUE_KEY_PREFIX = 'audit-health-issue:'
+const AUDIT_REPAIR_PREVIEW_KEY_PREFIX = 'audit-repair-preview:'
+
+function formatSupervisorAuditAction(action) {
+    const labels = {
+        created: '\u5efa\u8bae\u65b0\u5efa',
+        dismissed: '\u5df2\u5ffd\u7565',
+        undismissed: '\u5df2\u6062\u590d',
+        tracking_updated: '\u8ddf\u8e2a\u72b6\u6001\u66f4\u65b0',
+        tracking_cleared: '\u8ddf\u8e2a\u72b6\u6001\u5df2\u6e05\u9664',
+        checklist_saved: '\u6e05\u5355\u5df2\u4fdd\u5b58',
+        linked_task_updated: '\u5173\u8054\u4efb\u52a1\u66f4\u65b0',
+    }
+    return labels[action] || action || '\u672a\u8bb0\u5f55'
+}
+
+function formatSupervisorAuditStatusSnapshot(value) {
+    const labels = {
+        open: '\u5f85\u5904\u7406',
+        in_progress: '\u5904\u7406\u4e2d',
+        completed: '\u5df2\u5904\u7406',
+        dismissed: '\u5df2\u4ece Inbox \u79fb\u9664',
+        archived: '\u4ec5\u5386\u53f2\u5f52\u6863',
+    }
+    return labels[value] || formatSupervisorTrackingStatus(value)
+}
+
+function formatSupervisorAuditSchemaState(value) {
+    const labels = {
+        supported: '\u53ef\u517c\u5bb9',
+        future: '\u672a\u6765\u7248\u672c',
+        legacy: '\u65e7\u7248\u672c',
+        unknown: '\u672a\u77e5',
+    }
+    return labels[value] || value || '\u672a\u77e5'
+}
+
+function buildSupervisorAuditSchemaLabel(item) {
+    const schemaVersion = Number(item?.schemaVersion || item?.schema_version || 0)
+    const schemaState = String(item?.schemaState || item?.schema_state || 'supported').trim() || 'supported'
+    return schemaVersion > 0 ? `Schema v${schemaVersion} / ${formatSupervisorAuditSchemaState(schemaState)}` : formatSupervisorAuditSchemaState(schemaState)
+}
+
+function formatSupervisorAuditHealthIssueLabel(code) {
+    const labels = {
+        invalid_json: '\u975e JSON \u884c',
+        invalid_timestamp: '\u65f6\u95f4\u6233\u975e\u6cd5',
+        missing_action: '\u7f3a\u5c11 action',
+        missing_stable_key: '\u7f3a\u5c11 stable key',
+        future_schema: '\u672a\u6765 schema',
+    }
+    return labels[code] || code || '\u672a\u8bb0\u5f55'
+}
+
+function formatSupervisorAuditRepairActionLabel(action) {
+    const labels = {
+        drop_line: '\u5220\u9664\u574f\u884c',
+        rewrite_normalized_event: '\u91cd\u5199\u4e3a\u89c4\u8303\u4e8b\u4ef6',
+        manual_review: '\u4ec5\u4eba\u5de5\u590d\u6838',
+    }
+    return labels[action] || action || '\u672a\u8bb0\u5f55'
+}
+
+function buildAuditTaskRuntimeSummary(task) {
+    if (!task) return []
+    const lines = [
+        `\uff1a${translateTaskType(task.task_type)} / ${resolveTaskStatusLabel(task)}`,
+    ]
+    const targetLabel = resolveTaskTargetLabel(task)
+    if (targetLabel && targetLabel !== '-') {
+        lines.push(`\u76ee\u6807\uff1a${targetLabel}`)
+    }
+    const stepLabel = resolveCurrentStepLabel(task)
+    if (stepLabel && stepLabel !== '-') {
+        lines.push(`\u5f53\u524d\u6b65\u9aa4\uff1a${stepLabel}`)
+    }
+    return lines
+}
+
+function buildSupervisorAuditGroupAnchorId(stableKey) {
+    return `audit-group:${String(stableKey || 'unknown').replace(/[^a-zA-Z0-9:_-]+/g, '-')}`
+}
+
+function describeCurrentAuditItem(item) {
+    if (!item) return '\u5efa\u8bae\u5df2\u4e0d\u5b58\u5728'
+    if (item.dismissed) return '\u5df2\u4ece Inbox \u79fb\u9664'
+    if (item.trackingStatus === 'completed') return '\u5df2\u5904\u7406'
+    if (item.trackingStatus === 'in_progress') return '\u5904\u7406\u4e2d'
+    return '\u53ef\u76f4\u63a5\u6267\u884c'
+}
+
+function isAuditGroupActionable(item) {
+    return Boolean(item && !item.dismissed && item.trackingStatus !== 'completed')
+}
+
+function resolveCurrentAuditGroupState(item) {
+    if (!item) return 'archived'
+    if (item.dismissed) return 'dismissed'
+    if (item.trackingStatus === 'completed') return 'completed'
+    if (item.trackingStatus === 'in_progress') return 'in_progress'
+    return 'open'
+}
+
+function compactSupervisorAuditGroupEntries(entries) {
+    const compactedEntries = []
+    ;(entries || []).forEach((entry) => {
+        const previous = compactedEntries[compactedEntries.length - 1]
+        const sameTrackingUpdate = previous
+            && previous.action === entry?.action
+            && previous.status_snapshot === entry?.status_snapshot
+            && previous.dismissal_reason === entry?.dismissal_reason
+            && previous.dismissal_note === entry?.dismissal_note
+            && previous.tracking_note === entry?.tracking_note
+        if (sameTrackingUpdate) {
+            previous.mergedCount = Number(previous.mergedCount || 1) + 1
+            previous.timestamp = entry?.timestamp || previous.timestamp
+            return
+        }
+        compactedEntries.push({ ...entry, mergedCount: Number(entry?.mergedCount || 1) })
+    })
+    return compactedEntries
+}
+
+function rankSupervisorAuditGroup(group) {
+    const stateRank = {
+        open: 0,
+        in_progress: 1,
+        completed: 2,
+        dismissed: 3,
+        archived: 4,
+    }
+    return [
+        Number(stateRank[group?.currentState] ?? 9),
+        Number(group?.priority || 999),
+        -parseIsoTimestamp(group?.latestTimestamp),
+    ]
+}
+
+function buildSupervisorAuditGroups(entries, auditItems) {
+    const auditItemsByStableKey = new Map((auditItems || []).map((item) => [item?.stableKey, item]))
+    const groups = new Map()
+    ;(entries || []).forEach((entry, index) => {
+        const stableKey = String(entry?.stableKey || entry?.stable_key || `event:${index}`).trim()
+        if (!groups.has(stableKey)) {
+            groups.set(stableKey, [])
+        }
+        groups.get(stableKey).push(entry)
+    })
+    return [...groups.entries()].map(([stableKey, groupEntries], index) => {
+        const orderedEntries = [...groupEntries].sort((left, right) => parseIsoTimestamp(left?.timestamp) - parseIsoTimestamp(right?.timestamp))
+        const compactedEntries = compactSupervisorAuditGroupEntries(orderedEntries)
+        const latestEntry = orderedEntries[orderedEntries.length - 1] || {}
+        const currentAuditItem = auditItemsByStableKey.get(stableKey) || null
+        const schemaWarning = latestEntry.schemaWarning || latestEntry.schema_warning || ''
+        const schemaState = latestEntry.schemaState || latestEntry.schema_state || 'supported'
+        const latestStatusSnapshot = latestEntry.status_snapshot || resolveCurrentAuditGroupState(currentAuditItem)
+        const currentState = resolveCurrentAuditGroupState(currentAuditItem)
+        return {
+            stableKey,
+            groupKey: `${stableKey}:${index}`,
+            title: currentAuditItem?.title || latestEntry.title || stableKey,
+            summary: currentAuditItem?.summary || latestEntry.summary || latestEntry.detail || '',
+            categoryLabel: currentAuditItem?.categoryLabel || latestEntry.categoryLabel || latestEntry.category || '',
+            chapter: extractSupervisorChapter(currentAuditItem || latestEntry),
+            priority: Number(currentAuditItem?.priority || latestEntry.priority || 999),
+            schemaVersion: latestEntry.schemaVersion || latestEntry.schema_version || 0,
+            schemaState,
+            schemaWarning,
+            latestStatusSnapshot,
+            latestTimestamp: latestEntry.timestamp || '',
+            earliestTimestamp: orderedEntries[0]?.timestamp || '',
+            latestEntry,
+            eventCount: orderedEntries.length,
+            compactedEntries,
+            compactedEventCount: compactedEntries.length,
+            currentState,
+            actionable: isAuditGroupActionable(currentAuditItem),
+        }
+    }).sort((left, right) => {
+        const leftRank = rankSupervisorAuditGroup(left)
+        const rightRank = rankSupervisorAuditGroup(right)
+        for (let index = 0; index < Math.max(leftRank.length, rightRank.length); index += 1) {
+            const delta = Number(leftRank[index] || 0) - Number(rightRank[index] || 0)
+            if (delta !== 0) return delta
+        }
+        return String(left?.stableKey || '').localeCompare(String(right?.stableKey || ''))
+    })
 }
 
 function sortSupervisorItems(items, mode) {
@@ -1609,6 +2228,21 @@ function extractSupervisorChapter(item) {
 function parseIsoTimestamp(value) {
     const parsed = Date.parse(String(value || ''))
     return Number.isFinite(parsed) ? parsed : 0
+}
+
+function buildAuditRepairReportImpactScore(item) {
+    return (
+        Number(item?.droppedCount || 0)
+        + Number(item?.rewrittenCount || 0)
+        + Number(item?.manualReviewCount || 0)
+    )
+}
+
+function formatAuditRepairReportSummary(item) {
+    const appliedCount = Number(item?.appliedCount || 0)
+    const manualReviewCount = Number(item?.manualReviewCount || 0)
+    const keptCount = Number(item?.keptCount || 0)
+    return `自动处理 ${formatNumber(appliedCount)} 项 / 人工复核 ${formatNumber(manualReviewCount)} 项 / 保留 ${formatNumber(keptCount)} 项`
 }
 
 function buildSupervisorChecklistMarkdown({ projectInfo, items, categoryFilter, sortMode }) {
@@ -1653,6 +2287,179 @@ function buildSupervisorChecklistMarkdown({ projectInfo, items, categoryFilter, 
             lines.push(`   - 忽略原因：${formatSupervisorDismissReason(item.dismissalReason)}`)
             lines.push(`   - 手动备注：${item.dismissalNote || '-'}`)
             lines.push(`   - 恢复后动作：${item.actionLabel || '-'}`)
+        })
+    }
+
+    return lines.join('\n')
+}
+
+function buildSupervisorAuditMarkdown({ projectInfo, entries, tasks, filters }) {
+    const currentChapter = Number(projectInfo?.progress?.current_chapter || 0)
+    const tasksById = new Map((tasks || []).map((task) => [task.id, task]))
+    const lines = [
+        '# Supervisor 审计时间线导出',
+        '',
+        `- 当前章节：第 ${currentChapter} 章`,
+        `- 分类筛选：${filters?.category === 'all' ? '全部类型' : (filters?.category || '全部类型')}`,
+        `- 动作筛选：${filters?.action === 'all' ? '全部动作' : formatSupervisorAuditAction(filters?.action)}`,
+        `- 状态筛选：${filters?.status === 'all' ? '全部状态' : formatSupervisorAuditStatusSnapshot(filters?.status)}`,
+        `- 章节筛选：${filters?.chapter === 'all' ? '全部章节' : `第 ${filters?.chapter} 章`}`,
+        `- 导出时间：${formatTimestampShort(new Date().toISOString())}`,
+        '',
+        '## 审计事件',
+    ]
+
+    if (!(entries || []).length) {
+        lines.push('- 当前筛选条件下没有审计事件。')
+        return lines.join('\n')
+    }
+
+    ;(entries || []).forEach((entry, index) => {
+        lines.push(`${index + 1}. ${formatSupervisorAuditAction(entry?.action)}`)
+        lines.push(`   - 时间：${formatTimestampShort(entry?.timestamp)}`)
+        if (entry?.title) lines.push(`   - 标题：${entry.title}`)
+        if (entry?.summary) lines.push(`   - 摘要：${entry.summary}`)
+        if (entry?.detail) lines.push(`   - 当时建议说明：${entry.detail}`)
+        if (entry?.rationale) lines.push(`   - 当时推荐理由：${entry.rationale}`)
+        if (entry?.categoryLabel || entry?.category) lines.push(`   - 类型：${entry.categoryLabel || entry.category}`)
+        if (entry?.badge) lines.push(`   - 当时标签：${entry.badge}`)
+        if (entry?.priority) lines.push(`   - 当时优先级：${entry.priority}`)
+        if (entry?.tone) lines.push(`   - 当时颜色：${entry.tone}`)
+        if (entry?.chapter) lines.push(`   - 章节：第 ${entry.chapter} 章`)
+        if (entry?.status_snapshot) lines.push(`   - 状态快照：${formatSupervisorAuditStatusSnapshot(entry.status_snapshot)}`)
+        if (entry?.dismissal_reason) lines.push(`   - 忽略原因：${formatSupervisorDismissReason(entry.dismissal_reason)}`)
+        if (entry?.dismissal_note) lines.push(`   - 忽略备注：${entry.dismissal_note}`)
+        if (entry?.tracking_note) lines.push(`   - 状态备注：${entry.tracking_note}`)
+        if (entry?.actionLabel) lines.push(`   - 当时建议动作：${entry.actionLabel}`)
+        if (entry?.secondaryLabel) lines.push(`   - 当时备选动作：${entry.secondaryLabel}`)
+        if (entry?.sourceTaskId) lines.push(`   - 来源任务：${entry.sourceTaskId}`)
+        const sourceTask = tasksById.get(entry?.sourceTaskId)
+        if (sourceTask) {
+            buildAuditTaskRuntimeSummary(sourceTask).forEach((line) => {
+                lines.push(`   - 来源任务${line}`)
+            })
+        }
+        if (entry?.linkedTaskId) lines.push(`   - 关联任务：${entry.linkedTaskId}`)
+        const linkedTask = tasksById.get(entry?.linkedTaskId)
+        if (linkedTask) {
+            buildAuditTaskRuntimeSummary(linkedTask).forEach((line) => {
+                lines.push(`   - 关联任务${line}`)
+            })
+        }
+        const linkedChecklist = entry?.linkedChecklistPath || entry?.checklist_path
+        if (linkedChecklist) lines.push(`   - 关联清单：${linkedChecklist}`)
+        if (entry?.selected_count) lines.push(`   - 清单选中项：${formatNumber(entry.selected_count)}`)
+    })
+
+    return lines.join('\n')
+}
+
+function buildSupervisorAuditHealthMarkdown({ projectInfo, health }) {
+    const currentChapter = Number(projectInfo?.progress?.current_chapter || 0)
+    const issueCounts = health?.issueCounts || {}
+    const schemaStateCounts = health?.schemaStateCounts || {}
+    const schemaVersionCounts = health?.schemaVersionCounts || {}
+    const issues = Array.isArray(health?.issues) ? health.issues : []
+    const lines = [
+        '# Supervisor Audit Health Report',
+        '',
+        `- 当前章节：第 ${currentChapter} 章`,
+        `- 导出时间：${formatTimestampShort(new Date().toISOString())}`,
+        `- 日志存在：${health?.exists === false ? '否' : '是'}`,
+        `- 体检状态：${health?.healthy ? '通过' : '异常'}`,
+        `- 总行数：${formatNumber(health?.total_lines || 0)}`,
+        `- 非空行：${formatNumber(health?.nonempty_lines || 0)}`,
+        `- 有效事件：${formatNumber(health?.valid_entries || 0)}`,
+        `- 问题总数：${formatNumber(health?.issue_count || 0)}`,
+    ]
+
+    if (health?.earliestTimestamp) lines.push(`- 最早事件：${formatTimestampShort(health.earliestTimestamp)}`)
+    if (health?.latestTimestamp) lines.push(`- 最新事件：${formatTimestampShort(health.latestTimestamp)}`)
+    if (health?.relativePath) lines.push(`- 文件路径：${health.relativePath}`)
+
+    lines.push('', '## 问题计数')
+    if (!Object.keys(issueCounts).length) {
+        lines.push('- 无')
+    } else {
+        Object.entries(issueCounts).forEach(([code, count]) => {
+            lines.push(`- ${formatSupervisorAuditHealthIssueLabel(code)}：${formatNumber(count)}`)
+        })
+    }
+
+    lines.push('', '## Schema 状态分布')
+    if (!Object.keys(schemaStateCounts).length) {
+        lines.push('- 无')
+    } else {
+        Object.entries(schemaStateCounts).forEach(([state, count]) => {
+            lines.push(`- ${formatSupervisorAuditSchemaState(state)}：${formatNumber(count)}`)
+        })
+    }
+
+    lines.push('', '## Schema 版本分布')
+    if (!Object.keys(schemaVersionCounts).length) {
+        lines.push('- 无')
+    } else {
+        Object.entries(schemaVersionCounts).forEach(([version, count]) => {
+            lines.push(`- v${version}：${formatNumber(count)}`)
+        })
+    }
+
+    lines.push('', '## 问题样本')
+    if (!issues.length) {
+        lines.push('- 无')
+    } else {
+        issues.forEach((item, index) => {
+            lines.push(`${index + 1}. ${formatSupervisorAuditHealthIssueLabel(item?.code)}`)
+            lines.push(`   - 严重级别：${item?.severity || '-'}`)
+            lines.push(`   - 说明：${item?.message || '-'}`)
+            if (item?.line) lines.push(`   - 行号：${item.line}`)
+            if (item?.preview) lines.push(`   - 预览：${item.preview}`)
+        })
+    }
+
+    return lines.join('\n')
+}
+
+function buildSupervisorAuditRepairPreviewMarkdown({ projectInfo, preview }) {
+    const currentChapter = Number(projectInfo?.progress?.current_chapter || 0)
+    const actionCounts = preview?.actionCounts || {}
+    const proposals = Array.isArray(preview?.proposals) ? preview.proposals : []
+    const lines = [
+        '# Supervisor Audit Repair Preview',
+        '',
+        `- 当前章节：第 ${currentChapter} 章`,
+        `- 导出时间：${formatTimestampShort(new Date().toISOString())}`,
+        `- 日志存在：${preview?.exists === false ? '否' : '是'}`,
+        `- 总行数：${formatNumber(preview?.total_lines || 0)}`,
+        `- 非空行：${formatNumber(preview?.nonempty_lines || 0)}`,
+        `- 可直接修复：${formatNumber(preview?.repairable_count || 0)}`,
+        `- 需人工复核：${formatNumber(preview?.manual_review_count || 0)}`,
+    ]
+
+    if (preview?.relativePath) lines.push(`- 文件路径：${preview.relativePath}`)
+
+    lines.push('', '## 动作分布')
+    if (!Object.keys(actionCounts).length) {
+        lines.push('- 无')
+    } else {
+        Object.entries(actionCounts).forEach(([action, count]) => {
+            lines.push(`- ${formatSupervisorAuditRepairActionLabel(action)}：${formatNumber(count)}`)
+        })
+    }
+
+    lines.push('', '## 预演样本')
+    if (!proposals.length) {
+        lines.push('- 无')
+    } else {
+        proposals.forEach((item, index) => {
+            lines.push(`${index + 1}. ${formatSupervisorAuditRepairActionLabel(item?.action)}`)
+            lines.push(`   - 严重级别：${item?.severity || '-'}`)
+            lines.push(`   - 说明：${item?.reason || '-'}`)
+            if (item?.line) lines.push(`   - 行号：${item.line}`)
+            if (item?.stableKey) lines.push(`   - 建议键：${item.stableKey}`)
+            if ((item?.issueCodes || []).length) lines.push(`   - 问题：${item.issueCodes.map((code) => formatSupervisorAuditHealthIssueLabel(code)).join(' / ')}`)
+            if (item?.preview) lines.push(`   - 预览：${item.preview}`)
+            if (item?.proposedEvent) lines.push(`   - 规范事件：${JSON.stringify(item.proposedEvent)}`)
         })
     }
 
@@ -1797,6 +2604,17 @@ function resolveTaskTargetLabel(task) {
     }
     if (task?.task_type === 'guarded-write' && request.chapter) {
         return `\u62a4\u680f\u63a8\u8fdb\u7b2c ${request.chapter} \u7ae0`
+    }
+    if (task?.task_type === 'guarded-batch-write') {
+        const startChapter = Number(request.start_chapter || request.chapter || 0)
+        const maxChapters = Math.max(1, Number(request.max_chapters || 1))
+        if (startChapter > 0) {
+            const endChapter = startChapter + maxChapters - 1
+            return endChapter > startChapter
+                ? `\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u7b2c ${startChapter}-${endChapter} \u7ae0`
+                : `\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u7b2c ${startChapter} \u7ae0`
+        }
+        return `\u62a4\u680f\u6279\u91cf\u63a8\u8fdb ${maxChapters} \u7ae0`
     }
     if (task?.task_type === 'review' && request.chapter_range) {
         return `\u7b2c ${request.chapter_range} \u7ae0`

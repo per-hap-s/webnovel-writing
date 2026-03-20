@@ -24,6 +24,8 @@ class ErrorResponse(BaseModel):
 class TaskRequest(BaseModel):
     project_root: Optional[str] = None
     chapter: Optional[int] = None
+    start_chapter: Optional[int] = None
+    max_chapters: Optional[int] = None
     chapter_range: Optional[str] = None
     volume: Optional[str] = None
     mode: str = "standard"

@@ -37,6 +37,16 @@ def _store_task(service: OrchestrationService, task_type: str, request: dict, *,
     return service.store.update_task(task["id"], **updates)
 
 
+def _write_raw_audit_events(project_root: Path, events: list[dict]) -> Path:
+    audit_path = project_root / ".webnovel" / "supervisor" / "audit-log.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        "\n".join(json.dumps(event, ensure_ascii=False) for event in events),
+        encoding="utf-8",
+    )
+    return audit_path
+
+
 def test_supervisor_recommendations_return_prioritized_actions(tmp_path: Path):
     project_root = make_project(tmp_path)
     service = OrchestrationService(project_root)
@@ -47,7 +57,7 @@ def test_supervisor_recommendations_return_prioritized_actions(tmp_path: Path):
         service,
         "write",
         {"chapter": 5, "mode": "standard", "require_manual_approval": False},
-        artifacts={"step_results": {}, "review_summary": None, "approval": {}, "writeback": {"story_refresh": {"should_refresh": True}}},
+        artifacts={"step_results": {}, "review_summary": None, "approval": {}, "writeback": {"story_refresh": {"should_refresh": True, "recommended_resume_from": "chapter-director"}}},
         updated_at="2026-03-19T08:00:00+00:00",
     )
     _store_task(
@@ -76,11 +86,15 @@ def test_supervisor_recommendations_return_prioritized_actions(tmp_path: Path):
         items[3]["stableKey"],
     ]
     assert items[0]["action"]["type"] == "open-task"
+    assert items[0]["operator_actions"][0]["kind"] == "open-task"
     assert items[0]["category"] == "approval"
     assert items[0]["categoryLabel"] == "审批"
     assert any(item["action"]["type"] == "retry-story" for item in items)
     assert any(item["category"] == "story_refresh" for item in items)
     assert any(item["action"]["taskType"] == "guarded-write" for item in items if item["action"]["type"] == "create-task")
+    assert any(item["operator_actions"][0]["kind"] == "retry-task" for item in items if item["action"]["type"] == "retry-story")
+    assert any(item["operator_actions"][0]["resume_from_step"] == "chapter-director" for item in items if item["action"]["type"] == "retry-story")
+    assert any(item["operator_actions"][0]["kind"] == "launch-task" for item in items if item["action"]["type"] == "create-task")
 
 
 def test_supervisor_recommendations_dedupe_story_refresh_by_chapter(tmp_path: Path):
@@ -271,6 +285,135 @@ def test_supervisor_tracking_state_expires_when_fingerprint_changes(tmp_path: Pa
     assert payload["tracking"] == {}
 
 
+def test_supervisor_recommendations_expose_operator_actions_contract(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    guarded = _store_task(
+        service,
+        "guarded-write",
+        {"chapter": 5, "mode": "standard", "require_manual_approval": False},
+        artifacts={
+            "step_results": {},
+            "review_summary": None,
+            "approval": {},
+            "guarded_runner": {
+                "chapter": 5,
+                "outcome": "completed_one_chapter",
+                "next_action": {"can_enqueue_next": True, "next_chapter": 6},
+            },
+        },
+        updated_at="2026-03-19T07:00:00+00:00",
+    )
+
+    items = service.list_supervisor_recommendations()
+    guarded_item = next(item for item in items if item["sourceTaskId"] == guarded["id"])
+
+    assert guarded_item["operator_actions"][0]["kind"] == "launch-task"
+    assert guarded_item["operator_actions"][0]["task_type"] == "guarded-write"
+    assert guarded_item["operator_actions"][1]["kind"] == "open-task"
+    assert guarded_item["operator_actions"][1]["task_id"] == guarded["id"]
+
+
+def test_supervisor_recommendations_include_guarded_refresh_actions(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    guarded = _store_task(
+        service,
+        "guarded-write",
+        {"chapter": 6, "mode": "standard", "require_manual_approval": False},
+        artifacts={
+            "guarded_runner": {
+                "chapter": 6,
+                "outcome": "blocked_story_refresh",
+                "next_action": {
+                    "can_enqueue_next": False,
+                    "next_chapter": 6,
+                    "suggested_action": "refresh before chapter 6",
+                },
+                "operator_actions": [
+                    {
+                        "id": "guarded:retry",
+                        "kind": "retry-task",
+                        "label": "从 Chapter Director 重试当前任务",
+                        "variant": "primary",
+                        "task_id": "guarded-task-1",
+                        "resume_from_step": "chapter-director",
+                    },
+                    {
+                        "id": "guarded:write",
+                        "kind": "launch-task",
+                        "label": "创建当前章常规写作",
+                        "variant": "secondary",
+                        "task_type": "write",
+                        "payload": {"chapter": 6, "mode": "standard", "require_manual_approval": False, "project_root": str(project_root), "options": {}},
+                    },
+                ],
+            }
+        },
+        updated_at="2026-03-19T11:00:00+00:00",
+    )
+
+    items = service.list_supervisor_recommendations(limit=10)
+    guarded_item = next(item for item in items if item["sourceTaskId"] == guarded["id"])
+
+    assert guarded_item["category"] == "guarded_story_refresh"
+    assert guarded_item["operator_actions"][0]["kind"] == "retry-task"
+    assert guarded_item["operator_actions"][0]["resume_from_step"] == "chapter-director"
+    assert guarded_item["action"]["type"] == "retry-story"
+    assert guarded_item["action"]["resumeFromStep"] == "chapter-director"
+
+
+def test_supervisor_recommendations_include_guarded_batch_continue_actions(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    batch = _store_task(
+        service,
+        "guarded-batch-write",
+        {"start_chapter": 6, "max_chapters": 2, "mode": "standard", "require_manual_approval": False},
+        artifacts={
+            "guarded_batch_runner": {
+                "start_chapter": 6,
+                "completed_chapters": 2,
+                "outcome": "completed_requested_batch",
+                "next_action": {
+                    "next_chapter": 8,
+                    "suggested_action": "launch next guarded batch",
+                },
+                "operator_actions": [
+                    {
+                        "id": "batch:continue",
+                        "kind": "launch-task",
+                        "label": "继续下一批护栏推进",
+                        "variant": "primary",
+                        "task_type": "guarded-batch-write",
+                        "payload": {"start_chapter": 8, "max_chapters": 2, "mode": "standard", "require_manual_approval": False, "project_root": str(project_root), "options": {}},
+                    },
+                    {
+                        "id": "batch:open",
+                        "kind": "open-task",
+                        "label": "查看最后子任务",
+                        "variant": "secondary",
+                        "task_id": "task-child-last",
+                    },
+                ],
+            }
+        },
+        updated_at="2026-03-19T12:00:00+00:00",
+    )
+
+    items = service.list_supervisor_recommendations(limit=10)
+    batch_item = next(item for item in items if item["sourceTaskId"] == batch["id"])
+
+    assert batch_item["category"] == "guarded_batch_continue"
+    assert batch_item["operator_actions"][0]["kind"] == "launch-task"
+    assert batch_item["operator_actions"][0]["task_type"] == "guarded-batch-write"
+    assert batch_item["action"]["type"] == "create-task"
+    assert batch_item["action"]["taskType"] == "guarded-batch-write"
+
+
 def test_supervisor_tracking_supports_task_and_checklist_links(tmp_path: Path):
     project_root = make_project(tmp_path)
     service = OrchestrationService(project_root)
@@ -381,3 +524,199 @@ def test_supervisor_checklist_list_returns_recent_saved_items(tmp_path: Path):
     assert items[0]["savedAt"]
     assert items[0]["title"]
     assert "note" in items[0]
+
+
+def test_supervisor_audit_log_records_recommendation_mutations(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    _store_task(
+        service,
+        "write",
+        {"chapter": 3, "mode": "standard", "require_manual_approval": True},
+        status="awaiting_writeback_approval",
+        updated_at="2026-03-19T10:00:00+00:00",
+    )
+
+    item = service.list_supervisor_recommendations()[0]
+    service.dismiss_supervisor_recommendation(item["stableKey"], item["fingerprint"], reason="defer", note="稍后再处理")
+    service.undismiss_supervisor_recommendation(item["stableKey"])
+    service.set_supervisor_recommendation_tracking(
+        item["stableKey"],
+        item["fingerprint"],
+        status="completed",
+        note="已人工处理",
+        linked_task_id="task-approval-1",
+        linked_checklist_path=".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md",
+    )
+    service.clear_supervisor_recommendation_tracking(item["stableKey"])
+
+    audit_path = project_root / ".webnovel" / "supervisor" / "audit-log.jsonl"
+    assert audit_path.exists()
+
+    entries = service.list_supervisor_audit_log(limit=10)
+    assert [entry["action"] for entry in entries[:4]] == [
+        "tracking_cleared",
+        "tracking_updated",
+        "undismissed",
+        "dismissed",
+    ]
+    assert entries[0]["stableKey"] == item["stableKey"]
+    assert entries[0]["schema_version"] == 1
+    assert entries[1]["title"] == item["title"]
+    assert entries[1]["detail"] == item["detail"]
+    assert entries[1]["rationale"] == item["rationale"]
+    assert entries[1]["actionLabel"] == item["actionLabel"]
+    assert entries[1]["priority"] == item["priority"]
+    assert entries[1]["badge"] == item["badge"]
+    assert entries[1]["tone"] == item["tone"]
+    assert entries[1]["schema_version"] == 1
+    assert entries[1]["linked_task_id"] == "task-approval-1"
+    assert entries[1]["linkedTaskId"] == "task-approval-1"
+    assert entries[1]["linked_checklist_path"] == ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md"
+    assert entries[1]["linkedChecklistPath"] == ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md"
+    assert entries[1]["status_snapshot"] == "completed"
+    assert entries[3]["dismissal_reason"] == "defer"
+    assert entries[3]["dismissal_note"] == "稍后再处理"
+
+
+def test_supervisor_audit_log_includes_saved_checklists_and_limit(tmp_path: Path):
+    project_root = make_project(tmp_path, current_chapter=6)
+    service = OrchestrationService(project_root)
+
+    service.save_supervisor_checklist(
+        "# Checklist A",
+        chapter=6,
+        selected_keys=["approval:task-1", "review:task-2"],
+        category_filter="approval",
+        sort_mode="priority",
+        title="第6章开写前清单",
+        note="先处理审批",
+    )
+    service.save_supervisor_checklist(
+        "# Checklist B",
+        chapter=7,
+        selected_keys=["refresh:chapter:7"],
+        category_filter="story_refresh",
+        sort_mode="updated_desc",
+        title="第7章刷新前清单",
+        note="核对 refresh 建议",
+    )
+
+    entries = service.list_supervisor_audit_log(limit=1)
+
+    assert len(entries) == 1
+    assert entries[0]["action"] == "checklist_saved"
+    assert entries[0]["chapter"] == 7
+    assert entries[0]["title"] == "第7章刷新前清单"
+    assert entries[0]["note"] == "核对 refresh 建议"
+    assert entries[0]["selected_count"] == 1
+    assert entries[0]["checklist_path"].startswith(".webnovel/supervisor/checklists/")
+
+
+def test_supervisor_audit_log_normalizes_legacy_fields(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    _write_raw_audit_events(
+        project_root,
+        [
+            {
+                "timestamp": "2026-03-19T10:15:00+00:00",
+                "action": "tracking_updated",
+                "stable_key": "approval:task-1",
+                "source_task_id": "task-1",
+                "linked_task_id": "task-approval-1",
+                "linked_checklist_path": ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md",
+                "status_snapshot": "completed",
+                "category_label": "审批",
+            }
+        ],
+    )
+
+    entries = service.list_supervisor_audit_log(limit=5)
+
+    assert len(entries) == 1
+    assert entries[0]["schema_version"] == 1
+    assert entries[0]["schemaVersion"] == 1
+    assert entries[0]["schema_state"] == "legacy"
+    assert entries[0]["schemaState"] == "legacy"
+    assert entries[0]["schema_supported"] is True
+    assert entries[0]["schemaSupported"] is True
+    assert entries[0]["schema_warning"] == ""
+    assert entries[0]["schemaWarning"] == ""
+    assert entries[0]["stableKey"] == "approval:task-1"
+    assert entries[0]["stable_key"] == "approval:task-1"
+    assert entries[0]["sourceTaskId"] == "task-1"
+    assert entries[0]["source_task_id"] == "task-1"
+    assert entries[0]["linkedTaskId"] == "task-approval-1"
+    assert entries[0]["linked_task_id"] == "task-approval-1"
+    assert entries[0]["linkedChecklistPath"] == ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md"
+    assert entries[0]["linked_checklist_path"] == ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md"
+    assert entries[0]["checklist_path"] == ".webnovel/supervisor/checklists/checklist-ch0003-20260319-100000.md"
+    assert entries[0]["categoryLabel"] == "审批"
+    assert entries[0]["category_label"] == "审批"
+
+
+def test_supervisor_audit_log_version_matrix_normalizes_v1_and_v2_samples(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    _write_raw_audit_events(
+        project_root,
+        [
+            {
+                "timestamp": "2026-03-19T10:15:00+00:00",
+                "action": "tracking_updated",
+                "stable_key": "approval:task-v1",
+                "source_task_id": "task-v1",
+                "linked_task_id": "task-link-v1",
+                "linked_checklist_path": ".webnovel/supervisor/checklists/checklist-v1.md",
+                "status_snapshot": "completed",
+                "category_label": "审批",
+            },
+            {
+                "schemaVersion": 2,
+                "timestamp": "2026-03-19T10:20:00+00:00",
+                "action": "tracking_updated",
+                "stableKey": "approval:task-v2",
+                "sourceTaskId": "task-v2",
+                "linkedTaskId": "task-link-v2",
+                "linkedChecklistPath": ".webnovel/supervisor/checklists/checklist-v2.md",
+                "status_snapshot": "in_progress",
+                "categoryLabel": "审批",
+            },
+        ],
+    )
+
+    entries = service.list_supervisor_audit_log(limit=10)
+    by_key = {entry["stableKey"]: entry for entry in entries}
+
+    assert by_key["approval:task-v1"]["schema_version"] == 1
+    assert by_key["approval:task-v1"]["schemaVersion"] == 1
+    assert by_key["approval:task-v1"]["schema_state"] == "legacy"
+    assert by_key["approval:task-v1"]["schemaState"] == "legacy"
+    assert by_key["approval:task-v1"]["schemaSupported"] is True
+    assert by_key["approval:task-v1"]["sourceTaskId"] == "task-v1"
+    assert by_key["approval:task-v1"]["source_task_id"] == "task-v1"
+    assert by_key["approval:task-v1"]["linkedTaskId"] == "task-link-v1"
+    assert by_key["approval:task-v1"]["linked_task_id"] == "task-link-v1"
+    assert by_key["approval:task-v1"]["linkedChecklistPath"] == ".webnovel/supervisor/checklists/checklist-v1.md"
+    assert by_key["approval:task-v1"]["linked_checklist_path"] == ".webnovel/supervisor/checklists/checklist-v1.md"
+    assert by_key["approval:task-v1"]["categoryLabel"] == "审批"
+    assert by_key["approval:task-v1"]["category_label"] == "审批"
+
+    assert by_key["approval:task-v2"]["schema_version"] == 2
+    assert by_key["approval:task-v2"]["schemaVersion"] == 2
+    assert by_key["approval:task-v2"]["schema_state"] == "supported"
+    assert by_key["approval:task-v2"]["schemaState"] == "supported"
+    assert by_key["approval:task-v2"]["schemaSupported"] is True
+    assert by_key["approval:task-v2"]["sourceTaskId"] == "task-v2"
+    assert by_key["approval:task-v2"]["source_task_id"] == "task-v2"
+    assert by_key["approval:task-v2"]["linkedTaskId"] == "task-link-v2"
+    assert by_key["approval:task-v2"]["linked_task_id"] == "task-link-v2"
+    assert by_key["approval:task-v2"]["linkedChecklistPath"] == ".webnovel/supervisor/checklists/checklist-v2.md"
+    assert by_key["approval:task-v2"]["linked_checklist_path"] == ".webnovel/supervisor/checklists/checklist-v2.md"
+    assert by_key["approval:task-v2"]["checklist_path"] == ".webnovel/supervisor/checklists/checklist-v2.md"
+    assert by_key["approval:task-v2"]["categoryLabel"] == "审批"
+    assert by_key["approval:task-v2"]["category_label"] == "审批"

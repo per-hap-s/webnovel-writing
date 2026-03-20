@@ -11,6 +11,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test:state": "node --test src/supervisorAuditState.test.js src/operatorAction.test.js src/operatorActionRuntime.test.js src/writingContinuation.test.js src/recoverySemantics.test.js",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"
   },

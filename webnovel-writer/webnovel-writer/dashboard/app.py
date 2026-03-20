@@ -1008,6 +1008,10 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     async def create_guarded_write_task(http_request: Request, request: TaskRequest):
         return _create_task('guarded-write', request, http_request)
 
+    @app.post('/api/tasks/guarded-batch-write')
+    async def create_guarded_batch_write_task(http_request: Request, request: TaskRequest):
+        return _create_task('guarded-batch-write', request, http_request)
+
     @app.post('/api/tasks/review')
     async def create_review_task(http_request: Request, request: TaskRequest):
         return _create_task('review', request, http_request)
@@ -1083,6 +1087,22 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     @app.get('/api/supervisor/checklists')
     def list_supervisor_checklists(request: Request, limit: int = 10):
         return _get_request_orchestrator(request).list_supervisor_checklists(limit=limit)
+
+    @app.get('/api/supervisor/audit-repair-reports')
+    def list_supervisor_audit_repair_reports(request: Request, limit: int = 10):
+        return _get_request_orchestrator(request).list_supervisor_audit_repair_reports(limit=limit)
+
+    @app.get('/api/supervisor/audit-log')
+    def list_supervisor_audit_log(request: Request, limit: int = 200):
+        return _get_request_orchestrator(request).list_supervisor_audit_log(limit=limit)
+
+    @app.get('/api/supervisor/audit-health')
+    def get_supervisor_audit_health(request: Request, issue_limit: int = 20):
+        return _get_request_orchestrator(request).get_supervisor_audit_health(issue_limit=issue_limit)
+
+    @app.get('/api/supervisor/audit-repair-preview')
+    def get_supervisor_audit_repair_preview(request: Request, proposal_limit: int = 20):
+        return _get_request_orchestrator(request).get_supervisor_audit_repair_preview(proposal_limit=proposal_limit)
 
     @app.get('/api/tasks/{task_id}')
     def get_task(task_id: str, request: Request):

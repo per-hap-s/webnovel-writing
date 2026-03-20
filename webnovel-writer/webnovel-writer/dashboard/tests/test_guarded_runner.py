@@ -68,6 +68,10 @@ def guarded_workflow() -> dict:
     return {"name": "guarded-write", "version": 1, "steps": [{"name": "guarded-chapter-runner", "type": "internal"}]}
 
 
+def write_workflow() -> dict:
+    return {"name": "write", "version": 1, "steps": [{"name": "data-sync", "type": "codex"}]}
+
+
 def test_guarded_runner_stops_before_child_when_previous_story_refresh_requests_replan(tmp_path: Path):
     project_root = make_project(tmp_path, current_chapter=1)
     service = OrchestrationService(project_root, runner=SequenceRunner({}))
@@ -76,7 +80,7 @@ def test_guarded_runner_stops_before_child_when_previous_story_refresh_requests_
     artifacts["writeback"] = {
         "story_refresh": {
             "should_refresh": True,
-            "recommended_resume_from": "story-director",
+            "recommended_resume_from": "chapter-director",
             "suggested_action": "refresh before chapter 2",
         }
     }
@@ -91,6 +95,10 @@ def test_guarded_runner_stops_before_child_when_previous_story_refresh_requests_
     assert result["parent_task_id"] == task["id"]
     assert result["trigger_source"] == "guarded-chapter-runner"
     assert result["child_task_id"] is None
+    assert result["operator_actions"][0]["kind"] == "retry-task"
+    assert result["operator_actions"][0]["task_id"] == task["id"]
+    assert result["operator_actions"][0]["resume_from_step"] == "chapter-director"
+    assert result["operator_actions"][1]["kind"] == "launch-task"
     assert len([item for item in service.store.list_tasks(limit=20) if item.get("task_type") == "write"]) == 1
 
 
@@ -112,7 +120,7 @@ def test_guarded_runner_stops_when_child_review_gate_blocks(tmp_path: Path):
         }
     )
     service = OrchestrationService(project_root, runner=runner)
-    write_workflow = {
+    write_workflow_spec = {
         "name": "write",
         "version": 1,
         "steps": [
@@ -126,7 +134,7 @@ def test_guarded_runner_stops_when_child_review_gate_blocks(tmp_path: Path):
             {"name": "review-summary", "type": "internal"},
         ],
     }
-    service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow  # type: ignore[method-assign]
+    service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow_spec  # type: ignore[method-assign]
 
     task = service.run_task_sync("guarded-write", {"chapter": 2, "require_manual_approval": False})
 
@@ -140,13 +148,15 @@ def test_guarded_runner_stops_when_child_review_gate_blocks(tmp_path: Path):
     assert child["trigger_source"] == "guarded-write"
     assert child["status"] == "failed"
     assert child["error"]["code"] == "REVIEW_GATE_BLOCKED"
+    assert result["operator_actions"][0]["kind"] == "open-task"
+    assert result["operator_actions"][0]["task_id"] == child["id"]
 
 
 def test_guarded_runner_stops_when_child_requires_manual_approval(tmp_path: Path):
     project_root = make_project(tmp_path, current_chapter=1)
     runner = SequenceRunner({"context": step_result("context", {"task_brief": {}})})
     service = OrchestrationService(project_root, runner=runner)
-    write_workflow = {
+    write_workflow_spec = {
         "name": "write",
         "version": 1,
         "steps": [
@@ -154,7 +164,7 @@ def test_guarded_runner_stops_when_child_requires_manual_approval(tmp_path: Path
             {"name": "approval-gate", "type": "internal"},
         ],
     }
-    service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow  # type: ignore[method-assign]
+    service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow_spec  # type: ignore[method-assign]
 
     task = service.run_task_sync("guarded-write", {"chapter": 2, "require_manual_approval": True})
 
@@ -166,20 +176,22 @@ def test_guarded_runner_stops_when_child_requires_manual_approval(tmp_path: Path
     assert child["trigger_source"] == "guarded-write"
     assert child["status"] == "awaiting_writeback_approval"
     assert child["approval_status"] == "pending"
+    assert result["operator_actions"][0]["kind"] == "open-task"
+    assert result["operator_actions"][0]["task_id"] == child["id"]
 
 
 def test_guarded_runner_completes_exactly_one_child_chapter_and_proposes_next_step(tmp_path: Path):
     project_root = make_project(tmp_path, current_chapter=1)
     runner = SequenceRunner({"data-sync": step_result("data-sync", {"index_updated": True})})
     service = OrchestrationService(project_root, runner=runner)
-    write_workflow = {
+    write_workflow_spec = {
         "name": "write",
         "version": 1,
         "steps": [
             {"name": "data-sync", "type": "codex"},
         ],
     }
-    service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow  # type: ignore[method-assign]
+    service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow_spec  # type: ignore[method-assign]
 
     def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
         latest = service.store.get_task(task_id) or task
@@ -207,4 +219,58 @@ def test_guarded_runner_completes_exactly_one_child_chapter_and_proposes_next_st
     assert result["safe_to_continue"] is True
     assert result["next_action"]["can_enqueue_next"] is True
     assert result["next_action"]["next_chapter"] == 3
+    assert result["operator_actions"][0]["kind"] == "launch-task"
+    assert result["operator_actions"][0]["task_type"] == "guarded-write"
+    assert result["operator_actions"][1]["kind"] == "launch-task"
+    assert result["operator_actions"][1]["task_type"] == "write"
+    assert result["operator_actions"][2]["kind"] == "open-task"
     assert len(write_tasks) == 1
+
+
+def test_resume_task_emits_resume_contract_and_operator_actions(tmp_path: Path):
+    project_root = make_project(tmp_path, current_chapter=1)
+    resume_content = "Chapter 2 body " * 20
+    runner = SequenceRunner({"data-sync": step_result("data-sync", {"content": resume_content, "summary_content": "chapter 2 summary"})})
+    service = OrchestrationService(project_root, runner=runner)
+    service._load_workflow = lambda task_type: write_workflow() if task_type == "write" else {"name": "resume", "version": 1, "steps": [{"name": "resume", "type": "internal"}]}  # type: ignore[method-assign]
+
+    def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
+        latest = service.store.get_task(task_id) or task
+        artifacts = dict(latest.get("artifacts") or {})
+        artifacts["writeback"] = {
+            "story_refresh": {"should_refresh": False, "suggested_action": ""},
+            "story_alignment": {"satisfied": ["resume"], "missed": [], "deferred": []},
+            "director_alignment": {"satisfied": ["resume"], "missed": [], "deferred": []},
+        }
+        service.store.update_task(task_id, artifacts=artifacts)
+
+    service._apply_write_data_sync = fake_apply_write_data_sync  # type: ignore[method-assign]
+
+    target = service.store.create_task(
+        "write",
+        {"chapter": 2, "mode": "standard", "require_manual_approval": False},
+        write_workflow(),
+    )
+    service.store.update_task(
+        target["id"],
+        status="interrupted",
+        current_step="data-sync",
+        artifacts={
+            "step_results": {
+                "context": {"success": True, "structured_output": {"task_brief": {}}},
+                "draft": {"success": True, "structured_output": {"content": "draft"}},
+                "polish": {"success": True, "structured_output": {"content": "polish"}},
+            }
+        },
+    )
+
+    task = service.run_task_sync("resume", {"mode": "standard", "options": {"target_task_id": target["id"]}})
+    result = (((task.get("artifacts") or {}).get("step_results") or {}).get("resume") or {}).get("structured_output") or {}
+    resumed_target = service.store.get_task(target["id"]) or {}
+
+    assert task["status"] == "completed"
+    assert resumed_target["status"] == "completed"
+    assert result["resume_action"]["kind"] == "resume-existing-task"
+    assert result["resume_action"]["task_id"] == target["id"]
+    assert result["operator_actions"][0]["kind"] == "resume-existing-task"
+    assert result["blocking_reason"] == "resume from data-sync"

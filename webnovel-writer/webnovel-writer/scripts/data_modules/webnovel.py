@@ -151,6 +151,12 @@ def main() -> None:
     p_write.add_argument("--mode", default="standard", choices=["standard", "fast", "minimal"])
     p_write.add_argument("--require-manual-approval", action="store_true")
 
+    p_guarded_batch = sub.add_parser("guarded-batch", help="执行有上限的护栏批量推进")
+    p_guarded_batch.add_argument("start_chapter", type=int)
+    p_guarded_batch.add_argument("--max-chapters", type=int, default=2)
+    p_guarded_batch.add_argument("--mode", default="standard", choices=["standard", "fast", "minimal"])
+    p_guarded_batch.add_argument("--require-manual-approval", action="store_true")
+
     p_review = sub.add_parser("review", help="执行审查工作流")
     p_review.add_argument("chapter_range")
     p_review.add_argument("--mode", default="standard", choices=["standard", "fast", "minimal"])
@@ -187,6 +193,9 @@ def main() -> None:
 
     p_status = sub.add_parser("status", help="转发到 status_reporter.py")
     p_status.add_argument("args", nargs=argparse.REMAINDER)
+
+    p_audit = sub.add_parser("audit", help="转发到 supervisor_audit.py")
+    p_audit.add_argument("args", nargs=argparse.REMAINDER)
 
     p_update_state = sub.add_parser("update-state", help="转发到 update_state.py")
     p_update_state.add_argument("args", nargs=argparse.REMAINDER)
@@ -253,6 +262,21 @@ def main() -> None:
             )
         )
 
+    if tool == "guarded-batch":
+        raise SystemExit(
+            _run_task_sync(
+                "guarded-batch-write",
+                project_root,
+                {
+                    "project_root": str(project_root),
+                    "start_chapter": args.start_chapter,
+                    "max_chapters": args.max_chapters,
+                    "mode": args.mode,
+                    "require_manual_approval": bool(args.require_manual_approval),
+                },
+            )
+        )
+
     if tool == "review":
         raise SystemExit(
             _run_task_sync(
@@ -293,6 +317,8 @@ def main() -> None:
         raise SystemExit(_run_script("workflow_manager.py", [*forward_args, *rest]))
     if tool == "status":
         raise SystemExit(_run_script("status_reporter.py", [*forward_args, *rest]))
+    if tool == "audit":
+        raise SystemExit(_run_script("supervisor_audit.py", [*forward_args, *rest]))
     if tool == "update-state":
         raise SystemExit(_run_script("update_state.py", [*forward_args, *rest]))
     if tool == "backup":

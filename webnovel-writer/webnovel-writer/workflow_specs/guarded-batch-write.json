@@ -1,0 +1,53 @@
+{
+  "name": "guarded-batch-write",
+  "version": 1,
+  "steps": [
+    {
+      "name": "guarded-batch-runner",
+      "type": "internal",
+      "required_output_keys": [
+        "start_chapter",
+        "requested_max_chapters",
+        "completed_chapters",
+        "outcome",
+        "stop_reason",
+        "safe_to_continue",
+        "runs",
+        "next_action"
+      ],
+      "output_schema": {
+        "start_chapter": 1,
+        "requested_max_chapters": 2,
+        "completed_chapters": 0,
+        "outcome": "completed_requested_batch|blocked_story_refresh|blocked_by_review|stopped_for_approval|child_task_failed",
+        "stop_reason": "completed_requested_batch|blocked_story_refresh|blocked_by_review|stopped_for_approval|child_task_failed",
+        "stop_step": "guarded-chapter-runner|story-director|review-summary|approval-gate|data-sync",
+        "last_child_task_id": "string",
+        "last_child_task_status": "string",
+        "safe_to_continue": false,
+        "story_refresh": {},
+        "story_alignment": {},
+        "director_alignment": {},
+        "review_summary": {},
+        "runs": [
+          {
+            "chapter": 1,
+            "task_id": "string",
+            "task_status": "string",
+            "outcome": "string",
+            "safe_to_continue": false,
+            "stop_step": "string",
+            "next_chapter": 2
+          }
+        ],
+        "next_action": {
+          "can_enqueue_next": false,
+          "next_chapter": 2,
+          "next_recommended_chapter": 2,
+          "reason": "string",
+          "suggested_action": "string"
+        }
+      }
+    }
+  ]
+}

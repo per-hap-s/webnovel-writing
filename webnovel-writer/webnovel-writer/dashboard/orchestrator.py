@@ -7,8 +7,9 @@ import logging
 import os
 import re
 import sqlite3
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ DIRECTOR_DIR_NAME = ".webnovel/director"
 STORY_DIRECTOR_DIR_NAME = ".webnovel/story-director"
 SUPERVISOR_DIR_NAME = ".webnovel/supervisor"
 SUPERVISOR_CHECKLISTS_DIR_NAME = f"{SUPERVISOR_DIR_NAME}/checklists"
+SUPERVISOR_AUDIT_LOG_NAME = f"{SUPERVISOR_DIR_NAME}/audit-log.jsonl"
+SUPERVISOR_AUDIT_REPAIR_REPORTS_DIR_NAME = f"{SUPERVISOR_DIR_NAME}/audit-repair-reports"
+SUPERVISOR_AUDIT_SCHEMA_VERSION = 1
+SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION = 2
 SUMMARY_SECTION_PLOT = "## 剧情摘要"
 SUMMARY_SECTION_REVIEW = "## 审查结果"
 SUMMARY_SECTION_ISSUES = "## 主要问题"
@@ -71,6 +76,7 @@ RUNTIME_PHASE_LABELS = {
     "plan": "卷规划",
     "resume": "流程恢复",
     "guarded-chapter-runner": "护栏推进一章",
+    "guarded-batch-runner": "护栏批量推进",
     "story-director": "多章叙事规划",
     "chapter-director": "单章导演决策",
     "context": "上下文准备",
@@ -172,6 +178,7 @@ class OrchestrationService:
         pending_approval = next((task for task in tasks if task.get("task_type") == "write" and task.get("status") == "awaiting_writeback_approval"), None)
         if pending_approval is not None:
             chapter = int((pending_approval.get("request") or {}).get("chapter") or 0)
+            action = {"type": "open-task", "taskId": pending_approval["id"]}
             items.append(
                 self._build_supervisor_item(
                     stable_key=f"approval:{pending_approval['id']}",
@@ -185,8 +192,13 @@ class OrchestrationService:
                     detail="不先处理这个审批，护栏推进无法安全往后继续。",
                     rationale="人工审批是硬阻断，优先级高于继续创建任何新章节任务。",
                     source_task=pending_approval,
-                    action={"type": "open-task", "taskId": pending_approval["id"]},
+                    action=action,
                     action_label="打开待审批任务",
+                    operator_actions=self._build_supervisor_operator_actions(
+                        pending_approval,
+                        action,
+                        "打开待审批任务",
+                    ),
                 )
             )
 
@@ -202,6 +214,7 @@ class OrchestrationService:
         )
         if review_blocked is not None:
             chapter = int((review_blocked.get("request") or {}).get("chapter") or 0)
+            action = {"type": "open-task", "taskId": review_blocked["id"]}
             items.append(
                 self._build_supervisor_item(
                     stable_key=f"review:{review_blocked['id']}",
@@ -215,8 +228,13 @@ class OrchestrationService:
                     detail="先修复审查问题，再考虑继续下一章。",
                     rationale="审查硬阻断说明本章还不满足安全推进条件。",
                     source_task=review_blocked,
-                    action={"type": "open-task", "taskId": review_blocked["id"]},
+                    action=action,
                     action_label="打开阻断任务",
+                    operator_actions=self._build_supervisor_operator_actions(
+                        review_blocked,
+                        action,
+                        "打开阻断任务",
+                    ),
                 )
             )
 
@@ -232,6 +250,15 @@ class OrchestrationService:
         )
         if story_refresh_task is not None:
             chapter = int((story_refresh_task.get("request") or {}).get("chapter") or (current_chapter + 1) or 1)
+            story_refresh_artifacts = story_refresh_task.get("artifacts") or {}
+            story_refresh = (((story_refresh_artifacts.get("writeback") or {}).get("story_refresh") or story_refresh_artifacts.get("story_refresh") or {}))
+            recommended_resume_from = str(story_refresh.get("recommended_resume_from") or "story-director")
+            primary_action = {"type": "retry-story", "taskId": story_refresh_task["id"], "resumeFromStep": recommended_resume_from}
+            secondary_action = {
+                "type": "create-task",
+                "taskType": "write",
+                "payload": self._build_supervisor_task_payload(story_refresh_task, chapter),
+            }
             items.append(
                 self._build_supervisor_item(
                     stable_key=f"refresh:chapter:{chapter}",
@@ -245,14 +272,17 @@ class OrchestrationService:
                     detail="先刷新多章滚动规划，再决定是否继续当前或下一章。",
                     rationale="这是叙事状态主动给出的刷新建议，优先级高于继续盲推章节。",
                     source_task=story_refresh_task,
-                    action={"type": "retry-story", "taskId": story_refresh_task["id"]},
+                    action=primary_action,
                     action_label="从 Story Director 重试",
-                    secondary_action={
-                        "type": "create-task",
-                        "taskType": "write",
-                        "payload": self._build_supervisor_task_payload(story_refresh_task, chapter),
-                    },
+                    secondary_action=secondary_action,
                     secondary_label="创建当前章常规写作",
+                    operator_actions=self._build_supervisor_operator_actions(
+                        story_refresh_task,
+                        primary_action,
+                        "从 Story Director 重试",
+                        secondary_action,
+                        "创建当前章常规写作",
+                    ),
                 )
             )
 
@@ -268,6 +298,12 @@ class OrchestrationService:
         if guarded_continue is not None:
             guarded_result = self._get_supervisor_guarded_result(guarded_continue)
             next_chapter = int((guarded_result.get("next_action") or {}).get("next_chapter") or (current_chapter + 1) or 1)
+            primary_action = {
+                "type": "create-task",
+                "taskType": "guarded-write",
+                "payload": self._build_supervisor_task_payload(guarded_continue, next_chapter),
+            }
+            secondary_action = {"type": "open-task", "taskId": guarded_continue["id"]}
             items.append(
                 self._build_supervisor_item(
                     stable_key=f"guarded-next:chapter:{next_chapter}",
@@ -281,14 +317,88 @@ class OrchestrationService:
                     detail=str((guarded_result.get("next_action") or {}).get("suggested_action") or "可以继续一次只推进一章的护栏写作。"),
                     rationale="上一章没有触发新的 refresh 或审批阻断，当前是最安全的继续窗口。",
                     source_task=guarded_continue,
-                    action={
-                        "type": "create-task",
-                        "taskType": "guarded-write",
-                        "payload": self._build_supervisor_task_payload(guarded_continue, next_chapter),
-                    },
+                    action=primary_action,
                     action_label="继续护栏推进下一章",
-                    secondary_action={"type": "open-task", "taskId": guarded_continue["id"]},
+                    secondary_action=secondary_action,
                     secondary_label="打开护栏任务",
+                    operator_actions=self._build_supervisor_operator_actions(
+                        guarded_continue,
+                        primary_action,
+                        "继续护栏推进下一章",
+                        secondary_action,
+                        "打开护栏任务",
+                    ),
+                )
+            )
+
+        guarded_refresh = next(
+            (
+                task
+                for task in tasks
+                if task.get("task_type") in {"guarded-write", "guarded-batch-write"}
+                and str((self._get_guarded_task_result(task).get("outcome") or "")) == "blocked_story_refresh"
+            ),
+            None,
+        )
+        if guarded_refresh is not None:
+            guarded_result = self._get_guarded_task_result(guarded_refresh)
+            operator_actions = list(guarded_result.get("operator_actions") or [])
+            primary_action, primary_label, secondary_action, secondary_label = self._build_supervisor_action_contract_from_operator_actions(operator_actions)
+            chapter = int((guarded_result.get("chapter") or guarded_result.get("start_chapter") or 0) or 0)
+            is_batch = str(guarded_refresh.get("task_type") or "") == "guarded-batch-write"
+            items.append(
+                self._build_supervisor_item(
+                    stable_key=f"guarded-refresh:{guarded_refresh['id']}",
+                    category="guarded_story_refresh",
+                    category_label="护栏重规划",
+                    priority=35,
+                    tone="warning",
+                    badge="先重规划",
+                    title=(f"第 {chapter or '-'} 章护栏推进建议先重规划" if not is_batch else f"护栏批量推进在第 {chapter or '-'} 章前建议先重规划"),
+                    summary="护栏推进已经因为 story refresh 建议停止。",
+                    detail=str((guarded_result.get("next_action") or {}).get("suggested_action") or "先重规划，再决定是否继续推进。"),
+                    rationale="护栏流程已经显式给出 refresh 结论，恢复动作应以该结论为准。",
+                    source_task=guarded_refresh,
+                    action=primary_action,
+                    action_label=primary_label or "从推荐步骤恢复",
+                    secondary_action=secondary_action,
+                    secondary_label=secondary_label,
+                    operator_actions=operator_actions,
+                )
+            )
+
+        guarded_batch_continue = next(
+            (
+                task
+                for task in tasks
+                if task.get("task_type") == "guarded-batch-write"
+                and str((self._get_guarded_task_result(task).get("outcome") or "")) == "completed_requested_batch"
+            ),
+            None,
+        )
+        if guarded_batch_continue is not None:
+            guarded_result = self._get_guarded_task_result(guarded_batch_continue)
+            operator_actions = list(guarded_result.get("operator_actions") or [])
+            primary_action, primary_label, secondary_action, secondary_label = self._build_supervisor_action_contract_from_operator_actions(operator_actions)
+            next_chapter = int(((guarded_result.get("next_action") or {}).get("next_chapter") or 0) or 0)
+            items.append(
+                self._build_supervisor_item(
+                    stable_key=f"guarded-batch-next:{guarded_batch_continue['id']}",
+                    category="guarded_batch_continue",
+                    category_label="继续批次",
+                    priority=45,
+                    tone="success",
+                    badge="可继续",
+                    title=f"护栏批量推进可从第 {next_chapter or '-'} 章继续下一批",
+                    summary=f"上一批已完成 {int(guarded_result.get('completed_chapters') or 0)} 章。",
+                    detail=str((guarded_result.get("next_action") or {}).get("suggested_action") or "可以继续下一批护栏推进。"),
+                    rationale="当前批次已安全完成请求上限，适合显式发起下一批。",
+                    source_task=guarded_batch_continue,
+                    action=primary_action,
+                    action_label=primary_label or "继续下一批护栏推进",
+                    secondary_action=secondary_action,
+                    secondary_label=secondary_label,
+                    operator_actions=operator_actions,
                 )
             )
 
@@ -299,6 +409,7 @@ class OrchestrationService:
         normalized_key = str(stable_key or "").strip()
         if not normalized_key:
             raise ValueError("stable_key is required")
+        current_item = self._find_supervisor_item_by_key(normalized_key)
         normalized_fingerprint = str(fingerprint or normalized_key).strip() or normalized_key
         normalized_reason = str(reason or "").strip()
         normalized_note = str(note or "").strip()
@@ -312,6 +423,17 @@ class OrchestrationService:
             "note": normalized_note,
         }
         self._write_supervisor_state(state)
+        self._append_supervisor_audit_event(
+            action="dismissed",
+            stable_key=normalized_key,
+            fingerprint=normalized_fingerprint,
+            item=current_item,
+            payload={
+                "status_snapshot": "dismissed",
+                "dismissal_reason": normalized_reason,
+                "dismissal_note": normalized_note,
+            },
+        )
         return {
             "stableKey": normalized_key,
             "fingerprint": normalized_fingerprint,
@@ -347,10 +469,18 @@ class OrchestrationService:
         normalized_key = str(stable_key or "").strip()
         if not normalized_key:
             raise ValueError("stable_key is required")
+        current_item = self._find_supervisor_item_by_key(normalized_key, include_dismissed=True)
         state = self._read_supervisor_state()
         dismissals = state.setdefault("dismissals", {})
         dismissals.pop(normalized_key, None)
         self._write_supervisor_state(state)
+        self._append_supervisor_audit_event(
+            action="undismissed",
+            stable_key=normalized_key,
+            fingerprint=str((current_item or {}).get("fingerprint") or normalized_key),
+            item=current_item,
+            payload={"status_snapshot": "open"},
+        )
         return {
             "stableKey": normalized_key,
             "dismissed": False,
@@ -386,6 +516,7 @@ class OrchestrationService:
         normalized_linked_task_id = str(linked_task_id or "").strip()
         normalized_linked_checklist_path = str(linked_checklist_path or "").strip()
         updated_at = datetime.now(timezone.utc).isoformat()
+        current_item = self._find_supervisor_item_by_key(normalized_key, include_dismissed=True)
         state = self._read_supervisor_state()
         tracking = state.setdefault("tracking", {})
         tracking[normalized_key] = {
@@ -397,6 +528,20 @@ class OrchestrationService:
             "updated_at": updated_at,
         }
         self._write_supervisor_state(state)
+        self._append_supervisor_audit_event(
+            action="tracking_updated",
+            stable_key=normalized_key,
+            fingerprint=normalized_fingerprint,
+            item=current_item,
+            payload={
+                "status_snapshot": normalized_status,
+                "tracking_status": normalized_status,
+                "tracking_note": normalized_note,
+                "linked_task_id": normalized_linked_task_id,
+                "linked_checklist_path": normalized_linked_checklist_path,
+            },
+            timestamp=updated_at,
+        )
         return {
             "stableKey": normalized_key,
             "fingerprint": normalized_fingerprint,
@@ -412,10 +557,18 @@ class OrchestrationService:
         normalized_key = str(stable_key or "").strip()
         if not normalized_key:
             raise ValueError("stable_key is required")
+        current_item = self._find_supervisor_item_by_key(normalized_key, include_dismissed=True)
         state = self._read_supervisor_state()
         tracking = state.setdefault("tracking", {})
         tracking.pop(normalized_key, None)
         self._write_supervisor_state(state)
+        self._append_supervisor_audit_event(
+            action="tracking_cleared",
+            stable_key=normalized_key,
+            fingerprint=str((current_item or {}).get("fingerprint") or normalized_key),
+            item=current_item,
+            payload={"status_snapshot": "open"},
+        )
         return {
             "stableKey": normalized_key,
             "trackingStatus": "",
@@ -465,12 +618,24 @@ class OrchestrationService:
             note=str(note or "").strip(),
         )
         path.write_text(document, encoding="utf-8")
+        relative_path = path.relative_to(self.project_root).as_posix()
+        self._append_supervisor_audit_event(
+            action="checklist_saved",
+            payload={
+                "checklist_path": relative_path,
+                "chapter": normalized_chapter,
+                "title": str(title or "").strip(),
+                "note": str(note or "").strip(),
+                "selected_count": len(normalized_selected_keys),
+            },
+            timestamp=saved_at.isoformat(),
+        )
         return {
             "savedAt": saved_at.isoformat(),
             "chapter": normalized_chapter,
             "filename": path.name,
             "path": str(path),
-            "relativePath": path.relative_to(self.project_root).as_posix(),
+            "relativePath": relative_path,
             "selectedCount": len(normalized_selected_keys),
             "title": str(title or "").strip(),
             "note": str(note or "").strip(),
@@ -509,6 +674,524 @@ class OrchestrationService:
             )
         return items
 
+    def list_supervisor_audit_repair_reports(self, limit: int = 10) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for path in sorted(
+            self._supervisor_audit_repair_reports_dir().glob("repair-report-*.json"),
+            key=lambda candidate: candidate.stat().st_mtime if candidate.exists() else 0,
+            reverse=True,
+        )[: max(1, int(limit or 10))]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            summary = payload.get("summary") or {}
+            items.append(
+                {
+                    "filename": path.name,
+                    "path": str(path),
+                    "relativePath": path.relative_to(self.project_root).as_posix(),
+                    "generatedAt": str(payload.get("generatedAt") or "").strip(),
+                    "changed": bool(payload.get("changed")),
+                    "backupCreated": bool(payload.get("backupCreated")),
+                    "backupPath": str(payload.get("backupPath") or "").strip(),
+                    "auditLogPath": str(payload.get("auditLogPath") or SUPERVISOR_AUDIT_LOG_NAME).strip(),
+                    "droppedCount": int(summary.get("dropped_count") or 0),
+                    "rewrittenCount": int(summary.get("rewritten_count") or 0),
+                    "manualReviewCount": int(summary.get("manual_review_count") or 0),
+                    "keptCount": int(summary.get("kept_count") or 0),
+                    "appliedCount": len(payload.get("appliedProposals") or []),
+                    "skippedCount": len(payload.get("skippedManualReview") or []),
+                    "content": payload,
+                }
+            )
+        return items
+
+    def list_supervisor_audit_log(self, limit: int = 200) -> List[Dict[str, Any]]:
+        path = self._supervisor_audit_log_path()
+        if not path.exists():
+            return []
+        items: List[Dict[str, Any]] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            normalized = self._normalize_supervisor_audit_event(payload)
+            if normalized is not None:
+                items.append(normalized)
+            if len(items) >= max(1, int(limit or 200)):
+                break
+        return items
+
+    def get_supervisor_audit_health(self, issue_limit: int = 20) -> Dict[str, Any]:
+        path = self._supervisor_audit_log_path()
+        if not path.exists():
+            return {
+                "healthy": True,
+                "exists": False,
+                "path": str(path),
+                "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+                "total_lines": 0,
+                "nonempty_lines": 0,
+                "valid_entries": 0,
+                "issue_count": 0,
+                "issueCounts": {},
+                "schemaStateCounts": {},
+                "schemaVersionCounts": {},
+                "issues": [],
+                "latestTimestamp": "",
+                "earliestTimestamp": "",
+            }
+
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            return {
+                "healthy": False,
+                "exists": True,
+                "path": str(path),
+                "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+                "total_lines": 0,
+                "nonempty_lines": 0,
+                "valid_entries": 0,
+                "issue_count": 1,
+                "issueCounts": {"read_error": 1},
+                "schemaStateCounts": {},
+                "schemaVersionCounts": {},
+                "issues": [
+                    {
+                        "code": "read_error",
+                        "severity": "danger",
+                        "message": f"Failed to read audit log: {exc}",
+                    }
+                ],
+                "latestTimestamp": "",
+                "earliestTimestamp": "",
+            }
+
+        issue_cap = max(1, int(issue_limit or 20))
+        issue_counts: Dict[str, int] = {}
+        issues: List[Dict[str, Any]] = []
+        schema_state_counts: Dict[str, int] = {}
+        schema_version_counts: Dict[str, int] = {}
+        valid_entries = 0
+        nonempty_lines = 0
+        earliest_dt: Optional[datetime] = None
+        latest_dt: Optional[datetime] = None
+
+        def _record_issue(code: str, severity: str, message: str, *, line_number: Optional[int] = None, preview: str = "") -> None:
+            issue_counts[code] = int(issue_counts.get(code) or 0) + 1
+            if len(issues) >= issue_cap:
+                return
+            item: Dict[str, Any] = {
+                "code": code,
+                "severity": severity,
+                "message": message,
+            }
+            if line_number is not None:
+                item["line"] = line_number
+            if preview:
+                item["preview"] = preview
+            issues.append(item)
+
+        for line_number, raw_line in enumerate(lines, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            nonempty_lines += 1
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                _record_issue(
+                    "invalid_json",
+                    "danger",
+                    "Audit log line is not valid JSON.",
+                    line_number=line_number,
+                    preview=line[:200],
+                )
+                continue
+
+            normalized = self._normalize_supervisor_audit_event(payload)
+            if normalized is None:
+                _record_issue(
+                    "invalid_payload",
+                    "danger",
+                    "Audit log line is not a JSON object.",
+                    line_number=line_number,
+                    preview=line[:200],
+                )
+                continue
+
+            valid_entries += 1
+            schema_state = str(normalized.get("schemaState") or normalized.get("schema_state") or "").strip() or "unknown"
+            schema_state_counts[schema_state] = int(schema_state_counts.get(schema_state) or 0) + 1
+            schema_version = str(normalized.get("schemaVersion") or normalized.get("schema_version") or "").strip() or "unknown"
+            schema_version_counts[schema_version] = int(schema_version_counts.get(schema_version) or 0) + 1
+
+            timestamp = str(normalized.get("timestamp") or "").strip()
+            parsed_timestamp = self._parse_iso_datetime(timestamp)
+            if not timestamp:
+                _record_issue("missing_timestamp", "warning", "Audit event is missing timestamp.", line_number=line_number)
+            elif parsed_timestamp is None:
+                _record_issue("invalid_timestamp", "warning", "Audit event timestamp is not a valid ISO datetime.", line_number=line_number, preview=timestamp)
+            else:
+                earliest_dt = parsed_timestamp if earliest_dt is None else min(earliest_dt, parsed_timestamp)
+                latest_dt = parsed_timestamp if latest_dt is None else max(latest_dt, parsed_timestamp)
+
+            if not str(normalized.get("action") or "").strip():
+                _record_issue("missing_action", "warning", "Audit event is missing action.", line_number=line_number)
+            if not str(normalized.get("stableKey") or normalized.get("stable_key") or "").strip():
+                _record_issue("missing_stable_key", "warning", "Audit event is missing stableKey.", line_number=line_number)
+            if schema_state == "future":
+                _record_issue(
+                    "future_schema",
+                    "warning",
+                    str(normalized.get("schemaWarning") or normalized.get("schema_warning") or "Audit event uses a future schema version."),
+                    line_number=line_number,
+                )
+
+        return {
+            "healthy": not issue_counts,
+            "exists": True,
+            "path": str(path),
+            "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+            "total_lines": len(lines),
+            "nonempty_lines": nonempty_lines,
+            "valid_entries": valid_entries,
+            "issue_count": sum(issue_counts.values()),
+            "issueCounts": issue_counts,
+            "schemaStateCounts": schema_state_counts,
+            "schemaVersionCounts": schema_version_counts,
+            "issues": issues,
+            "latestTimestamp": latest_dt.isoformat() if latest_dt else "",
+            "earliestTimestamp": earliest_dt.isoformat() if earliest_dt else "",
+        }
+
+    def get_supervisor_audit_repair_preview(self, proposal_limit: int = 20) -> Dict[str, Any]:
+        path = self._supervisor_audit_log_path()
+        if not path.exists():
+            return {
+                "exists": False,
+                "path": str(path),
+                "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+                "total_lines": 0,
+                "nonempty_lines": 0,
+                "repairable_count": 0,
+                "manual_review_count": 0,
+                "actionCounts": {},
+                "proposals": [],
+            }
+
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            return {
+                "exists": True,
+                "path": str(path),
+                "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+                "total_lines": 0,
+                "nonempty_lines": 0,
+                "repairable_count": 0,
+                "manual_review_count": 1,
+                "actionCounts": {"read_error": 1},
+                "proposals": [
+                    {
+                        "line": None,
+                        "action": "manual_review",
+                        "severity": "danger",
+                        "reason": f"Failed to read audit log: {exc}",
+                        "issueCodes": ["read_error"],
+                    }
+                ],
+            }
+
+        proposal_cap = max(1, int(proposal_limit or 20))
+        proposals: List[Dict[str, Any]] = []
+        action_counts: Dict[str, int] = {}
+        nonempty_lines = 0
+        repairable_count = 0
+        manual_review_count = 0
+
+        def _push_proposal(item: Dict[str, Any]) -> None:
+            nonlocal repairable_count, manual_review_count
+            action = str(item.get("action") or "").strip() or "manual_review"
+            action_counts[action] = int(action_counts.get(action) or 0) + 1
+            if action in {"drop_line", "rewrite_normalized_event"}:
+                repairable_count += 1
+            else:
+                manual_review_count += 1
+            if len(proposals) < proposal_cap:
+                proposals.append(item)
+
+        for line_number, raw_line in enumerate(lines, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            nonempty_lines += 1
+            proposal = self._build_supervisor_audit_repair_proposal(raw_line, line_number)
+            if proposal is not None:
+                _push_proposal(proposal)
+
+        return {
+            "exists": True,
+            "path": str(path),
+            "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+            "total_lines": len(lines),
+            "nonempty_lines": nonempty_lines,
+            "repairable_count": repairable_count,
+            "manual_review_count": manual_review_count,
+            "actionCounts": action_counts,
+            "proposals": proposals,
+        }
+
+    def apply_supervisor_audit_repair(self, *, create_backup: bool = True) -> Dict[str, Any]:
+        path = self._supervisor_audit_log_path()
+        if not path.exists():
+            return {
+                "exists": False,
+                "changed": False,
+                "path": str(path),
+                "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+                "backupCreated": False,
+                "backupPath": "",
+                "reportCreated": False,
+                "reportPath": "",
+                "reportRelativePath": "",
+                "total_lines": 0,
+                "nonempty_lines": 0,
+                "dropped_count": 0,
+                "rewritten_count": 0,
+                "manual_review_count": 0,
+                "kept_count": 0,
+            }
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        repaired_lines: List[str] = []
+        applied_proposals: List[Dict[str, Any]] = []
+        skipped_manual_review: List[Dict[str, Any]] = []
+        nonempty_lines = 0
+        dropped_count = 0
+        rewritten_count = 0
+        manual_review_count = 0
+        kept_count = 0
+        changed = False
+
+        for line_number, raw_line in enumerate(lines, start=1):
+            if not raw_line.strip():
+                repaired_lines.append(raw_line)
+                continue
+            nonempty_lines += 1
+            proposal = self._build_supervisor_audit_repair_proposal(raw_line, line_number)
+            if proposal is None:
+                kept_count += 1
+                repaired_lines.append(raw_line)
+                continue
+
+            action = str(proposal.get("action") or "").strip()
+            if action == "drop_line":
+                dropped_count += 1
+                changed = True
+                applied_proposals.append(dict(proposal))
+                continue
+            if action == "rewrite_normalized_event":
+                rewritten_count += 1
+                changed = True
+                applied_proposals.append(dict(proposal))
+                repaired_lines.append(str(proposal.get("outputLine") or raw_line))
+                continue
+
+            manual_review_count += 1
+            kept_count += 1
+            skipped_manual_review.append(dict(proposal))
+            repaired_lines.append(raw_line)
+
+        backup_path = ""
+        report_path = ""
+        if changed:
+            original_content = "\n".join(lines)
+            if create_backup:
+                backup_target = self._supervisor_audit_repair_backup_path()
+                self._write_text_atomically(backup_target, original_content)
+                backup_path = str(backup_target)
+            self._write_text_atomically(path, "\n".join(repaired_lines))
+        report_target = self._supervisor_audit_repair_report_path()
+        report_payload = {
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "auditLogPath": SUPERVISOR_AUDIT_LOG_NAME,
+            "changed": changed,
+            "backupCreated": bool(changed and create_backup and backup_path),
+            "backupPath": backup_path,
+            "summary": {
+                "total_lines": len(lines),
+                "nonempty_lines": nonempty_lines,
+                "dropped_count": dropped_count,
+                "rewritten_count": rewritten_count,
+                "manual_review_count": manual_review_count,
+                "kept_count": kept_count,
+            },
+            "appliedProposals": applied_proposals,
+            "skippedManualReview": skipped_manual_review,
+        }
+        self._write_json_atomically(report_target, report_payload)
+        report_path = str(report_target)
+
+        return {
+            "exists": True,
+            "changed": changed,
+            "path": str(path),
+            "relativePath": SUPERVISOR_AUDIT_LOG_NAME,
+            "backupCreated": bool(changed and create_backup and backup_path),
+            "backupPath": backup_path,
+            "reportCreated": True,
+            "reportPath": report_path,
+            "reportRelativePath": self._relative_project_path(report_target),
+            "total_lines": len(lines),
+            "nonempty_lines": nonempty_lines,
+            "dropped_count": dropped_count,
+            "rewritten_count": rewritten_count,
+            "manual_review_count": manual_review_count,
+            "kept_count": kept_count,
+        }
+
+    def _build_supervisor_audit_repair_proposal(self, raw_line: str, line_number: int) -> Optional[Dict[str, Any]]:
+        line = str(raw_line or "").strip()
+        if not line:
+            return None
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return {
+                "line": line_number,
+                "action": "drop_line",
+                "severity": "danger",
+                "reason": "Line is not valid JSON and cannot be normalized.",
+                "issueCodes": ["invalid_json"],
+                "preview": line[:200],
+            }
+
+        normalized = self._normalize_supervisor_audit_event(payload)
+        if normalized is None:
+            return {
+                "line": line_number,
+                "action": "drop_line",
+                "severity": "danger",
+                "reason": "Line is not a JSON object and cannot be normalized.",
+                "issueCodes": ["invalid_payload"],
+                "preview": line[:200],
+            }
+
+        issue_codes: List[str] = []
+        timestamp = str(normalized.get("timestamp") or "").strip()
+        if not timestamp:
+            issue_codes.append("missing_timestamp")
+        elif self._parse_iso_datetime(timestamp) is None:
+            issue_codes.append("invalid_timestamp")
+        if not str(normalized.get("action") or "").strip():
+            issue_codes.append("missing_action")
+        if not str(normalized.get("stableKey") or normalized.get("stable_key") or "").strip():
+            issue_codes.append("missing_stable_key")
+
+        schema_state = str(normalized.get("schemaState") or normalized.get("schema_state") or "").strip()
+        if schema_state == "future":
+            issue_codes.append("future_schema")
+
+        if issue_codes:
+            return {
+                "line": line_number,
+                "action": "manual_review",
+                "severity": "warning" if "future_schema" in issue_codes else "danger",
+                "reason": "Event has fields that require manual review before any repair.",
+                "issueCodes": issue_codes,
+                "stableKey": str(normalized.get("stableKey") or ""),
+                "schemaVersion": normalized.get("schemaVersion"),
+            }
+
+        if schema_state == "legacy":
+            proposed_event = self._build_supervisor_audit_canonical_event(normalized)
+            return {
+                "line": line_number,
+                "action": "rewrite_normalized_event",
+                "severity": "warning",
+                "reason": "Legacy aliases or missing schema declaration would be rewritten to canonical fields.",
+                "issueCodes": ["legacy_schema"],
+                "stableKey": str(normalized.get("stableKey") or ""),
+                "schemaVersion": normalized.get("schemaVersion"),
+                "proposedEvent": proposed_event,
+                "outputLine": json.dumps(proposed_event, ensure_ascii=False),
+            }
+        return None
+
+    def _build_supervisor_audit_canonical_event(self, normalized: Dict[str, Any]) -> Dict[str, Any]:
+        canonical_rewrite_keys = [
+            "schema_version",
+            "timestamp",
+            "action",
+            "stableKey",
+            "fingerprint",
+            "chapter",
+            "category",
+            "categoryLabel",
+            "priority",
+            "tone",
+            "badge",
+            "title",
+            "summary",
+            "detail",
+            "rationale",
+            "actionLabel",
+            "secondaryLabel",
+            "sourceTaskId",
+            "linkedTaskId",
+            "linkedChecklistPath",
+            "checklist_path",
+            "status_snapshot",
+            "dismissal_reason",
+            "dismissal_note",
+            "tracking_note",
+            "selected_count",
+            "note",
+        ]
+        return {
+            key: normalized[key]
+            for key in canonical_rewrite_keys
+            if key in normalized and normalized.get(key) not in (None, "")
+        }
+
+    def _supervisor_audit_repair_backup_path(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return self._supervisor_audit_log_path().with_name(f"audit-log-repair-{timestamp}.jsonl.bak")
+
+    def _supervisor_audit_repair_reports_dir(self) -> Path:
+        return self.project_root / SUPERVISOR_AUDIT_REPAIR_REPORTS_DIR_NAME
+
+    def _supervisor_audit_repair_report_path(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return self._supervisor_audit_repair_reports_dir() / f"repair-report-{timestamp}.json"
+
+    def _write_text_atomically(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(str(tmp_path), str(path))
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _write_json_atomically(self, path: Path, payload: Dict[str, Any]) -> None:
+        self._write_text_atomically(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
     def _build_supervisor_item(
         self,
         *,
@@ -527,8 +1210,9 @@ class OrchestrationService:
         action_label: str,
         secondary_action: Optional[Dict[str, Any]] = None,
         secondary_label: Optional[str] = None,
+        operator_actions: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        return {
+        item = {
             "stableKey": stable_key,
             "category": category,
             "categoryLabel": category_label,
@@ -547,6 +1231,9 @@ class OrchestrationService:
             "secondaryAction": secondary_action,
             "secondaryLabel": secondary_label,
         }
+        if operator_actions is not None:
+            item["operator_actions"] = operator_actions
+        return item
 
     def _build_supervisor_fingerprint(self, stable_key: str, task: Dict[str, Any]) -> str:
         error = task.get("error") or {}
@@ -595,8 +1282,139 @@ class OrchestrationService:
     def _supervisor_checklists_dir(self) -> Path:
         return self.project_root / SUPERVISOR_CHECKLISTS_DIR_NAME
 
+    def _supervisor_audit_log_path(self) -> Path:
+        return self.project_root / SUPERVISOR_AUDIT_LOG_NAME
+
     def _supervisor_checklist_path(self, chapter: int, saved_at: datetime) -> Path:
         return self._supervisor_checklists_dir() / f"checklist-ch{max(0, int(chapter or 0)):04d}-{saved_at.strftime('%Y%m%d-%H%M%S-%f')}.md"
+
+    def _find_supervisor_item_by_key(self, stable_key: str, *, include_dismissed: bool = True) -> Optional[Dict[str, Any]]:
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key:
+            return None
+        items = self.list_supervisor_recommendations(limit=200, include_dismissed=include_dismissed)
+        return next((item for item in items if str(item.get("stableKey") or "").strip() == normalized_key), None)
+
+    def _append_supervisor_audit_event(
+        self,
+        *,
+        action: str,
+        stable_key: str = "",
+        fingerprint: str = "",
+        item: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        event = {
+            "schema_version": SUPERVISOR_AUDIT_SCHEMA_VERSION,
+            "timestamp": str(timestamp or datetime.now(timezone.utc).isoformat()),
+            "action": str(action or "").strip(),
+            "stableKey": str(stable_key or "").strip(),
+            "fingerprint": str(fingerprint or "").strip(),
+        }
+        if isinstance(item, dict) and item:
+            event.update(
+                {
+                    "chapter": self._extract_supervisor_chapter_number(item),
+                    "category": str(item.get("category") or "").strip(),
+                    "categoryLabel": str(item.get("categoryLabel") or "").strip(),
+                    "priority": int(item.get("priority") or 0),
+                    "tone": str(item.get("tone") or "").strip(),
+                    "badge": str(item.get("badge") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "detail": str(item.get("detail") or "").strip(),
+                    "rationale": str(item.get("rationale") or "").strip(),
+                    "actionLabel": str(item.get("actionLabel") or "").strip(),
+                    "secondaryLabel": str(item.get("secondaryLabel") or "").strip(),
+                    "sourceTaskId": str(item.get("sourceTaskId") or "").strip(),
+                    "linkedTaskId": str(item.get("linkedTaskId") or "").strip(),
+                    "linkedChecklistPath": str(item.get("linkedChecklistPath") or "").strip(),
+                }
+            )
+        if isinstance(payload, dict) and payload:
+            event.update(payload)
+        path = self._supervisor_audit_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def _normalize_supervisor_audit_event(self, payload: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+        normalized = dict(payload)
+        try:
+            schema_version = int(payload.get("schema_version") or payload.get("schemaVersion") or 1)
+        except (TypeError, ValueError):
+            schema_version = 1
+        declared_schema = "schema_version" in payload or "schemaVersion" in payload
+        uses_legacy_aliases = any(
+            key in payload
+            for key in (
+                "stable_key",
+                "source_task_id",
+                "linked_task_id",
+                "linked_checklist_path",
+                "category_label",
+            )
+        )
+        schema_state = "supported"
+        schema_warning = ""
+        if schema_version > SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION:
+            schema_state = "future"
+            schema_warning = (
+                f"Detected audit schema v{schema_version}; current compatibility is only verified "
+                f"through v{SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION}."
+            )
+        elif uses_legacy_aliases or not declared_schema:
+            schema_state = "legacy"
+        normalized["schema_version"] = schema_version
+        normalized["schemaVersion"] = schema_version
+        normalized["schema_state"] = schema_state
+        normalized["schemaState"] = schema_state
+        normalized["schema_supported"] = schema_state != "future"
+        normalized["schemaSupported"] = schema_state != "future"
+        normalized["schema_warning"] = schema_warning
+        normalized["schemaWarning"] = schema_warning
+
+        def _mirror_text_field(camel_key: str, snake_key: str) -> None:
+            value = str(payload.get(camel_key) or payload.get(snake_key) or "").strip()
+            if not value:
+                return
+            normalized[camel_key] = value
+            normalized[snake_key] = value
+
+        _mirror_text_field("stableKey", "stable_key")
+        _mirror_text_field("sourceTaskId", "source_task_id")
+        _mirror_text_field("linkedTaskId", "linked_task_id")
+        _mirror_text_field("linkedChecklistPath", "linked_checklist_path")
+        _mirror_text_field("categoryLabel", "category_label")
+
+        if normalized.get("linkedChecklistPath"):
+            normalized["checklist_path"] = normalized["linkedChecklistPath"]
+        elif payload.get("checklist_path"):
+            normalized["checklist_path"] = str(payload.get("checklist_path") or "").strip()
+            if normalized["checklist_path"]:
+                normalized["linkedChecklistPath"] = normalized["checklist_path"]
+                normalized["linked_checklist_path"] = normalized["checklist_path"]
+
+        normalized["timestamp"] = str(payload.get("timestamp") or "").strip()
+        normalized["action"] = str(payload.get("action") or "").strip()
+        normalized["fingerprint"] = str(payload.get("fingerprint") or "").strip()
+        normalized["category"] = str(payload.get("category") or "").strip()
+        normalized["categoryLabel"] = str(payload.get("categoryLabel") or payload.get("category_label") or "").strip()
+        normalized["status_snapshot"] = str(payload.get("status_snapshot") or "").strip()
+        return normalized
+
+    def _extract_supervisor_chapter_number(self, item: Dict[str, Any]) -> int:
+        title = str((item or {}).get("title") or "")
+        matched = re.search(r"第\s*(\d+)\s*章", title)
+        if matched:
+            try:
+                return int(matched.group(1))
+            except (TypeError, ValueError):
+                return 0
+        return 0
 
     def _build_supervisor_checklist_document(
         self,
@@ -792,13 +1610,7 @@ class OrchestrationService:
         }.get(str(status or "").strip(), "")
 
     def _get_supervisor_guarded_result(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        artifacts = task.get("artifacts") or {}
-        guarded = artifacts.get("guarded_runner")
-        if isinstance(guarded, dict) and guarded:
-            return guarded
-        step_results = artifacts.get("step_results") or {}
-        step_payload = ((step_results.get("guarded-chapter-runner") or {}).get("structured_output") or {})
-        return step_payload if isinstance(step_payload, dict) else {}
+        return self._get_guarded_task_result(task)
 
     def _is_supervisor_guarded_continue_candidate(self, task: Dict[str, Any]) -> bool:
         guarded_result = self._get_supervisor_guarded_result(task)
@@ -818,6 +1630,338 @@ class OrchestrationService:
             "project_root": str(request.get("project_root") or self.project_root),
             "options": request.get("options") if isinstance(request.get("options"), dict) else {},
         }
+
+    def _build_guarded_batch_task_payload(self, task: Dict[str, Any], start_chapter: int) -> Dict[str, Any]:
+        request = task.get("request") or {}
+        return {
+            "start_chapter": max(1, int(start_chapter or 1)),
+            "max_chapters": max(1, int(request.get("max_chapters") or 1)),
+            "mode": str(request.get("mode") or "standard"),
+            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "project_root": str(request.get("project_root") or self.project_root),
+            "options": request.get("options") if isinstance(request.get("options"), dict) else {},
+        }
+
+    def _get_guarded_task_result(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        artifacts = task.get("artifacts") or {}
+        if str(task.get("task_type") or "") == "guarded-batch-write":
+            guarded = artifacts.get("guarded_batch_runner")
+            if isinstance(guarded, dict) and guarded:
+                return guarded
+            step_results = artifacts.get("step_results") or {}
+            step_payload = ((step_results.get("guarded-batch-runner") or {}).get("structured_output") or {})
+            return step_payload if isinstance(step_payload, dict) else {}
+        guarded = artifacts.get("guarded_runner")
+        if isinstance(guarded, dict) and guarded:
+            return guarded
+        step_results = artifacts.get("step_results") or {}
+        step_payload = ((step_results.get("guarded-chapter-runner") or {}).get("structured_output") or {})
+        return step_payload if isinstance(step_payload, dict) else {}
+
+    def _build_legacy_action_from_operator_action(self, action: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        kind = str(action.get("kind") or "").strip()
+        if kind in {"open-task", "open-blocked-task"} and action.get("task_id"):
+            return {"type": "open-task", "taskId": str(action["task_id"])}
+        if kind == "retry-task" and action.get("task_id"):
+            payload = {"type": "retry-story", "taskId": str(action["task_id"])}
+            if action.get("resume_from_step"):
+                payload["resumeFromStep"] = str(action["resume_from_step"])
+            return payload
+        if kind == "launch-task" and action.get("task_type") and isinstance(action.get("payload"), dict):
+            return {
+                "type": "create-task",
+                "taskType": str(action["task_type"]),
+                "payload": action["payload"],
+            }
+        return None
+
+    def _build_supervisor_action_contract_from_operator_actions(
+        self,
+        operator_actions: List[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], str, Optional[Dict[str, Any]], Optional[str]]:
+        primary_action: Dict[str, Any] = {}
+        primary_label = ""
+        secondary_action: Optional[Dict[str, Any]] = None
+        secondary_label: Optional[str] = None
+        valid_actions = [item for item in operator_actions if isinstance(item, dict)]
+        if valid_actions:
+            first_legacy = self._build_legacy_action_from_operator_action(valid_actions[0]) or {}
+            primary_action = first_legacy
+            primary_label = str(valid_actions[0].get("label") or "")
+        if len(valid_actions) > 1:
+            second_legacy = self._build_legacy_action_from_operator_action(valid_actions[1])
+            if second_legacy is not None:
+                secondary_action = second_legacy
+                secondary_label = str(valid_actions[1].get("label") or "")
+        return primary_action, primary_label, secondary_action, secondary_label
+
+    def _build_operator_action(
+        self,
+        action_id: str,
+        kind: str,
+        label: str,
+        *,
+        variant: str = "secondary",
+        task_id: Optional[str] = None,
+        task_type: Optional[str] = None,
+        resume_from_step: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        disabled: bool = False,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        action = {
+            "id": str(action_id or kind or "operator-action"),
+            "kind": str(kind or "").strip(),
+            "label": str(label or "").strip(),
+            "variant": str(variant or "secondary").strip() or "secondary",
+        }
+        if task_id:
+            action["task_id"] = str(task_id)
+        if task_type:
+            action["task_type"] = str(task_type)
+        if resume_from_step:
+            action["resume_from_step"] = str(resume_from_step)
+        if isinstance(payload, dict) and payload:
+            action["payload"] = payload
+        if disabled:
+            action["disabled"] = True
+        if reason:
+            action["reason"] = str(reason)
+        return action
+
+    def _build_operator_action_from_task_action(
+        self,
+        *,
+        action: Dict[str, Any],
+        label: str,
+        variant: str,
+        source_task: Dict[str, Any],
+        suffix: str,
+    ) -> Optional[Dict[str, Any]]:
+        action_type = str(action.get("type") or "").strip()
+        source_task_id = str(source_task.get("id") or "")
+        if action_type == "open-task":
+            return self._build_operator_action(
+                f"{action_type}:{source_task_id}:{suffix}",
+                "open-task",
+                label,
+                variant=variant,
+                task_id=str(action.get("taskId") or ""),
+            )
+        if action_type == "retry-story":
+            return self._build_operator_action(
+                f"{action_type}:{source_task_id}:{suffix}",
+                "retry-task",
+                label,
+                variant=variant,
+                task_id=str(action.get("taskId") or ""),
+                resume_from_step=str(action.get("resumeFromStep") or action.get("resume_from_step") or "story-director"),
+            )
+        if action_type == "create-task":
+            payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+            return self._build_operator_action(
+                f"{action_type}:{source_task_id}:{suffix}",
+                "launch-task",
+                label,
+                variant=variant,
+                task_type=str(action.get("taskType") or ""),
+                payload=payload,
+            )
+        return None
+
+    def _build_supervisor_operator_actions(
+        self,
+        source_task: Dict[str, Any],
+        primary_action: Dict[str, Any],
+        primary_label: str,
+        secondary_action: Optional[Dict[str, Any]] = None,
+        secondary_label: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        actions: List[Dict[str, Any]] = []
+        primary = self._build_operator_action_from_task_action(
+            action=primary_action,
+            label=primary_label,
+            variant="primary",
+            source_task=source_task,
+            suffix="primary",
+        )
+        if primary is not None:
+            actions.append(primary)
+        if secondary_action and secondary_label:
+            secondary = self._build_operator_action_from_task_action(
+                action=secondary_action,
+                label=secondary_label,
+                variant="secondary",
+                source_task=source_task,
+                suffix="secondary",
+            )
+            if secondary is not None:
+                actions.append(secondary)
+        return actions
+
+    def _build_guarded_runner_operator_actions(
+        self,
+        *,
+        task_id: str,
+        chapter: int,
+        outcome: str,
+        child_task_id: Optional[str],
+        next_action: Dict[str, Any],
+        request: Dict[str, Any],
+        child_task_status: Optional[str] = None,
+        blocking_reason: str = "",
+        resume_from_step: str = "story-director",
+    ) -> List[Dict[str, Any]]:
+        actions: List[Dict[str, Any]] = []
+        next_chapter = int(next_action.get("next_chapter") or (chapter + 1))
+        followup_request = {
+            "chapter": next_chapter,
+            "mode": str(request.get("mode") or "standard"),
+            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "project_root": str(request.get("project_root") or self.project_root),
+            "options": request.get("options") if isinstance(request.get("options"), dict) else {},
+        }
+        current_request = {
+            "chapter": chapter,
+            "mode": str(request.get("mode") or "standard"),
+            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "project_root": str(request.get("project_root") or self.project_root),
+            "options": request.get("options") if isinstance(request.get("options"), dict) else {},
+        }
+
+        if outcome == "completed_one_chapter" and bool(next_action.get("can_enqueue_next")):
+            actions.append(
+                self._build_operator_action(
+                    f"guarded:{task_id}:continue-guarded",
+                    "launch-task",
+                    "继续下一章护栏推进",
+                    variant="primary",
+                    task_type="guarded-write",
+                    payload=followup_request,
+                )
+            )
+            actions.append(
+                self._build_operator_action(
+                    f"guarded:{task_id}:create-write",
+                    "launch-task",
+                    "创建下一章常规写作",
+                    variant="secondary",
+                    task_type="write",
+                    payload=followup_request,
+                )
+            )
+            if child_task_id:
+                actions.append(self._build_operator_action(f"guarded:{task_id}:open-child", "open-task", "查看子任务", variant="secondary", task_id=child_task_id, reason=blocking_reason or None))
+            return actions
+
+        if outcome == "blocked_story_refresh":
+            actions.append(
+                self._build_operator_action(
+                    f"guarded:{task_id}:retry-story",
+                    "retry-task",
+                    "从 Story Director 重试当前任务",
+                    variant="primary",
+                    task_id=child_task_id or task_id,
+                    resume_from_step=resume_from_step,
+                    reason=blocking_reason or None,
+                )
+            )
+            actions.append(
+                self._build_operator_action(
+                    f"guarded:{task_id}:create-write",
+                    "launch-task",
+                    "创建当前章常规写作",
+                    variant="secondary",
+                    task_type="write",
+                    payload=current_request,
+                )
+            )
+            if child_task_id:
+                actions.append(self._build_operator_action(f"guarded:{task_id}:open-child", "open-task", "查看子任务", variant="secondary", task_id=child_task_id, reason=blocking_reason or None))
+            return actions
+
+        if outcome in {"blocked_by_review", "stopped_for_approval", "child_task_failed"}:
+            if child_task_id:
+                actions.append(self._build_operator_action(f"guarded:{task_id}:open-child", "open-task", "查看子任务", variant="secondary", task_id=child_task_id, reason=blocking_reason or None))
+            return actions
+
+        if blocking_reason:
+            actions.append(
+                self._build_operator_action(
+                    f"guarded:{task_id}:continue",
+                    "launch-task",
+                    "继续推进",
+                    variant="secondary",
+                    disabled=True,
+                    reason=blocking_reason,
+                )
+            )
+        return actions
+
+    def _build_guarded_batch_operator_actions(
+        self,
+        *,
+        task_id: str,
+        start_chapter: int,
+        completed_chapters: int,
+        requested_max_chapters: int,
+        outcome: str,
+        last_child_task_id: Optional[str],
+        next_action: Dict[str, Any],
+        request: Dict[str, Any],
+        blocking_reason: str = "",
+        resume_from_step: str = "story-director",
+    ) -> List[Dict[str, Any]]:
+        actions: List[Dict[str, Any]] = []
+        next_chapter = int(next_action.get("next_chapter") or (start_chapter + completed_chapters))
+        followup_batch_request = {
+            "start_chapter": next_chapter,
+            "max_chapters": max(1, int(request.get("max_chapters") or requested_max_chapters or 1)),
+            "mode": str(request.get("mode") or "standard"),
+            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "project_root": str(request.get("project_root") or self.project_root),
+            "options": request.get("options") if isinstance(request.get("options"), dict) else {},
+        }
+
+        if outcome == "completed_requested_batch":
+            actions.insert(
+                0,
+                self._build_operator_action(
+                    f"guarded-batch:{task_id}:continue-batch",
+                    "launch-task",
+                    "继续下一批护栏推进",
+                    variant="primary",
+                    task_type="guarded-batch-write",
+                    payload=followup_batch_request,
+                ),
+            )
+            if last_child_task_id:
+                actions.append(self._build_operator_action(f"guarded-batch:{task_id}:open-last-child", "open-task", "查看最后子任务", variant="secondary", task_id=last_child_task_id, reason=blocking_reason or None))
+            return actions
+
+        if outcome == "blocked_story_refresh":
+            actions.insert(
+                0,
+                self._build_operator_action(
+                    f"guarded-batch:{task_id}:retry-story",
+                    "retry-task",
+                    "从 Story Director 重试最后子任务",
+                    variant="primary",
+                    task_id=last_child_task_id,
+                    resume_from_step=resume_from_step,
+                    reason=blocking_reason or None,
+                ),
+            )
+            if last_child_task_id:
+                actions.append(self._build_operator_action(f"guarded-batch:{task_id}:open-last-child", "open-task", "查看最后子任务", variant="secondary", task_id=last_child_task_id, reason=blocking_reason or None))
+            return actions
+
+        if outcome in {"blocked_by_review", "stopped_for_approval", "child_task_failed"}:
+            if last_child_task_id:
+                actions.append(self._build_operator_action(f"guarded-batch:{task_id}:open-last-child", "open-task", "查看最后子任务", variant="secondary", task_id=last_child_task_id, reason=blocking_reason or None))
+            return actions
+
+        return actions
 
     def _with_runtime_status(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_copy = dict(task)
@@ -928,6 +2072,15 @@ class OrchestrationService:
         if task_type == "guarded-write":
             chapter = int(request.get("chapter") or 0)
             return f"护栏推进 · 第 {chapter} 章" if chapter > 0 else "护栏推进下一章"
+        if task_type == "guarded-batch-write":
+            start_chapter = int(request.get("start_chapter") or request.get("chapter") or 0)
+            max_chapters = max(1, int(request.get("max_chapters") or 1))
+            if start_chapter > 0:
+                end_chapter = start_chapter + max_chapters - 1
+                if end_chapter > start_chapter:
+                    return f"护栏批量推进 · 第 {start_chapter}-{end_chapter} 章"
+                return f"护栏批量推进 · 第 {start_chapter} 章"
+            return f"护栏批量推进 · 最多 {max_chapters} 章"
         if task_type == "review":
             chapter_range = str(request.get("chapter_range") or "").strip()
             if chapter_range:
@@ -1689,6 +2842,14 @@ class OrchestrationService:
         target = self._resolve_resume_target_task(task)
         if target is None:
             error_info = {"code": "NO_RESUMABLE_TASK", "message": "No interrupted task is available for resume"}
+            contract = self._build_resume_result_contract(
+                task_id=task_id,
+                target=None,
+                decision={"action": "complete", "reason": error_info["message"], "resume_from_step": None, "target_task_id": None},
+                outcome="blocked",
+                blocking_reason=error_info["message"],
+            )
+            self.store.save_step_result(task_id, step_name, {"success": False, "structured_output": contract})
             self.store.mark_failed(task_id, step_name, error_info)
             self.store.append_event(task_id, "error", "Resume target not found", step_name=step_name, payload=error_info)
             return
@@ -1700,8 +2861,15 @@ class OrchestrationService:
             resume_from_step=decision.get("resume_from_step"),
             resume_reason=decision.get("reason"),
         )
-        self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": decision})
-        self.store.append_event(task_id, "info", "Resume target resolved", step_name=step_name, payload=decision)
+        contract = self._build_resume_result_contract(
+            task_id=task_id,
+            target=target,
+            decision=decision,
+            outcome=str(decision.get("action") or "blocked"),
+            blocking_reason=str(decision.get("reason") or ""),
+        )
+        self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": contract})
+        self.store.append_event(task_id, "info", "Resume target resolved", step_name=step_name, payload=contract)
 
         if decision["action"] == "complete":
             self.store.mark_completed(target["id"])
@@ -1723,6 +2891,14 @@ class OrchestrationService:
                 "code": "RESUME_TARGET_ALREADY_RUNNING",
                 "message": "Resume target task is still running",
             }
+            failure_contract = self._build_resume_result_contract(
+                task_id=task_id,
+                target=target,
+                decision=decision,
+                outcome="blocked",
+                blocking_reason=error_info["message"],
+            )
+            self.store.save_step_result(task_id, step_name, {"success": False, "structured_output": failure_contract})
             self.store.mark_failed(task_id, step_name, error_info)
             self.store.append_event(task_id, "error", "Resume target already running", step_name=step_name, payload={"target_task_id": target["id"]})
             return
@@ -1740,6 +2916,14 @@ class OrchestrationService:
                     "code": "RESUME_SCHEDULE_FAILED",
                     "message": "Resume target could not be scheduled",
                 }
+                failure_contract = self._build_resume_result_contract(
+                    task_id=task_id,
+                    target=target,
+                    decision=decision,
+                    outcome="blocked",
+                    blocking_reason=error_info["message"],
+                )
+                self.store.save_step_result(task_id, step_name, {"success": False, "structured_output": failure_contract})
                 self.store.mark_failed(task_id, step_name, error_info)
                 self.store.append_event(task_id, "error", "Resume schedule failed", step_name=step_name, payload={"target_task_id": target["id"]})
                 return
@@ -1764,6 +2948,14 @@ class OrchestrationService:
             "code": "RESUME_TARGET_FAILED",
             "message": f"Resume target task did not complete successfully: {refreshed_target.get('status')}",
         }
+        failure_contract = self._build_resume_result_contract(
+            task_id=task_id,
+            target=target,
+            decision=decision,
+            outcome="blocked",
+            blocking_reason=error_info["message"],
+        )
+        self.store.save_step_result(task_id, step_name, {"success": False, "structured_output": failure_contract})
         self.store.mark_failed(task_id, step_name, error_info)
         self.store.append_event(task_id, "error", "Resume target failed", step_name=step_name, payload={"target_task_id": target["id"]})
 
@@ -1778,6 +2970,8 @@ class OrchestrationService:
         step_name = step["name"]
         if step_name == "guarded-chapter-runner":
             return await self._run_guarded_chapter_runner(task_id, task)
+        if step_name == "guarded-batch-runner":
+            return await self._run_guarded_batch_runner(task_id, task)
 
         if step_name == "story-director":
             plan = self._build_story_plan(task)
@@ -1879,6 +3073,16 @@ class OrchestrationService:
                     "suggested_action": previous_refresh.get("suggested_action") or "先从 Story Director 重新规划，再决定是否继续下一章。",
                 },
             }
+            result["operator_actions"] = self._build_guarded_runner_operator_actions(
+                task_id=task_id,
+                chapter=chapter,
+                outcome="blocked_story_refresh",
+                child_task_id=None,
+                next_action=result["next_action"],
+                request=request,
+                blocking_reason=str(previous_refresh.get("suggested_action") or "先从 Story Director 重新规划，再决定是否继续下一章。"),
+                resume_from_step=str(previous_refresh.get("recommended_resume_from") or "story-director"),
+            )
             self._persist_guarded_runner_result(task_id, result)
             self.store.append_event(
                 task_id,
@@ -1934,6 +3138,16 @@ class OrchestrationService:
                     "suggested_action": "先批准或拒绝当前 write 子任务的回写，再决定是否继续。",
                 },
             }
+            result["operator_actions"] = self._build_guarded_runner_operator_actions(
+                task_id=task_id,
+                chapter=chapter,
+                outcome="stopped_for_approval",
+                child_task_id=child_task["id"],
+                next_action=result["next_action"],
+                request=request,
+                child_task_status=child_status,
+                blocking_reason=str(result["next_action"]["reason"]),
+            )
             self._persist_guarded_runner_result(task_id, result)
             self.store.append_event(
                 task_id,
@@ -1964,6 +3178,16 @@ class OrchestrationService:
                     "suggested_action": "先修复子任务中的审查问题，再决定是否继续下一章。",
                 },
             }
+            result["operator_actions"] = self._build_guarded_runner_operator_actions(
+                task_id=task_id,
+                chapter=chapter,
+                outcome="blocked_by_review",
+                child_task_id=child_task["id"],
+                next_action=result["next_action"],
+                request=request,
+                child_task_status=child_status,
+                blocking_reason=str(result["next_action"]["reason"]),
+            )
             self._persist_guarded_runner_result(task_id, result)
             self.store.append_event(
                 task_id,
@@ -1979,6 +3203,36 @@ class OrchestrationService:
                 "code": str(child_error.get("code") or "GUARDED_CHILD_TASK_FAILED"),
                 "message": str(child_error.get("message") or f"护栏推进子任务未成功完成：{child_status or 'unknown'}"),
             }
+            failure_reason = str(error_info.get("message") or "")
+            result = {
+                "chapter": chapter,
+                "outcome": "child_task_failed",
+                "stop_step": str(child.get("current_step") or "guarded-chapter-runner"),
+                "parent_task_id": task_id,
+                "trigger_source": "guarded-chapter-runner",
+                "child_task_id": child_task["id"],
+                "child_task_status": child_status,
+                "safe_to_continue": False,
+                "story_refresh": child_story_refresh,
+                "review_summary": child_review_summary,
+                "next_action": {
+                    "can_enqueue_next": False,
+                    "next_chapter": chapter + 1,
+                    "next_recommended_chapter": chapter + 1,
+                    "reason": failure_reason,
+                    "suggested_action": "先修复子任务中的失败问题，再决定是否继续下一章。",
+                },
+            }
+            result["operator_actions"] = self._build_guarded_runner_operator_actions(
+                task_id=task_id,
+                chapter=chapter,
+                outcome="child_task_failed",
+                child_task_id=child_task["id"],
+                next_action=result["next_action"],
+                request=request,
+                child_task_status=child_status,
+                blocking_reason=failure_reason,
+            )
             self.store.mark_failed(task_id, step_name, error_info)
             self.store.append_event(
                 task_id,
@@ -1987,6 +3241,7 @@ class OrchestrationService:
                 step_name=step_name,
                 payload={"chapter": chapter, "child_task_id": child_task["id"], "child_status": child_status, "error_code": error_info["code"]},
             )
+            self._persist_guarded_runner_result(task_id, result, success=False)
             return "failed"
 
         next_action = self._build_guarded_runner_next_action(chapter, child_story_refresh)
@@ -2005,6 +3260,15 @@ class OrchestrationService:
             "review_summary": child_review_summary,
             "next_action": next_action,
         }
+        result["operator_actions"] = self._build_guarded_runner_operator_actions(
+            task_id=task_id,
+            chapter=chapter,
+            outcome="completed_one_chapter",
+            child_task_id=child_task["id"],
+            next_action=next_action,
+            request=request,
+            child_task_status=child_status,
+        )
         self._persist_guarded_runner_result(task_id, result)
         self.store.append_event(
             task_id,
@@ -2015,12 +3279,312 @@ class OrchestrationService:
         )
         return "ok"
 
-    def _persist_guarded_runner_result(self, task_id: str, result: Dict[str, Any]) -> None:
-        self.store.save_step_result(task_id, "guarded-chapter-runner", {"success": True, "structured_output": result})
+    async def _run_guarded_batch_runner(self, task_id: str, task: Dict[str, Any]) -> str:
+        step_name = "guarded-batch-runner"
+        request = dict(task.get("request") or {})
+        start_chapter = self._resolve_guarded_batch_start_chapter(request)
+        requested_max_chapters = self._resolve_guarded_batch_max_chapters(request)
+        request["start_chapter"] = start_chapter
+        request["max_chapters"] = requested_max_chapters
+        self.store.update_task(
+            task_id,
+            request=request,
+            root_task_id=str(task.get("root_task_id") or task_id),
+            trigger_source=str(task.get("trigger_source") or "manual"),
+        )
+
+        root_task_id = str(task.get("root_task_id") or task_id)
+        completed_chapters = 0
+        current_chapter = start_chapter
+        runs: List[Dict[str, Any]] = []
+        latest_result: Dict[str, Any] = {}
+
+        while completed_chapters < requested_max_chapters:
+            child_request = {
+                "chapter": current_chapter,
+                "mode": str(request.get("mode") or "standard"),
+                "require_manual_approval": bool(request.get("require_manual_approval", True)),
+                "project_root": str(request.get("project_root") or self.project_root),
+                "options": request.get("options") if isinstance(request.get("options"), dict) else {},
+            }
+            child_task = self._create_task_record("guarded-write", child_request)
+            child_task = self.store.update_task(
+                child_task["id"],
+                parent_task_id=task_id,
+                parent_step_name=step_name,
+                root_task_id=root_task_id,
+                trigger_source="guarded-batch-write",
+            )
+            self.store.append_event(
+                task_id,
+                "info",
+                "Guarded batch child task created",
+                step_name=step_name,
+                payload={"chapter": current_chapter, "child_task_id": child_task["id"], "completed_chapters": completed_chapters},
+            )
+            await self._run_task(child_task["id"])
+
+            child = self.store.get_task(child_task["id"]) or child_task
+            child_status = str(child.get("status") or "")
+            child_error = child.get("error") or {}
+            child_result = self._get_supervisor_guarded_result(child)
+            child_next_action = child_result.get("next_action") or {}
+            run_record = {
+                "chapter": current_chapter,
+                "task_id": child_task["id"],
+                "task_status": child_status,
+                "outcome": str(child_result.get("outcome") or ""),
+                "safe_to_continue": bool(child_result.get("safe_to_continue")),
+                "stop_step": str(child_result.get("stop_step") or ""),
+                "next_chapter": int(child_next_action.get("next_chapter") or (current_chapter + 1)),
+            }
+            runs.append(run_record)
+
+            if child_status != "completed":
+                failure_reason = str(child_error.get("message") or child_status or "unknown")
+                failure_detail = f"护栏子任务未成功完成：{failure_reason}"
+                latest_result = self._build_guarded_batch_result(
+                    start_chapter=start_chapter,
+                    requested_max_chapters=requested_max_chapters,
+                    completed_chapters=completed_chapters,
+                    outcome="child_task_failed",
+                    stop_reason="child_task_failed",
+                    stop_step=str(child.get("current_step") or child_result.get("stop_step") or "guarded-chapter-runner"),
+                    last_child_task_id=child_task["id"],
+                    last_child_task_status=child_status,
+                    safe_to_continue=False,
+                    runs=runs,
+                    story_refresh=(child.get("artifacts") or {}).get("writeback", {}).get("story_refresh") or {},
+                    story_alignment=(child.get("artifacts") or {}).get("writeback", {}).get("story_alignment") or {},
+                    director_alignment=(child.get("artifacts") or {}).get("writeback", {}).get("director_alignment") or {},
+                    review_summary=(child.get("artifacts") or {}).get("review_summary") or {},
+                    next_action={
+                        "can_enqueue_next": False,
+                        "next_chapter": current_chapter,
+                        "next_recommended_chapter": current_chapter,
+                        "reason": failure_detail,
+                        "suggested_action": "先查看失败的护栏子任务，再决定是否继续批量推进。",
+                    },
+                )
+                latest_result["operator_actions"] = self._build_guarded_batch_operator_actions(
+                    task_id=task_id,
+                    start_chapter=start_chapter,
+                    completed_chapters=completed_chapters,
+                    requested_max_chapters=requested_max_chapters,
+                    outcome="child_task_failed",
+                    last_child_task_id=child_task["id"],
+                    next_action=latest_result["next_action"],
+                    request=request,
+                    blocking_reason=failure_detail,
+                )
+                self._persist_guarded_batch_runner_result(task_id, latest_result, success=False)
+                error_info = {
+                    "code": str(child_error.get("code") or "GUARDED_BATCH_CHILD_TASK_FAILED"),
+                    "message": f"护栏批量推进在第 {current_chapter} 章停止：{failure_detail}",
+                }
+                self.store.mark_failed(task_id, step_name, error_info)
+                self.store.append_event(
+                    task_id,
+                    "error",
+                    "Guarded batch child task failed",
+                    step_name=step_name,
+                    payload={"chapter": current_chapter, "child_task_id": child_task["id"], "child_status": child_status, "error_code": child_error.get("code")},
+                )
+                return "failed"
+
+            if str(child_result.get("outcome") or "") != "completed_one_chapter":
+                latest_result = self._build_guarded_batch_result(
+                    start_chapter=start_chapter,
+                    requested_max_chapters=requested_max_chapters,
+                    completed_chapters=completed_chapters,
+                    outcome=str(child_result.get("outcome") or "child_task_failed"),
+                    stop_reason=str(child_result.get("outcome") or "child_task_failed"),
+                    stop_step=str(child_result.get("stop_step") or "guarded-chapter-runner"),
+                    last_child_task_id=child_task["id"],
+                    last_child_task_status=child_status,
+                    safe_to_continue=False,
+                    runs=runs,
+                    story_refresh=child_result.get("story_refresh") or {},
+                    story_alignment=child_result.get("story_alignment") or {},
+                    director_alignment=child_result.get("director_alignment") or {},
+                    review_summary=child_result.get("review_summary") or {},
+                    next_action=child_next_action,
+                )
+                latest_result["operator_actions"] = self._build_guarded_batch_operator_actions(
+                    task_id=task_id,
+                    start_chapter=start_chapter,
+                    completed_chapters=completed_chapters,
+                    requested_max_chapters=requested_max_chapters,
+                    outcome=str(child_result.get("outcome") or "child_task_failed"),
+                    last_child_task_id=child_task["id"],
+                    next_action=child_next_action,
+                    request=request,
+                    blocking_reason=str(child_next_action.get("reason") or child_result.get("stop_step") or ""),
+                    resume_from_step=str((child_result.get("story_refresh") or {}).get("recommended_resume_from") or "story-director"),
+                )
+                self._persist_guarded_batch_runner_result(task_id, latest_result)
+                self.store.append_event(
+                    task_id,
+                    "warning",
+                    "Guarded batch stopped by child outcome",
+                    step_name=step_name,
+                    payload={"chapter": current_chapter, "child_task_id": child_task["id"], "outcome": child_result.get("outcome")},
+                )
+                return "ok"
+
+            completed_chapters += 1
+            latest_result = self._build_guarded_batch_result(
+                start_chapter=start_chapter,
+                requested_max_chapters=requested_max_chapters,
+                completed_chapters=completed_chapters,
+                outcome="completed_requested_batch" if completed_chapters >= requested_max_chapters else "completed_one_chapter",
+                stop_reason="completed_requested_batch" if completed_chapters >= requested_max_chapters else "in_progress",
+                stop_step=str(child_result.get("stop_step") or "data-sync"),
+                last_child_task_id=child_task["id"],
+                last_child_task_status=child_status,
+                safe_to_continue=bool(child_result.get("safe_to_continue")) and completed_chapters < requested_max_chapters,
+                runs=runs,
+                story_refresh=child_result.get("story_refresh") or {},
+                story_alignment=child_result.get("story_alignment") or {},
+                director_alignment=child_result.get("director_alignment") or {},
+                review_summary=child_result.get("review_summary") or {},
+                next_action=child_next_action,
+            )
+            latest_result["operator_actions"] = self._build_guarded_batch_operator_actions(
+                task_id=task_id,
+                start_chapter=start_chapter,
+                completed_chapters=completed_chapters,
+                requested_max_chapters=requested_max_chapters,
+                outcome="completed_requested_batch" if completed_chapters >= requested_max_chapters else "completed_one_chapter",
+                last_child_task_id=child_task["id"],
+                next_action=child_next_action,
+                request=request,
+            )
+            self._persist_guarded_batch_runner_result(task_id, latest_result)
+
+            if completed_chapters >= requested_max_chapters:
+                latest_result["outcome"] = "completed_requested_batch"
+                latest_result["stop_reason"] = "completed_requested_batch"
+                latest_result["safe_to_continue"] = False
+                latest_result["next_action"] = {
+                    "can_enqueue_next": False,
+                    "next_chapter": int(child_next_action.get("next_chapter") or (current_chapter + 1)),
+                    "next_recommended_chapter": int(child_next_action.get("next_recommended_chapter") or child_next_action.get("next_chapter") or (current_chapter + 1)),
+                    "reason": f"已按请求上限完成 {completed_chapters} 章护栏推进。",
+                    "suggested_action": "如需继续，请根据当前结果再创建下一批护栏推进任务。",
+                }
+                self._persist_guarded_batch_runner_result(task_id, latest_result)
+                self.store.append_event(
+                    task_id,
+                    "info",
+                    "Guarded batch completed requested chapters",
+                    step_name=step_name,
+                    payload={"completed_chapters": completed_chapters, "last_child_task_id": child_task["id"]},
+                )
+                return "ok"
+
+            if not child_result.get("safe_to_continue"):
+                blocked_outcome = "blocked_story_refresh" if (child_result.get("story_refresh") or {}).get("should_refresh") else str(child_result.get("outcome") or "child_task_failed")
+                latest_result["outcome"] = blocked_outcome
+                latest_result["stop_reason"] = blocked_outcome
+                latest_result["safe_to_continue"] = False
+                latest_result["operator_actions"] = self._build_guarded_batch_operator_actions(
+                    task_id=task_id,
+                    start_chapter=start_chapter,
+                    completed_chapters=completed_chapters,
+                    requested_max_chapters=requested_max_chapters,
+                    outcome=blocked_outcome,
+                    last_child_task_id=child_task["id"],
+                    next_action=child_next_action,
+                    request=request,
+                    blocking_reason=str((child_result.get("next_action") or {}).get("reason") or child_result.get("stop_step") or ""),
+                    resume_from_step=str((child_result.get("story_refresh") or {}).get("recommended_resume_from") or "story-director"),
+                )
+                self._persist_guarded_batch_runner_result(task_id, latest_result)
+                self.store.append_event(
+                    task_id,
+                    "warning",
+                    "Guarded batch stopped by child outcome",
+                    step_name=step_name,
+                    payload={"chapter": current_chapter, "child_task_id": child_task["id"], "outcome": child_result.get("outcome")},
+                )
+                return "ok"
+
+            current_chapter = int(child_next_action.get("next_chapter") or (current_chapter + 1))
+
+        return "ok"
+
+    def _build_guarded_batch_result(
+        self,
+        *,
+        start_chapter: int,
+        requested_max_chapters: int,
+        completed_chapters: int,
+        outcome: str,
+        stop_reason: str,
+        stop_step: str,
+        last_child_task_id: str,
+        last_child_task_status: str,
+        safe_to_continue: bool,
+        runs: List[Dict[str, Any]],
+        story_refresh: Dict[str, Any],
+        story_alignment: Dict[str, Any],
+        director_alignment: Dict[str, Any],
+        review_summary: Dict[str, Any],
+        next_action: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "start_chapter": start_chapter,
+            "requested_max_chapters": requested_max_chapters,
+            "completed_chapters": completed_chapters,
+            "outcome": outcome,
+            "stop_reason": stop_reason,
+            "stop_step": stop_step,
+            "last_child_task_id": last_child_task_id,
+            "last_child_task_status": last_child_task_status,
+            "safe_to_continue": safe_to_continue,
+            "story_refresh": story_refresh,
+            "story_alignment": story_alignment,
+            "director_alignment": director_alignment,
+            "review_summary": review_summary,
+            "runs": runs,
+            "next_action": next_action,
+        }
+
+    def _persist_guarded_batch_runner_result(self, task_id: str, result: Dict[str, Any], *, success: bool = True) -> None:
+        self.store.save_step_result(task_id, "guarded-batch-runner", {"success": success, "structured_output": result})
+        latest_task = self.store.get_task(task_id) or {}
+        artifacts = dict(latest_task.get("artifacts") or {})
+        artifacts["guarded_batch_runner"] = result
+        self.store.update_task(task_id, artifacts=artifacts)
+
+    def _persist_guarded_runner_result(self, task_id: str, result: Dict[str, Any], *, success: bool = True) -> None:
+        self.store.save_step_result(task_id, "guarded-chapter-runner", {"success": success, "structured_output": result})
         latest_task = self.store.get_task(task_id) or {}
         artifacts = dict(latest_task.get("artifacts") or {})
         artifacts["guarded_runner"] = result
         self.store.update_task(task_id, artifacts=artifacts)
+
+    def _resolve_guarded_batch_start_chapter(self, request: Dict[str, Any]) -> int:
+        try:
+            requested = int(request.get("start_chapter") or request.get("chapter") or 0)
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            return requested
+        progress = self._read_state_data().get("progress") or {}
+        try:
+            current_chapter = max(0, int(progress.get("current_chapter") or 0))
+        except (TypeError, ValueError):
+            current_chapter = 0
+        return max(1, current_chapter + 1)
+
+    def _resolve_guarded_batch_max_chapters(self, request: Dict[str, Any]) -> int:
+        try:
+            requested = int(request.get("max_chapters") or 1)
+        except (TypeError, ValueError):
+            requested = 1
+        return max(1, requested)
 
     def _resolve_guarded_runner_chapter(self, request: Dict[str, Any]) -> int:
         try:
@@ -4904,6 +6468,58 @@ class OrchestrationService:
             "resume_from_step": resume_from_step,
             "reason": f"resume from {resume_from_step}",
             "target_task_id": target["id"],
+        }
+
+    def _build_resume_result_contract(
+        self,
+        *,
+        task_id: str,
+        target: Optional[Dict[str, Any]],
+        decision: Dict[str, Any],
+        outcome: str,
+        blocking_reason: str = "",
+    ) -> Dict[str, Any]:
+        target_task_id = str((target or {}).get("id") or decision.get("target_task_id") or "")
+        resume_from_step = decision.get("resume_from_step")
+        decision_reason = str(decision.get("reason") or "")
+        if outcome == "complete":
+            resume_action = self._build_operator_action(
+                f"resume:{task_id}:complete",
+                "complete-noop",
+                "无需恢复",
+                variant="secondary",
+                disabled=True,
+                reason=decision_reason,
+            )
+        elif outcome == "resume":
+            resume_action = self._build_operator_action(
+                f"resume:{task_id}:resume",
+                "resume-existing-task",
+                "继续恢复当前任务",
+                variant="primary",
+                task_id=target_task_id or None,
+                resume_from_step=resume_from_step,
+                reason=decision_reason,
+            )
+        else:
+            resume_action = self._build_operator_action(
+                f"resume:{task_id}:blocked",
+                "open-blocked-task",
+                "查看阻塞任务",
+                variant="primary",
+                task_id=target_task_id or None,
+                disabled=not bool(target_task_id),
+                reason=blocking_reason or decision_reason or None,
+            )
+
+        return {
+            "target_task_id": target_task_id,
+            "resume_from_step": resume_from_step,
+            "resume_reason": decision_reason,
+            "blocking_reason": str(blocking_reason or ""),
+            "resume_action": resume_action,
+            "operator_actions": [resume_action],
+            "decision": decision,
         }
 
     def _determine_resume_from_step(self, task: Dict[str, Any]) -> Optional[str]:

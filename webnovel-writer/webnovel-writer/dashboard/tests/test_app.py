@@ -220,6 +220,29 @@ def test_retry_task_accepts_resume_from_step(client: TestClient, mock_orchestrat
     mock_orchestrator.retry_task.assert_called_once_with("task-1", resume_from_step="story-director")
 
 
+def test_create_resume_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):
+    mock_orchestrator.create_task.return_value = {"id": "task-resume-1", "status": "queued", "task_type": "resume"}
+
+    response = client.post("/api/tasks/resume", json={"mode": "standard"})
+
+    assert response.status_code == 200
+    assert response.json()["task_type"] == "resume"
+    mock_orchestrator.create_task.assert_called_once_with(
+        "resume",
+        {
+            "project_root": str(mock_project_root),
+            "chapter": None,
+            "start_chapter": None,
+            "max_chapters": None,
+            "chapter_range": None,
+            "volume": None,
+            "mode": "standard",
+            "require_manual_approval": True,
+            "options": {},
+        },
+    )
+
+
 def test_create_guarded_write_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):
     mock_orchestrator.create_task.return_value = {"id": "task-guarded-1", "status": "queued", "task_type": "guarded-write"}
 
@@ -232,6 +255,34 @@ def test_create_guarded_write_task_calls_orchestrator(client: TestClient, mock_o
         {
             "project_root": str(mock_project_root),
             "chapter": 2,
+            "start_chapter": None,
+            "max_chapters": None,
+            "chapter_range": None,
+            "volume": None,
+            "mode": "standard",
+            "require_manual_approval": False,
+            "options": {},
+        },
+    )
+
+
+def test_create_guarded_batch_write_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):
+    mock_orchestrator.create_task.return_value = {"id": "task-guarded-batch-1", "status": "queued", "task_type": "guarded-batch-write"}
+
+    response = client.post(
+        "/api/tasks/guarded-batch-write",
+        json={"start_chapter": 2, "max_chapters": 3, "mode": "standard", "require_manual_approval": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_type"] == "guarded-batch-write"
+    mock_orchestrator.create_task.assert_called_once_with(
+        "guarded-batch-write",
+        {
+            "project_root": str(mock_project_root),
+            "chapter": None,
+            "start_chapter": 2,
+            "max_chapters": 3,
             "chapter_range": None,
             "volume": None,
             "mode": "standard",
@@ -270,6 +321,7 @@ def test_supervisor_recommendations_endpoint_returns_backend_payload(client: Tes
     payload = response.json()
     assert payload[0]["stableKey"] == "approval:task-1"
     assert payload[0]["action"]["type"] == "open-task"
+    assert "secondaryAction" in payload[0]
     mock_orchestrator.list_supervisor_recommendations.assert_called_once_with(limit=4)
 
 
@@ -961,3 +1013,103 @@ def test_supervisor_checklist_list_endpoint_calls_orchestrator(client: TestClien
     assert payload[0]["selectedCount"] == 2
     assert payload[0]["title"] == "第6章开写前清单"
     mock_orchestrator.list_supervisor_checklists.assert_called_once_with(limit=6)
+
+
+def test_supervisor_audit_repair_reports_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.list_supervisor_audit_repair_reports.return_value = [
+        {
+            "filename": "repair-report-20260320-101500-000001.json",
+            "relativePath": ".webnovel/supervisor/audit-repair-reports/repair-report-20260320-101500-000001.json",
+            "generatedAt": "2026-03-20T10:15:00+00:00",
+            "changed": True,
+            "droppedCount": 1,
+            "rewrittenCount": 2,
+            "manualReviewCount": 1,
+            "content": {"summary": {"dropped_count": 1}},
+        }
+    ]
+
+    response = client.get("/api/supervisor/audit-repair-reports", params={"limit": 6})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["changed"] is True
+    assert payload[0]["rewrittenCount"] == 2
+    mock_orchestrator.list_supervisor_audit_repair_reports.assert_called_once_with(limit=6)
+
+
+def test_supervisor_audit_log_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.list_supervisor_audit_log.return_value = [
+        {
+            "schema_version": 1,
+            "schemaState": "supported",
+            "timestamp": "2026-03-19T10:15:00+00:00",
+            "action": "tracking_updated",
+            "stableKey": "approval:task-1",
+            "category": "approval",
+            "categoryLabel": "审批",
+            "title": "第 3 章待回写审批",
+            "status_snapshot": "completed",
+            "linked_task_id": "task-approval-1",
+        }
+    ]
+
+    response = client.get("/api/supervisor/audit-log", params={"limit": 12})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["action"] == "tracking_updated"
+    assert payload[0]["stableKey"] == "approval:task-1"
+    assert payload[0]["schema_version"] == 1
+    assert payload[0]["schemaState"] == "supported"
+    mock_orchestrator.list_supervisor_audit_log.assert_called_once_with(limit=12)
+
+
+def test_supervisor_audit_health_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.get_supervisor_audit_health.return_value = {
+        "healthy": False,
+        "exists": True,
+        "total_lines": 4,
+        "nonempty_lines": 3,
+        "valid_entries": 2,
+        "issue_count": 1,
+        "issueCounts": {"invalid_json": 1},
+        "schemaStateCounts": {"supported": 1, "future": 1},
+        "schemaVersionCounts": {"1": 1, "3": 1},
+        "issues": [{"code": "invalid_json", "severity": "danger", "line": 2, "message": "bad json"}],
+        "latestTimestamp": "2026-03-19T10:15:00+00:00",
+        "earliestTimestamp": "2026-03-19T10:10:00+00:00",
+    }
+
+    response = client.get("/api/supervisor/audit-health", params={"issue_limit": 8})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["healthy"] is False
+    assert payload["issueCounts"]["invalid_json"] == 1
+    assert payload["issues"][0]["code"] == "invalid_json"
+    mock_orchestrator.get_supervisor_audit_health.assert_called_once_with(issue_limit=8)
+
+
+def test_supervisor_audit_repair_preview_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.get_supervisor_audit_repair_preview.return_value = {
+        "exists": True,
+        "total_lines": 3,
+        "nonempty_lines": 3,
+        "repairable_count": 1,
+        "manual_review_count": 1,
+        "actionCounts": {"rewrite_normalized_event": 1, "manual_review": 1},
+        "proposals": [
+            {"line": 1, "action": "rewrite_normalized_event", "severity": "warning", "reason": "normalize legacy aliases"},
+            {"line": 2, "action": "manual_review", "severity": "danger", "reason": "missing action"},
+        ],
+    }
+
+    response = client.get("/api/supervisor/audit-repair-preview", params={"proposal_limit": 6})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["repairable_count"] == 1
+    assert payload["manual_review_count"] == 1
+    assert payload["proposals"][0]["action"] == "rewrite_normalized_event"
+    mock_orchestrator.get_supervisor_audit_repair_preview.assert_called_once_with(proposal_limit=6)

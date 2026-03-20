@@ -92,6 +92,98 @@ def test_extract_context_forwards_with_resolved_project_root(monkeypatch, tmp_pa
     ]
 
 
+def test_audit_forwards_with_resolved_project_root(monkeypatch, tmp_path):
+    module = _load_webnovel_module()
+
+    book_root = (tmp_path / "book").resolve()
+    called = {}
+
+    def _fake_resolve(explicit_project_root=None):
+        return book_root
+
+    def _fake_run_script(script_name, argv):
+        called["script_name"] = script_name
+        called["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(module, "_resolve_root", _fake_resolve)
+    monkeypatch.setattr(module, "_run_script", _fake_run_script)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "webnovel",
+            "--project-root",
+            str(tmp_path),
+            "audit",
+            "repair-preview",
+            "--proposal-limit",
+            "6",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+
+    assert int(exc.value.code or 0) == 0
+    assert called["script_name"] == "supervisor_audit.py"
+    assert called["argv"] == [
+        "--project-root",
+        str(book_root),
+        "repair-preview",
+        "--proposal-limit",
+        "6",
+    ]
+
+
+def test_guarded_batch_runs_sync_task_with_resolved_project_root(monkeypatch, tmp_path):
+    module = _load_webnovel_module()
+
+    book_root = (tmp_path / "book").resolve()
+    called = {}
+
+    def _fake_resolve(explicit_project_root=None):
+        return book_root
+
+    def _fake_run_task_sync(task_type, project_root, request):
+        called["task_type"] = task_type
+        called["project_root"] = project_root
+        called["request"] = dict(request)
+        return 0
+
+    monkeypatch.setattr(module, "_resolve_root", _fake_resolve)
+    monkeypatch.setattr(module, "_run_task_sync", _fake_run_task_sync)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "webnovel",
+            "--project-root",
+            str(tmp_path),
+            "guarded-batch",
+            "7",
+            "--max-chapters",
+            "3",
+            "--mode",
+            "fast",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+
+    assert int(exc.value.code or 0) == 0
+    assert called["task_type"] == "guarded-batch-write"
+    assert called["project_root"] == book_root
+    assert called["request"] == {
+        "project_root": str(book_root),
+        "start_chapter": 7,
+        "max_chapters": 3,
+        "mode": "fast",
+        "require_manual_approval": False,
+    }
+
+
 def test_quality_trend_report_writes_to_book_root_when_input_is_workspace_root(tmp_path, monkeypatch):
     _ensure_scripts_on_path()
     import quality_trend_report as quality_trend_report_module
