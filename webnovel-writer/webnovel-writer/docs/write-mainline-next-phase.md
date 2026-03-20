@@ -33,8 +33,10 @@ This round extends the write-mainline explanation chain from task detail into sh
 - Task derivation is now split into:
   - `writingTaskDerived.js` for task -> normalized write-context data
   - `writingTaskListSummary.js` for list/overview-safe explanation adapters
+- Continuation labels that drive list/overview blocked-kind derivation are now centralized in a small frontend copy module instead of being compared as scattered string literals.
 - Action buttons are now rendered once from the continuation panel instead of being repeated across guarded and resume subsections.
 - Task detail panels are now split into a dedicated frontend module instead of staying fully inside `appSections.jsx`.
+- Task center is now split into a dedicated container + list + detail shell, so `appSections.jsx` no longer carries task-center state, task-center rendering, and the rest of the dashboard sections in the same component body.
 - Review / approval recovery copy is now aligned through a shared frontend recovery semantics helper so task detail, Supervisor Inbox, and Supervisor Audit do not drift.
 - Task detail, Supervisor Inbox, and Supervisor Audit now reuse the same frontend operator-action runtime helper for launch / retry / open behavior instead of each page carrying its own execution branch logic.
 - Task detail, Supervisor Inbox, and Supervisor Audit now reuse the same frontend action-button renderer, so launch / retry / open controls no longer diverge between surfaces.
@@ -87,7 +89,7 @@ In practice this means the operator can open a task and immediately see:
 
 - Make `write -> guarded-write -> guarded-batch-write` continuation language even more uniform.
 - Keep list and overview surfaces thin adapters over the shared derivation instead of adding per-page explanation branches.
-- If `appSections.jsx` grows again after more task-surface work, split task list / task detail shells only when the file is carrying derivation and multiple render surfaces at once.
+- Keep future task-center work inside the dedicated task-center files instead of re-expanding `appSections.jsx`.
 
 ## Validation
 

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
+import { WRITING_CONTINUATION } from './writingTaskCopy.js'
 
 test('buildWritingTaskListSummary exposes primary action for continuable write tasks', () => {
     const task = {
@@ -19,7 +20,7 @@ test('buildWritingTaskListSummary exposes primary action for continuable write t
 
     const summary = buildWritingTaskListSummary({ task })
 
-    assert.equal(summary.continuationLabel, '可以继续')
+    assert.equal(summary.continuationLabel, WRITING_CONTINUATION.continuable)
     assert.equal(summary.blockedKind, 'continuable')
     assert.equal(summary.primaryActionLabel, '继续第 9 章')
     assert.equal(summary.primaryAction.kind, 'launch-task')
@@ -43,7 +44,7 @@ test('buildWritingTaskListSummary marks guarded review blocks as review-blocked 
 
     const summary = buildWritingTaskListSummary({ task })
 
-    assert.equal(summary.continuationLabel, '不可继续')
+    assert.equal(summary.continuationLabel, WRITING_CONTINUATION.blocked)
     assert.equal(summary.blockedKind, 'review')
     assert.equal(summary.primaryActionLabel, '打开阻断子任务')
     assert.equal(summary.primaryAction.kind, 'open-task')
@@ -94,7 +95,7 @@ test('buildWritingTaskListSummary suppresses noop actions as executable primary 
 
     const summary = buildWritingTaskListSummary({ task })
 
-    assert.equal(summary.continuationLabel, '无需操作')
+    assert.equal(summary.continuationLabel, WRITING_CONTINUATION.noop)
     assert.equal(summary.blockedKind, 'noop')
     assert.equal(summary.primaryAction, null)
     assert.equal(summary.primaryActionLabel, '')

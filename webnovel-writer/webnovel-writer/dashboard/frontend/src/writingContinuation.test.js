@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildTaskContinuationSummary } from './writingContinuation.js'
+import { WRITING_CONTINUATION } from './writingTaskCopy.js'
 
 test('completed write task is marked ready to continue when no blockers remain', () => {
     const summary = buildTaskContinuationSummary({
@@ -27,7 +28,7 @@ test('completed write task is marked ready to continue when no blockers remain',
     })
 
     assert.equal(summary.heading, '当前可继续下一章')
-    assert.equal(summary.continuation, '可以继续')
+    assert.equal(summary.continuation, WRITING_CONTINUATION.continuable)
     assert.match(summary.summary, /已完成写回/)
     assert(summary.reasons.includes('已接入 Story Director 多章规划'))
     assert(summary.reasons.includes('已接入 Chapter Director 单章合同'))
@@ -89,7 +90,7 @@ test('guarded review block is marked as non-continuable', () => {
     })
 
     assert.equal(summary.heading, '继续前必须处理审查阻断')
-    assert.equal(summary.continuation, '不可继续')
+    assert.equal(summary.continuation, WRITING_CONTINUATION.blocked)
     assert.equal(summary.actionLabel, '打开阻断子任务')
     assert.match(summary.summary, /2 个问题/)
 })
@@ -144,6 +145,6 @@ test('resume noop task is marked as no action required', () => {
     })
 
     assert.equal(summary.heading, '当前无需恢复')
-    assert.equal(summary.continuation, '无需操作')
+    assert.equal(summary.continuation, WRITING_CONTINUATION.noop)
     assert.equal(summary.actionLabel, '无需恢复')
 })

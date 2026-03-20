@@ -13,6 +13,7 @@ import {
     translateTaskStatus,
     translateTaskType,
 } from './dashboardPageCommon.jsx'
+import { WRITING_CONTINUATION } from './writingTaskCopy.js'
 
 const fetchJSONMock = vi.fn()
 const postJSONMock = vi.fn()
@@ -96,9 +97,9 @@ test('task list and detail share the same continuation outcome and primary actio
 
     renderTaskCenter([task], task, { onSelectTask, onMutated })
 
-    const taskItem = screen.getByRole('button', { name: /\u64b0\u5199\u7ae0\u8282/ })
-    expect(within(taskItem).getByText('\u53ef\u4ee5\u7ee7\u7eed')).not.toBeNull()
-    expect(screen.getByText(/\u5f53\u524d\u53ef\u7ee7\u7eed\u4e0b\u4e00\u7ae0/)).not.toBeNull()
+    const taskItem = screen.getByRole('button', { name: /撰写章节/ })
+    expect(within(taskItem).getByText(WRITING_CONTINUATION.continuable)).not.toBeNull()
+    expect(screen.getByText(/当前可继续下一章/)).not.toBeNull()
     expect(screen.getAllByText('Launch continuation').length).toBeGreaterThanOrEqual(2)
 
     await user.click(screen.getAllByRole('button', { name: 'Launch continuation' })[0])
@@ -134,11 +135,11 @@ test('guarded review block renders the same blocked reason in task list and deta
 
     renderTaskCenter([task], task)
 
-    const taskItem = screen.getByRole('button', { name: /\u62a4\u680f\u63a8\u8fdb/ })
-    expect(within(taskItem).getByText('\u4e0d\u53ef\u7ee7\u7eed')).not.toBeNull()
-    expect(within(taskItem).getByText(/\u8bb0\u5f55\u4e86 2 \u4e2a\u95ee\u9898/)).not.toBeNull()
-    expect(screen.getByText('\u7ee7\u7eed\u524d\u5fc5\u987b\u5904\u7406\u5ba1\u67e5\u963b\u65ad')).not.toBeNull()
-    expect(screen.getAllByText(/\u8bb0\u5f55\u4e86 2 \u4e2a\u95ee\u9898/).length).toBeGreaterThanOrEqual(2)
+    const taskItem = screen.getByRole('button', { name: /护栏推进/ })
+    expect(within(taskItem).getByText(WRITING_CONTINUATION.blocked)).not.toBeNull()
+    expect(within(taskItem).getByText(/记录了 2 个问题/)).not.toBeNull()
+    expect(screen.getByText('继续前必须处理审查阻断')).not.toBeNull()
+    expect(screen.getAllByText(/记录了 2 个问题/).length).toBeGreaterThanOrEqual(2)
 })
 
 test('guarded batch child failure renders blocked batch summary in task list', () => {
@@ -164,10 +165,10 @@ test('guarded batch child failure renders blocked batch summary in task list', (
 
     renderTaskCenter([task], task)
 
-    const taskItem = screen.getByRole('button', { name: /\u62a4\u680f\u6279\u91cf\u63a8\u8fdb/ })
+    const taskItem = screen.getByRole('button', { name: /护栏批量推进/ })
     const taskCard = taskItem.closest('.task-item')
-    expect(within(taskItem).getByText('\u4e0d\u53ef\u7ee7\u7eed')).not.toBeNull()
-    expect(within(taskItem).getByText(/\u5b50\u4efb\u52a1\u5931\u8d25\u505c\u6b62/)).not.toBeNull()
+    expect(within(taskItem).getByText(WRITING_CONTINUATION.blocked)).not.toBeNull()
+    expect(within(taskItem).getByText(/子任务失败停止/)).not.toBeNull()
     expect(taskCard).not.toBeNull()
     expect(within(taskCard).getByRole('button', { name: '打开失败子任务' })).not.toBeNull()
 })
@@ -196,7 +197,7 @@ test('clicking task list action button does not trigger card selection for the c
 
     renderTaskCenter([task], task, { onSelectTask })
 
-    const taskItem = screen.getByRole('button', { name: /\u62a4\u680f\u63a8\u8fdb/ })
+    const taskItem = screen.getByRole('button', { name: /护栏推进/ })
     const taskCard = taskItem.closest('.task-item')
     expect(taskCard).not.toBeNull()
 
@@ -226,7 +227,7 @@ test('disabled primary action keeps label and renders as disabled in task list',
 
     renderTaskCenter([task], task)
 
-    const taskItem = screen.getByRole('button', { name: /\u6062\u590d\u4efb\u52a1/ })
+    const taskItem = screen.getByRole('button', { name: /恢复任务/ })
     const taskCard = taskItem.closest('.task-item')
     expect(taskCard).not.toBeNull()
     const actionButton = within(taskCard).getByRole('button', { name: 'Open blocked task' })

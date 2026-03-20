@@ -1,4 +1,5 @@
 import { buildTaskContinuationSummary } from './writingContinuation.js'
+import { WRITING_CONTINUATION } from './writingTaskCopy.js'
 import { deriveWritingTaskContext } from './writingTaskDerived.js'
 
 const WRITING_MAINLINE_TASK_TYPES = new Set(['write', 'guarded-write', 'guarded-batch-write', 'resume'])
@@ -15,23 +16,40 @@ function resolvePrimaryAction(actions) {
 }
 
 function resolveBlockedKind(task, derived, detailSummary) {
-    if (detailSummary.continuation === '可以继续') return 'continuable'
-    if (detailSummary.continuation === '无需操作') return 'noop'
-    if (task?.status === 'awaiting_writeback_approval' || derived.guardedRun?.outcome === 'stopped_for_approval' || derived.guardedBatchRun?.outcome === 'stopped_for_approval') {
+    if (detailSummary.continuation === WRITING_CONTINUATION.continuable) return 'continuable'
+    if (detailSummary.continuation === WRITING_CONTINUATION.noop) return 'noop'
+    if (
+        task?.status === 'awaiting_writeback_approval'
+        || derived.guardedRun?.outcome === 'stopped_for_approval'
+        || derived.guardedBatchRun?.outcome === 'stopped_for_approval'
+    ) {
         return 'approval'
     }
-    if (derived.storyRefresh?.should_refresh || derived.guardedRun?.outcome === 'blocked_story_refresh' || derived.guardedBatchRun?.outcome === 'blocked_story_refresh') {
+    if (
+        derived.storyRefresh?.should_refresh
+        || derived.guardedRun?.outcome === 'blocked_story_refresh'
+        || derived.guardedBatchRun?.outcome === 'blocked_story_refresh'
+    ) {
         return 'story-refresh'
     }
-    if (String(task?.error?.code || '').trim() === 'REVIEW_GATE_BLOCKED' || derived.guardedRun?.outcome === 'blocked_by_review' || derived.guardedBatchRun?.outcome === 'blocked_by_review') {
+    if (
+        String(task?.error?.code || '').trim() === 'REVIEW_GATE_BLOCKED'
+        || derived.guardedRun?.outcome === 'blocked_by_review'
+        || derived.guardedBatchRun?.outcome === 'blocked_by_review'
+    ) {
         return 'review'
     }
     if (derived.guardedBatchRun?.outcome === 'child_task_failed') {
         return 'child-task-failed'
     }
-    if (detailSummary.continuation === '等待审批') return 'approval'
-    if (detailSummary.continuation === '等待完成' || detailSummary.continuation === '等待恢复完成') return 'running'
-    if (detailSummary.continuation === '不可继续') return 'blocked'
+    if (detailSummary.continuation === WRITING_CONTINUATION.waitingApproval) return 'approval'
+    if (
+        detailSummary.continuation === WRITING_CONTINUATION.waitingCompletion
+        || detailSummary.continuation === WRITING_CONTINUATION.waitingResumeCompletion
+    ) {
+        return 'running'
+    }
+    if (detailSummary.continuation === WRITING_CONTINUATION.blocked) return 'blocked'
     return 'neutral'
 }
 
@@ -61,6 +79,6 @@ export function buildWritingTaskListSummary({ task, derived = null } = {}) {
         primaryAction,
         primaryActionLabel: primaryAction?.label || '',
         blockedKind: resolveBlockedKind(task, resolved, detailSummary),
-        isContinuable: detailSummary.continuation === '可以继续',
+        isContinuable: detailSummary.continuation === WRITING_CONTINUATION.continuable,
     }
 }
