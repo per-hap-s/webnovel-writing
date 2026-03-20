@@ -234,3 +234,33 @@ test('disabled primary action keeps label and renders as disabled in task list',
     expect(actionButton.getAttribute('disabled')).not.toBeNull()
     expect(actionButton.getAttribute('title')).toBe('missing target_task_id')
 })
+
+test('plan blocked task renders dedicated stopped-for-input copy', () => {
+    const task = {
+        id: 'task-plan-blocked-1',
+        task_type: 'plan',
+        status: 'failed',
+        current_step: 'plan',
+        updated_at: '2026-03-21T10:00:00Z',
+        runtime_status: { phase_label: '待补信息', error_code: 'PLAN_INPUT_BLOCKED' },
+        request: { volume: 1 },
+        error: {
+            code: 'PLAN_INPUT_BLOCKED',
+            message: '规划输入不完整，无法生成可执行卷规划。',
+        },
+        artifacts: {
+            plan_blocked: true,
+            blocking_items: [
+                { field: 'story_logline', label: '故事一句话' },
+                { field: 'volume_1_conflict', label: '第 1 卷核心冲突' },
+            ],
+        },
+    }
+
+    renderTaskCenter([task], task)
+
+    expect(screen.getAllByText('待补资料 / 已停止').length).toBeGreaterThan(0)
+    expect(screen.getByText('规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行 plan。')).not.toBeNull()
+    expect(screen.getByText('故事一句话')).not.toBeNull()
+    expect(screen.getByText('第 1 卷核心冲突')).not.toBeNull()
+})

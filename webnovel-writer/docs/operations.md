@@ -102,3 +102,15 @@ Rules:
 - Read and write it through the shared state access layer in `scripts/data_modules/state_file.py`.
 - Runtime writes must follow `FileLock` + lock-in reread + incremental mutation + atomic write.
 - Do not add new direct `read_text()/write_text()` mutation paths for `.webnovel/state.json`.
+
+## Cold-Start Planning Operations
+
+Bootstrap and first-run planning now follow a fixed minimum-input contract.
+
+Rules:
+
+- `POST /api/project/bootstrap` must seed both `.webnovel/planning-profile.json` and a usable `大纲/总纲.md` skeleton.
+- The recommended first action after bootstrap is to open `Planning Profile`, confirm the generated fields, and save once before running `plan`.
+- `plan` preflight merges inputs in this order: `.webnovel/planning-profile.json` -> `.webnovel/state.json` `planning.project_info` -> `大纲/总纲.md`.
+- If required planning inputs are still missing, `plan` must fail with `PLAN_INPUT_BLOCKED` and include `details.blocking_items`.
+- When `PLAN_INPUT_BLOCKED` is returned, do not expect `大纲/volume-01-plan.md` or `planning.volume_plans[1]` to be updated.

@@ -106,7 +106,7 @@ export function TaskCenterTaskDetail({
                         {liveSelectedTask?.artifacts?.plan_blocked ? (
                             <div className="planning-warning">
                                 <div className="subsection-title">待补信息</div>
-                                <div className="tiny">规划任务未失败，但当前输入不足，需先补录后再重新运行 plan。</div>
+                                <div className="tiny">规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行 plan。</div>
                                 <div className="planning-tags">
                                     {(liveSelectedTask.artifacts.blocking_items || []).map((item, index) => (
                                         <span key={`${item.field || item.label}-${index}`} className="planning-tag">{item.label || item.field || '未命名缺失项'}</span>

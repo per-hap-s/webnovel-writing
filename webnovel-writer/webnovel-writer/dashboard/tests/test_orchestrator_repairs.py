@@ -106,6 +106,10 @@ def make_project(tmp_path: Path) -> Path:
         "planning": {"profile": planning_profile, "readiness": {}},
     }
     (project_root / ".webnovel" / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    (project_root / ".webnovel" / "planning-profile.json").write_text(
+        json.dumps(planning_profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     outline_dir = project_root / OUTLINE_DIR_NAME
     outline_dir.mkdir(parents=True, exist_ok=True)
     (outline_dir / OUTLINE_SUMMARY_FILE).write_text(
@@ -188,6 +192,17 @@ def review_payload(score: float = 91.0) -> dict:
     }
 
 
+def test_bootstrap_profile_defaults_are_cold_start_ready():
+    profile = build_initial_planning_profile(title="夜雨城回档人", genre="都市异能")
+
+    assert profile["protagonist_name"]
+    assert "请先" not in profile["protagonist_identity"]
+    assert "请给" not in profile["protagonist_desire"]
+    assert "请明确" not in profile["ability_cost"]
+    assert "回档" in profile["core_setting"]
+    assert "回档" in profile["story_logline"]
+
+
 def test_plan_task_persists_outline_and_state(tmp_path: Path):
     project_root = make_project(tmp_path)
     runner = MappingRunner(
@@ -214,24 +229,69 @@ def test_plan_task_persists_outline_and_state(tmp_path: Path):
     assert state["planning"]["volume_plans"]["1"]["outline_file"].endswith("volume-01-plan.md")
     plan_bundle = next(bundle for step_name, bundle in runner.prompt_bundles if step_name == "plan")
     assert plan_bundle["input"]["plan_health_check"]["ok"] is True
+    assert plan_bundle["input"]["planning_profile_summary"]["volume_1"]["title"] == "First Rewind in the Rain"
+    assert plan_bundle["input"]["planning_profile_summary"]["protagonist"]["name"] == "Shen Yan"
 
 
-def test_plan_preflight_becomes_completed_but_blocked(tmp_path: Path):
+def test_plan_prompt_prefers_planning_profile_file(tmp_path: Path):
     project_root = make_project(tmp_path)
     state = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
-    state["planning"]["profile"]["volume_1_title"] = ""
-    state["planning"]["profile"]["volume_1_conflict"] = ""
+    state["planning"]["profile"]["protagonist_name"] = "State Name"
     (project_root / ".webnovel" / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    runner = MappingRunner({"plan": {"volume_plan": {"title": "unused"}, "chapters": []}})
+    file_profile = json.loads((project_root / ".webnovel" / "planning-profile.json").read_text(encoding="utf-8"))
+    file_profile["protagonist_name"] = "File Name"
+    (project_root / ".webnovel" / "planning-profile.json").write_text(
+        json.dumps(file_profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    runner = MappingRunner(
+        {
+            "plan": {
+                "volume_plan": {"title": "Volume One", "summary": "The first five chapters establish the cost and first enemy line."},
+                "chapters": [{"chapter": 1, "goal": "Set the hook"}],
+            }
+        }
+    )
     service = make_service(project_root, runner)
 
     task = service.run_task_sync("plan", {"volume": "1"})
 
     assert task["status"] == "completed"
+    plan_bundle = next(bundle for step_name, bundle in runner.prompt_bundles if step_name == "plan")
+    assert plan_bundle["input"]["planning_profile_summary"]["protagonist"]["name"] == "File Name"
+    planning_profile_doc = next(
+        item for item in plan_bundle["project_context"] if item["path"] == ".webnovel/planning-profile.json"
+    )
+    assert "File Name" in planning_profile_doc["content"]
+
+
+def test_plan_preflight_fails_with_plan_input_blocked(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    state = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
+    state["planning"]["profile"]["volume_1_title"] = ""
+    state["planning"]["profile"]["volume_1_conflict"] = ""
+    (project_root / ".webnovel" / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    file_profile = json.loads((project_root / ".webnovel" / "planning-profile.json").read_text(encoding="utf-8"))
+    file_profile["volume_1_title"] = ""
+    file_profile["volume_1_conflict"] = ""
+    (project_root / ".webnovel" / "planning-profile.json").write_text(
+        json.dumps(file_profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    runner = MappingRunner({"plan": {"volume_plan": {"title": "unused"}, "chapters": []}})
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("plan", {"volume": "1"})
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "PLAN_INPUT_BLOCKED"
+    assert task["error"]["details"]["blocking_items"]
     assert task["artifacts"]["plan_blocked"] is True
     assert task["artifacts"]["blocking_items"]
     assert runner.prompt_bundles == []
     assert not (project_root / OUTLINE_DIR_NAME / "volume-01-plan.md").exists()
+    state = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
+    assert "1" not in (state.get("planning", {}).get("volume_plans") or {})
 
 
 def test_plan_blocked_payload_does_not_write_empty_volume_plan(tmp_path: Path):
@@ -251,7 +311,8 @@ def test_plan_blocked_payload_does_not_write_empty_volume_plan(tmp_path: Path):
 
     task = service.run_task_sync("plan", {"volume": "1"})
 
-    assert task["status"] == "completed"
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "PLAN_INPUT_BLOCKED"
     assert task["artifacts"]["plan_blocked"] is True
     assert not (project_root / OUTLINE_DIR_NAME / "volume-01-plan.md").exists()
     state = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
@@ -448,6 +509,10 @@ def test_write_data_sync_persists_structured_settings_into_state_and_index(tmp_p
     chapter_meta = state["chapter_meta"]["0002"]["structured_settings"]
     assert "Rain Broker" in chapter_meta["factions"]
     assert "Temporary patrol window" in chapter_meta["rules"]
+    worldview_text = (project_root / SETTINGS_DIR_NAME / "世界观.md").read_text(encoding="utf-8")
+    power_text = (project_root / SETTINGS_DIR_NAME / "力量体系.md").read_text(encoding="utf-8")
+    assert "Rain Broker" in worldview_text
+    assert "Temporary patrol window" in power_text
 
 
 def test_write_data_sync_enriches_minimal_payload_from_planning_profile(tmp_path: Path):

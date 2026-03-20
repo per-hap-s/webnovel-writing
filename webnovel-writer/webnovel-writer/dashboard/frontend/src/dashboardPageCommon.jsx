@@ -163,7 +163,7 @@ const EXACT_EVENT_MESSAGES = {
 }
 
 const UI_COPY = {
-    planBlockedStatus: '已完成 / 待补资料',
+    planBlockedStatus: '待补资料 / 已停止',
     planBlockedStep: '待补资料',
     approvalNotApplicable: '不适用',
     approvalNotRequired: '本任务无需你处理',
@@ -238,7 +238,7 @@ export function translateStepName(value) {
 }
 
 function isPlanBlockedTask(task) {
-    return Boolean(task?.task_type === 'plan' && task?.status === 'completed' && task?.artifacts?.plan_blocked)
+    return Boolean(task?.task_type === 'plan' && task?.artifacts?.plan_blocked)
 }
 
 export function resolveTaskStatusLabel(task) {

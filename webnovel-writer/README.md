@@ -87,6 +87,12 @@ webnovel init
 设定集/
 ```
 
+初始化完成后，系统会同时写入一份可直接编辑的 `.webnovel/planning-profile.json`，并生成更完整的 `大纲/总纲.md` 最小骨架。默认推荐流程是：
+
+1. 打开 Dashboard 的 `Planning Profile`
+2. 确认并保存规划信息
+3. 再运行 `webnovel plan 1`
+
 ### 4. 配置写作模型和 RAG
 
 推荐优先使用 Dashboard 的 `总览 -> API 接入设置`：
@@ -130,6 +136,8 @@ webnovel write 1
 webnovel review 1-5
 ```
 
+如果首轮 `plan` 仍因输入不足被阻断，任务会返回 `PLAN_INPUT_BLOCKED`，并在错误详情里附带结构化 `blocking_items`。这表示需要补齐规划输入，而不是模型超时或系统异常；此时不会生成或覆盖空壳 `volume-01-plan.md`。
+
 ## Dashboard 当前能力
 
 当前 Dashboard 不再是“纯只读页面”。它包含两类能力：
@@ -140,6 +148,7 @@ webnovel review 1-5
 与启动说明直接相关的几个入口如下：
 
 - `总览 -> 项目创建`
+- `总览 / 控制页 -> Planning Profile`
 - `总览 -> 任务入口`
 - `总览 -> API 接入设置`
 - `任务 -> 任务监控 / 批准回写 / 拒绝回写`
@@ -150,15 +159,19 @@ webnovel review 1-5
 
 如果你不是通过界面，而是要从脚本或外部面板接入，当前后端提供：
 
+- `POST /api/project/bootstrap`
 - `POST /api/settings/llm`
 - `POST /api/settings/rag`
 
 对应保存行为：
 
+- `POST /api/project/bootstrap` 会初始化项目目录、写入最小 `planning-profile` 与总纲骨架，并返回下一步建议到 `Planning Profile`
 - `POST /api/settings/llm` 会更新 `WEBNOVEL_LLM_PROVIDER`、`WEBNOVEL_LLM_BASE_URL`、`WEBNOVEL_LLM_MODEL`、`WEBNOVEL_LLM_API_KEY`
 - `POST /api/settings/rag` 会更新 `WEBNOVEL_RAG_BASE_URL`、`WEBNOVEL_RAG_EMBED_MODEL`、`WEBNOVEL_RAG_RERANK_MODEL`、`WEBNOVEL_RAG_API_KEY`
 
 接口保存位置都是项目根目录 `.env`，不会修改系统级环境变量文件。
+
+`plan` 相关任务如果因为规划资料缺失失败，会统一返回错误码 `PLAN_INPUT_BLOCKED`，并在 `details.blocking_items` 中列出缺失字段。
 
 ## Frontend 门禁与产物
 

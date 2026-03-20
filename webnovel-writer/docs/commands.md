@@ -7,8 +7,14 @@
 产出：
 
 - `.webnovel/state.json`
+- `.webnovel/planning-profile.json`
 - `设定集/`
 - `大纲/总纲.md`
+
+说明：
+
+- 初始化会同时写入首轮 `plan` 可消费的最小 planning profile 和更完整的总纲骨架。
+- 推荐在 Dashboard 的 `Planning Profile` 中先确认并保存这些字段，再执行 `webnovel plan 1`。
 
 ## `webnovel plan [卷号]`
 
@@ -16,10 +22,16 @@
 
 示例：
 
-```bash
+```powershell
 webnovel plan 1
 webnovel plan 2-3
 ```
+
+说明：
+
+- `plan` 在进入模型规划前会先做本地预检，合并读取 `.webnovel/planning-profile.json`、`.webnovel/state.json` 中的 `planning.project_info` 与 `大纲/总纲.md`。
+- 如果输入不足，任务会以 `failed` 结束，错误码固定为 `PLAN_INPUT_BLOCKED`，并在 `details.blocking_items` 中返回缺失项。
+- `PLAN_INPUT_BLOCKED` 时不会生成或覆盖空壳卷规划文件。
 
 ## `webnovel write [章号]`
 
@@ -27,7 +39,7 @@ webnovel plan 2-3
 
 示例：
 
-```bash
+```powershell
 webnovel write 1
 webnovel write 45
 ```
@@ -44,7 +56,7 @@ webnovel write 45
 
 示例：
 
-```bash
+```powershell
 webnovel review 1-5
 webnovel review 45
 ```
@@ -55,7 +67,7 @@ webnovel review 45
 
 示例：
 
-```bash
+```powershell
 webnovel query 萧炎
 webnovel query 伏笔
 webnovel query 紧急
@@ -67,7 +79,7 @@ webnovel query 紧急
 
 示例：
 
-```bash
+```powershell
 webnovel resume
 ```
 
@@ -75,8 +87,8 @@ webnovel resume
 
 When `dashboard/frontend/src/` changes, run:
 
-```bash
-cd dashboard/frontend
+```powershell
+Set-Location .\dashboard\frontend
 npm run build
 ```
 

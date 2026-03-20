@@ -17,6 +17,7 @@ const CODE_MESSAGE_MAP = {
     INTERNAL_ERROR: '服务器内部错误，请稍后重试。',
     PROJECT_BOOTSTRAP_FAILED: '项目初始化失败。',
     PROJECT_BOOTSTRAP_INCOMPLETE: '项目初始化未完成，未生成必要文件。',
+    PLAN_INPUT_BLOCKED: '规划输入待补齐，请先完善规划信息后再运行 plan。',
     LLM_NOT_CONFIGURED: '写作引擎尚未完成配置。',
     LLM_HTTP_ERROR: '写作引擎接口请求失败。',
     LLM_REQUEST_FAILED: '写作引擎接口连接失败。',

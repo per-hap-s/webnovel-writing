@@ -59,6 +59,7 @@ const TASK_TEMPLATES = [
 ]
 
 const DASHBOARD_PAGE_QUERY_KEY = 'page'
+const BOOTSTRAP_HINT_QUERY_KEY = 'bootstrap_hint'
 
 const UI_COPY = {
     overviewPlanningTitle: '规划必填信息',
@@ -75,6 +76,7 @@ const UI_COPY = {
 
 export default function App() {
     const [page, setPage] = useState(() => readDashboardPageFromQuery())
+    const [bootstrapHint, setBootstrapHint] = useState(() => readBootstrapHintFromQuery())
     const [projectInfo, setProjectInfo] = useState(null)
     const [llmStatus, setLlmStatus] = useState(null)
     const [ragStatus, setRagStatus] = useState(null)
@@ -98,6 +100,10 @@ export default function App() {
     useEffect(() => {
         writeDashboardPageToQuery(page)
     }, [page])
+
+    useEffect(() => {
+        writeBootstrapHintToQuery(bootstrapHint)
+    }, [bootstrapHint])
 
     useEffect(() => {
         void reloadServiceStatus()
@@ -272,18 +278,24 @@ export default function App() {
                         llmStatus={llmStatus}
                         ragStatus={ragStatus}
                         tasks={tasks}
+                        bootstrapHint={bootstrapHint}
                         onTaskCreated={handleTaskCreated}
                         onProjectBootstrapped={(response) => {
                             if (response?.project_switch_required && response?.project_root) {
-                                const nextUrl = response.suggested_dashboard_url || `/?project_root=${encodeURIComponent(response.project_root)}`
+                                const nextUrl = response.suggested_dashboard_url || `/?project_root=${encodeURIComponent(response.project_root)}&page=control&bootstrap_hint=planning`
                                 window.location.assign(nextUrl)
                                 return
                             }
+                            setBootstrapHint('planning')
                             setPage('control')
                             scheduleCoreRefresh()
                         }}
                         onOpenTask={handleOpenTask}
                         onTasksMutated={scheduleCoreRefresh}
+                        onPlanningProfileSaved={() => {
+                            setBootstrapHint('')
+                            scheduleCoreRefresh()
+                        }}
                     />
                 )}
                 {page === 'supervisor' && (
@@ -416,6 +428,12 @@ function readDashboardPageFromQuery() {
     return NAV_ITEMS.some((item) => item.id === value) ? value : 'control'
 }
 
+function readBootstrapHintFromQuery() {
+    if (typeof window === 'undefined') return ''
+    const params = new URLSearchParams(window.location.search || '')
+    return String(params.get(BOOTSTRAP_HINT_QUERY_KEY) || '').trim()
+}
+
 function writeDashboardPageToQuery(page) {
     if (typeof window === 'undefined') return
     const params = new URLSearchParams(window.location.search || '')
@@ -424,6 +442,20 @@ function writeDashboardPageToQuery(page) {
         params.delete(DASHBOARD_PAGE_QUERY_KEY)
     } else {
         params.set(DASHBOARD_PAGE_QUERY_KEY, value)
+    }
+    const query = params.toString()
+    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`
+    window.history.replaceState({}, '', nextUrl)
+}
+
+function writeBootstrapHintToQuery(hint) {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search || '')
+    const value = String(hint || '').trim()
+    if (!value) {
+        params.delete(BOOTSTRAP_HINT_QUERY_KEY)
+    } else {
+        params.set(BOOTSTRAP_HINT_QUERY_KEY, value)
     }
     const query = params.toString()
     const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`
@@ -461,7 +493,7 @@ function mapContinuationToneToBadgeTone(tone) {
     return 'muted'
 }
 
-function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, onProjectBootstrapped, onOpenTask, onTasksMutated }) {
+function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
     const [submittingActionKey, setSubmittingActionKey] = useState('')
@@ -574,8 +606,14 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, 
 
             <section className="panel full-span">
                 <div className="panel-title">{UI_COPY.overviewPlanningTitle}</div>
+                {bootstrapHint === 'planning' ? (
+                    <div className="planning-warning subtle">
+                        <div className="subsection-title">下一步建议</div>
+                        <div className="tiny">项目已初始化。下一步先确认并保存规划信息，再运行 `plan`，不需要先手工改总纲。</div>
+                    </div>
+                ) : null}
                 <div className="empty-state">{UI_COPY.planningHint}</div>
-                <PlanningProfileSection onSaved={() => onProjectBootstrapped()} />
+                <PlanningProfileSection onSaved={() => onPlanningProfileSaved?.()} />
             </section>
 
             <section className="panel full-span">

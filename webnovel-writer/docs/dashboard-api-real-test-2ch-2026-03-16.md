@@ -10,6 +10,13 @@
 - 题材：`都市异能`
 - 测试目标：验证 `write` 逐章审批回写闭环在真实后端下能否稳定完成前 2 章，并确认正文、摘要、章节索引、质量指标、状态文件保持一致。
 
+## 历史说明
+
+本文档记录的是第三阶段修复前的真实基线。当前后续验收口径已调整为“首轮 `plan` 冷启动可用”：
+
+- bootstrap 后不再要求先手工补写 `大纲/总纲.md`
+- 首轮 `plan` 如被输入缺失阻断，应返回 `PLAN_INPUT_BLOCKED`，而不是表面 `completed`
+
 ## 测试环境
 - 仓库根目录：`D:\CodexProjects\Project1\webnovel-writer\webnovel-writer`
 - Python：`D:\CodexProjects\Project1\webnovel-writer\.venv\Scripts\python.exe`

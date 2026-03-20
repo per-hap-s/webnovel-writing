@@ -168,6 +168,7 @@ def _ensure_state_schema(state: Dict[str, Any]) -> Dict[str, Any]:
     ps.setdefault("attributes", {})
     planning = state.setdefault("planning", {})
     planning.setdefault("profile", {})
+    planning.setdefault("project_info", {})
     planning.setdefault("readiness", {})
     planning.setdefault("last_blocked", None)
     planning.setdefault("volume_plans", {})
@@ -212,6 +213,7 @@ PLANNING_PROFILE_FIELD_SPECS: List[Dict[str, Any]] = [
 ]
 
 PLANNING_PROFILE_FIELD_MAP = {item["name"]: item for item in PLANNING_PROFILE_FIELD_SPECS}
+PLANNING_PROFILE_FILE = ".webnovel/planning-profile.json"
 PLANNING_PLACEHOLDER_MARKERS = (
     "（待填写）",
     "(待填写)",
@@ -221,6 +223,11 @@ PLANNING_PLACEHOLDER_MARKERS = (
     "TBD",
     "示例",
     "占位",
+    "请先",
+    "请给",
+    "请明确",
+    "可在首轮卷规划中确定",
+    "立场待定",
 )
 
 
@@ -244,6 +251,36 @@ def normalize_planning_profile(raw: Dict[str, Any] | None, *, title: str = "", g
     return profile
 
 
+def planning_profile_path(project_root: Path) -> Path:
+    return project_root / PLANNING_PROFILE_FILE
+
+
+def load_planning_profile(project_root: Path, *, title: str = "", genre: str = "") -> Dict[str, str]:
+    path = planning_profile_path(project_root)
+    if not path.is_file():
+        return normalize_planning_profile({}, title=title, genre=genre)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return normalize_planning_profile(raw, title=title, genre=genre)
+
+
+def save_planning_profile(project_root: Path, profile: Dict[str, Any] | None, *, title: str = "", genre: str = "") -> Dict[str, str]:
+    normalized = normalize_planning_profile(profile, title=title, genre=genre)
+    path = planning_profile_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, normalized, use_lock=False, backup=False)
+    return normalized
+
+
+def _contains_keyword(text: str, keywords: List[str]) -> bool:
+    haystack = (text or "").strip().lower()
+    return any(keyword.lower() in haystack for keyword in keywords if keyword)
+
+
 def build_initial_planning_profile(
     *,
     title: str,
@@ -259,22 +296,144 @@ def build_initial_planning_profile(
     power_system_type: str = "",
     gf_irreversible_cost: str = "",
 ) -> Dict[str, str]:
+    safe_title = title.strip() or "当前项目"
+    safe_genre = genre.strip() or "长篇网文"
+    title_and_genre = f"{safe_title} {safe_genre}"
+    is_rewind_story = _contains_keyword(title_and_genre, ["回档", "回溯", "回环", "rewind", "loop"])
+    is_urban_story = _contains_keyword(title_and_genre, ["都市", "urban", "city", "异能", "supernatural", "悬疑"])
+    is_cultivation_story = _contains_keyword(title_and_genre, ["修仙", "修真", "玄幻", "cultivation", "xianxia"])
+    default_name = protagonist_name.strip()
+    if not default_name:
+        if is_rewind_story:
+            default_name = "沈砚"
+        elif is_cultivation_story:
+            default_name = "陆玄"
+        elif is_urban_story:
+            default_name = "林夜"
+        else:
+            default_name = "林砚"
+
+    if is_rewind_story:
+        default_identity = "雨夜城里值夜班的民间档案修复员"
+        default_initial_state = "他刚被卷入一次只能由自己察觉的异常事件，手里没有稳定资源，还要先保住工作与落脚点。"
+        default_desire = "先用回档能力保命并锁定第一条可验证线索，再查清异常为什么盯上自己。"
+        default_flaw = "习惯独自扛事，越到高压时越不愿把真相告诉他人，导致判断容易失真。"
+        default_core_setting = f"《{safe_title}》的核心设定是主角能在高压时刻短暂回档同一事件窗口，但每次回档都会损伤近期记忆，并让异常势力更快锁定他。"
+        default_ability_cost = "回档可以换一次重新行动的机会，但会永久失去部分近期记忆、扰乱时间感，并抬高下一次异常反噬强度。"
+        default_conflict = "第一卷里，主角必须在记忆代价越来越重之前，查清回档能力与城市异常的来源，同时躲开追索这份能力的制度性力量。"
+        default_climax = "卷末，主角用一次高代价回档换到关键证据和立足筹码，却也因此正式暴露在更大的异常网络面前。"
+        default_characters = "\n".join(
+            [
+                f"{default_name} | 主视角角色 | 自身 | 用回档能力换生机并进入主线",
+                "顾迟 | 现实侧同伴 | 互相试探 | 提供落地行动支点与风险提醒",
+                "调查局巡查官 | 制度性压力 | 潜在敌友 | 代表官方规则与追索",
+            ]
+        )
+        default_factions = "\n".join(
+            [
+                "异常调查局 | 官方监管 | 既可能保护主角，也可能先行控制主角",
+                "雨夜城灰市情报网 | 地下势力 | 提供线索与交易，同时放大代价",
+            ]
+        )
+        default_rules = "\n".join(
+            [
+                "异常只会在高压节点或极端情绪场景中显形，普通人通常看不见全貌。",
+                "主角每次回档只能重来同一事件窗口，且无法跳过已经支付的记忆代价。",
+                "一旦异常被制度力量确认，主角必须在隐匿、合作与利用之间做出选择。",
+            ]
+        )
+        default_foreshadowing = "\n".join(
+            [
+                "第一次异常预警的来源 | 1 | 5 | A",
+                "回档代价为何只落在主角身上 | 1 | 12 | A",
+            ]
+        )
+    elif is_cultivation_story:
+        default_identity = "边缘宗门里天赋普通却不甘沉底的外门弟子"
+        default_initial_state = "他身处资源分配极不公平的修炼环境，稍有失手就会失去继续修行的资格。"
+        default_desire = "先抢到第一份能改变命运的修炼资源，再查清宗门与外界真正的力量格局。"
+        default_flaw = "过于执拗，不愿在看不顺眼的规则前低头，容易把局势推到必须硬扛的地步。"
+        default_core_setting = f"《{safe_title}》围绕一套层级清晰却暗藏代价的修炼体系展开，主角每次突破都必须拿真实代价交换更高层级的机会。"
+        default_ability_cost = "每次越级获益都会透支身体、信誉或人情债，主角不能无限制白拿成长。"
+        default_conflict = "第一卷聚焦主角如何在宗门压制、资源争夺和外部威胁夹击下，抢到第一块真正属于自己的立足之地。"
+        default_climax = "卷末，主角以险胜换来晋升资格，却因此被更高层的势力正式盯上。"
+        default_characters = "\n".join(
+            [
+                f"{default_name} | 主视角角色 | 自身 | 在第一卷完成立足与破局",
+                "执事长老 | 宗门管理者 | 压制主角 | 代表旧秩序压力",
+                "同门盟友 | 可争取伙伴 | 竞争与合作并存 | 帮主角撬开资源入口",
+            ]
+        )
+        default_factions = "\n".join(
+            [
+                "所属宗门 | 资源垄断方 | 给予修炼机会也设置层层门槛",
+                "外部敌对势力 | 竞争者 | 在卷一推动第一次生死压力",
+            ]
+        )
+        default_rules = "\n".join(
+            [
+                "境界提升需要资源、功法与实战验证三者同时成立。",
+                "越级胜利必须付出可持续追踪的代价，不能无限透支。",
+                "宗门层级、资源配额和身份规则会持续影响主角选择。",
+            ]
+        )
+        default_foreshadowing = "\n".join(
+            [
+                "主角体质或机缘的真正来源 | 1 | 10 | A",
+                "宗门内部更大的权力裂缝 | 2 | 15 | B",
+            ]
+        )
+    else:
+        default_identity = "被卷入核心事件的普通人，拥有最接近主线真相的切入口"
+        default_initial_state = "开篇时资源有限、信息残缺，只能一边保全自己一边追查异常源头。"
+        default_desire = "先解决眼前危机并保住立足点，再把零散线索串成能够推动主线的突破口。"
+        default_flaw = "习惯先自己消化风险，不到极限不会求助，导致合作效率偏低。"
+        default_core_setting = f"《{safe_title}》围绕一个会持续放大冲突的核心异常规则展开，主角既是受益者也是首批付代价的人。"
+        default_ability_cost = "主角每次获得额外能力、信息或资源，都必须同步承担不可忽视的副作用或现实后果。"
+        default_conflict = "第一卷需要让主角在个人生存、真相追查和外部压力三条线之间被迫同时行动。"
+        default_climax = "卷末，主角第一次用真实代价换到关键收益，并据此确认更大主线已经展开。"
+        default_characters = "\n".join(
+            [
+                f"{default_name} | 主视角角色 | 自身 | 在第一卷完成开局立柱与冲突进入",
+                "现实侧同伴 | 支点角色 | 逐步建立信任 | 提供行动协助",
+                "阶段敌手 | 第一卷阻力 | 对抗与逼迫并存 | 把主角推向主线",
+            ]
+        )
+        default_factions = "\n".join(
+            [
+                "核心势力 | 与主线直接相关 | 会在第一卷建立与主角的利益关系",
+                "外围势力 | 现实层阻力 | 放大主角在信息与资源上的短板",
+            ]
+        )
+        default_rules = "\n".join(
+            [
+                "世界规则必须可验证，不能只在需要时临时出现。",
+                "主角获得收益时必须同步承受代价或留下后患。",
+                "制度、资源和信息差会持续决定角色站位与风险等级。",
+            ]
+        )
+        default_foreshadowing = "\n".join(
+            [
+                "主线核心异常的第一次显形 | 1 | 8 | A",
+                "阶段敌手背后的真实诉求 | 2 | 10 | B",
+            ]
+        )
     initial = {
-        "story_logline": core_selling_points.strip(),
-        "protagonist_name": protagonist_name.strip(),
-        "protagonist_identity": protagonist_archetype.strip(),
-        "protagonist_initial_state": protagonist_structure.strip(),
-        "protagonist_desire": protagonist_desire.strip(),
-        "protagonist_flaw": protagonist_flaw.strip(),
-        "core_setting": golden_finger_name.strip(),
-        "ability_cost": gf_irreversible_cost.strip(),
-        "volume_1_title": "",
-        "volume_1_conflict": "",
-        "volume_1_climax": "",
-        "major_characters_text": protagonist_name.strip(),
-        "factions_text": factions.strip(),
-        "rules_outline": power_system_type.strip(),
-        "foreshadowing_text": "",
+        "story_logline": core_selling_points.strip() or f"《{safe_title}》讲述{default_name}在{safe_genre}主线里，为了{default_desire}而被迫卷入更大异常与对抗的故事。",
+        "protagonist_name": default_name,
+        "protagonist_identity": protagonist_archetype.strip() or default_identity,
+        "protagonist_initial_state": protagonist_structure.strip() or default_initial_state,
+        "protagonist_desire": protagonist_desire.strip() or default_desire,
+        "protagonist_flaw": protagonist_flaw.strip() or default_flaw,
+        "core_setting": golden_finger_name.strip() or default_core_setting,
+        "ability_cost": gf_irreversible_cost.strip() or default_ability_cost,
+        "volume_1_title": f"{safe_title}·卷一：立足与破局",
+        "volume_1_conflict": default_conflict,
+        "volume_1_climax": default_climax,
+        "major_characters_text": default_characters,
+        "factions_text": factions.strip() or default_factions,
+        "rules_outline": power_system_type.strip() or default_rules,
+        "foreshadowing_text": default_foreshadowing,
     }
     return normalize_planning_profile(initial, title=title, genre=genre)
 
@@ -318,14 +477,24 @@ def evaluate_planning_readiness(profile: Dict[str, Any] | None, *, outline_text:
     ]
     outline_present = [section for section in outline_sections if section in (outline_text or "")]
     outline_missing = [section for section in outline_sections if section not in outline_present]
-    ok = not missing_items
+    outline_missing_items = [
+        {
+            "field": f"outline_section::{section}",
+            "label": section.replace("## ", "").strip(),
+            "format_hint": "请确认总纲骨架中存在该章节。",
+        }
+        for section in outline_missing
+    ]
+    blocking_items = [*missing_items, *outline_missing_items]
+    ok = not blocking_items
     return {
         "ok": ok,
         "status": "ready" if ok else "needs_info",
-        "message": "planning profile ready" if ok else "planning profile is missing required information",
+        "message": "planning profile ready" if ok else "planning input is missing required information",
         "missing_items": missing_items,
+        "blocking_items": blocking_items,
         "missing_fields": [item["field"] for item in missing_items],
-        "missing_count": len(missing_items),
+        "missing_count": len(blocking_items),
         "completed_fields": len(PLANNING_PROFILE_FIELD_SPECS) - len(missing_items),
         "total_required_fields": len(PLANNING_PROFILE_FIELD_SPECS),
         "outline_sections_present": outline_present,
@@ -351,6 +520,17 @@ def _replace_markdown_section(text: str, heading: str, lines: List[str]) -> str:
         return "# 总纲\n\n" + block
 
     pattern = re.compile(rf"(?ms)^({re.escape(heading)}\n)(.*?)(?=^## |\Z)")
+    if pattern.search(text):
+        return pattern.sub(block, text, count=1)
+    base = text.rstrip()
+    if not base.endswith("\n"):
+        base += "\n"
+    return f"{base}\n{block}"
+
+
+def _replace_volume_block(text: str, heading: str, lines: List[str]) -> str:
+    block = "\n".join([heading, *lines]).strip() + "\n"
+    pattern = re.compile(rf"(?ms)^({re.escape(heading)}\n)(.*?)(?=^### |\Z)")
     if pattern.search(text):
         return pattern.sub(block, text, count=1)
     base = text.rstrip()
@@ -409,6 +589,23 @@ def sync_master_outline_with_profile(
         volume_block = _build_master_outline(target_chapters, title=title, genre=genre)
         volume_part = volume_block.split("## 卷结构", 1)[1]
         updated = updated.rstrip() + "\n\n## 卷结构" + volume_part
+    first_volume_heading = next((line.strip() for line in updated.splitlines() if line.startswith("### 第1卷（")), "")
+    if first_volume_heading:
+        key_character = next((line.strip() for line in normalized["major_characters_text"].splitlines() if line.strip()), "")
+        key_faction = next((line.strip() for line in normalized["factions_text"].splitlines() if line.strip()), "")
+        key_foreshadow = next((line.strip() for line in normalized["foreshadowing_text"].splitlines() if line.strip()), "")
+        first_volume_lines = [
+            f"- 卷目标：{normalized['protagonist_desire'] or '在第一卷建立立足点并拿到第一条关键线索'}",
+            f"- 核心冲突：{normalized['volume_1_conflict'] or '主角必须在压力中主动进入主线冲突'}",
+            f"- 升级与代价：{normalized['ability_cost'] or '每次获益都伴随明确代价与后果'}",
+            f"- 关键爽点：{normalized['story_logline'] or '主角在高压环境中第一次完成有效破局'}",
+            f"- 阶段敌手/阻力：{key_faction or '第一卷的制度压力、资源短缺与阶段敌手同步施压'}",
+            f"- 卷末高潮：{normalized['volume_1_climax'] or '卷末用真实代价换到关键收益'}",
+            f"- 主要登场角色：{key_character or '主角与第一批关键角色进入棋局'}",
+            f"- 关键伏笔（埋/收）：{key_foreshadow or '第1章埋主线伏笔，第10章附近开始第一次回收'}",
+            "- 前5章拆解：1-2章建立危机与规则；第3章给首次收益；第4章显影代价；第5章把主角正式推进卷级对抗。",
+        ]
+        updated = _replace_volume_block(updated, first_volume_heading, first_volume_lines)
     return updated.rstrip() + "\n"
 
 
@@ -682,6 +879,13 @@ def init_project(
         gf_irreversible_cost=gf_irreversible_cost,
     )
     state["planning"]["profile"] = planning_profile
+    state["planning"]["project_info"] = {
+        "title": title,
+        "genre": genre,
+        "target_chapters": int(target_chapters),
+        "outline_file": "大纲/总纲.md",
+        "source": "bootstrap",
+    }
 
     state["progress"]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1003,6 +1207,7 @@ def init_project(
     outline_path.parent.mkdir(parents=True, exist_ok=True)
     outline_path.write_text(outline_content, encoding="utf-8")
     state["planning"]["readiness"] = evaluate_planning_readiness(planning_profile, outline_text=outline_content)
+    save_planning_profile(project_path, planning_profile, title=title, genre=genre)
     atomic_write_json(state_path, state, use_lock=True, backup=False)
 
     _write_text_if_missing(

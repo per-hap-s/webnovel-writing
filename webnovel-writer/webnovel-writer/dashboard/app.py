@@ -30,7 +30,9 @@ from scripts.init_project import (
     build_planning_fill_template,
     evaluate_planning_readiness,
     get_planning_profile_field_specs,
+    load_planning_profile,
     normalize_planning_profile,
+    save_planning_profile as persist_planning_profile,
     sync_master_outline_with_profile,
 )
 from scripts.data_modules.state_file import (
@@ -574,8 +576,17 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     def _planning_profile_payload(state_data: dict[str, Any], project_root_value: Path) -> dict[str, Any]:
         project_info = state_data.get('project_info') or {}
         planning = state_data.setdefault('planning', {})
+        planning_project_info = planning.setdefault('project_info', {})
+        planning_project_info.setdefault('title', str(project_info.get('title') or '').strip())
+        planning_project_info.setdefault('genre', str(project_info.get('genre') or '').strip())
+        planning_project_info.setdefault('outline_file', '大纲/总纲.md')
+        file_profile = load_planning_profile(
+            project_root_value,
+            title=str(project_info.get('title') or '').strip(),
+            genre=str(project_info.get('genre') or '').strip(),
+        )
         profile = normalize_planning_profile(
-            planning.get('profile'),
+            {**dict(planning.get('profile') or {}), **dict(file_profile or {})},
             title=str(project_info.get('title') or '').strip(),
             genre=str(project_info.get('genre') or '').strip(),
         )
@@ -588,6 +599,7 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'profile': profile,
             'readiness': readiness,
             'last_blocked': planning.get('last_blocked'),
+            'project_info': planning_project_info,
             'field_specs': get_planning_profile_field_specs(),
             'fill_template': build_planning_fill_template(),
             'outline_file': '大纲/总纲.md',
@@ -599,6 +611,7 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         genre = str(project_info.get('genre') or '').strip()
         target_chapters = int(project_info.get('target_chapters') or 600)
         planning = state_data.setdefault('planning', {})
+        planning_project_info = planning.setdefault('project_info', {})
         profile = normalize_planning_profile(profile_input, title=title, genre=genre)
         outline_path = project_root_value / '大纲' / '总纲.md'
         existing_outline = outline_path.read_text(encoding='utf-8') if outline_path.is_file() else ''
@@ -612,12 +625,23 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         outline_path.parent.mkdir(parents=True, exist_ok=True)
         outline_path.write_text(updated_outline, encoding='utf-8')
         readiness = evaluate_planning_readiness(profile, outline_text=updated_outline)
+        profile = persist_planning_profile(project_root_value, profile, title=title, genre=genre)
         planning['profile'] = profile
         planning['readiness'] = readiness
+        planning_project_info.update(
+            {
+                'title': title,
+                'genre': genre,
+                'target_chapters': target_chapters,
+                'outline_file': '大纲/总纲.md',
+                'source': planning_project_info.get('source') or 'dashboard',
+            }
+        )
         return {
             'profile': profile,
             'readiness': readiness,
             'last_blocked': planning.get('last_blocked'),
+            'project_info': planning_project_info,
             'field_specs': get_planning_profile_field_specs(),
             'fill_template': build_planning_fill_template(),
             'outline_file': '大纲/总纲.md',
@@ -921,6 +945,7 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             })
         _ensure_project_watch(target_root)
         current_root = _resolve_request_project_root(http_request)
+        planning_payload = _planning_profile_payload(_read_state_data(target_root), target_root)
         return {
             'created': True,
             'project_root': str(target_root),
@@ -928,7 +953,9 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'genre': genre,
             'state_file': str(state_path),
             'project_switch_required': str(target_root) != str(current_root),
-            'suggested_dashboard_url': f"/?project_root={quote(str(target_root))}",
+            'suggested_dashboard_url': f"/?project_root={quote(str(target_root))}&page=control&bootstrap_hint=planning",
+            'planning_profile': planning_payload,
+            'next_recommended_action': '项目已初始化。下一步请先确认规划信息，再运行 plan。',
         }
 
     @app.get('/api/llm/status')

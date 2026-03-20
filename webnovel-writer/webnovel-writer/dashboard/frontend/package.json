@@ -12,7 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:state": "node --test src/supervisorAuditState.test.js src/operatorAction.test.js src/operatorActionRuntime.test.js src/writingContinuation.test.js src/writingTaskDerived.test.js src/writingTaskListSummary.test.js src/recoverySemantics.test.js",
-    "test:ui": "vitest run --environment jsdom src/supervisorAuditDerived.test.jsx src/supervisorAuditPage.test.jsx src/supervisorPage.test.jsx src/taskCenterPageSection.test.jsx src/app.integration.test.jsx",
+    "test:ui": "vitest run --environment jsdom src/api.test.js src/appSections.test.jsx src/supervisorAuditDerived.test.jsx src/supervisorAuditPage.test.jsx src/supervisorPage.test.jsx src/taskCenterPageSection.test.jsx src/app.integration.test.jsx",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

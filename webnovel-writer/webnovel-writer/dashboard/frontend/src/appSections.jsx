@@ -287,7 +287,7 @@ export function PlanningProfileSection({ onSaved }) {
         }
     }
 
-    const missingItems = readiness?.missing_items || []
+    const missingItems = readiness?.blocking_items || readiness?.missing_items || []
 
     return (
         <div className="planning-profile">

@@ -293,3 +293,44 @@ test('overview primary action surfaces request errors', async () => {
 
     expect(await screen.findByText('launch failed')).not.toBeNull()
 })
+
+test('bootstrap success surfaces planning guidance on the overview', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/project/info') {
+            return Promise.resolve({
+                project_info: { title: '', genre: '' },
+                dashboard_context: { project_initialized: false, project_root: '' },
+                progress: { current_chapter: 0, total_words: 0 },
+            })
+        }
+        if (path === '/api/tasks') return Promise.resolve([])
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        if (path === '/api/project/planning-profile') {
+            return Promise.resolve({
+                profile: {},
+                field_specs: [],
+                readiness: { ok: false, completed_fields: 0, total_required_fields: 0, blocking_items: [] },
+            })
+        }
+        return Promise.resolve({})
+    })
+    postJSONMock.mockResolvedValue({
+        created: true,
+        project_switch_required: false,
+        next_recommended_action: '项目已初始化。下一步请先确认规划信息，再运行 plan。',
+    })
+
+    render(<App />)
+
+    await user.type(await screen.findByPlaceholderText('请输入新的项目目录'), 'D:\\tmp\\novel')
+    await user.type(screen.getByPlaceholderText('留空则使用目录名'), 'Bootstrap Book')
+    await user.clear(screen.getByPlaceholderText('玄幻'))
+    await user.type(screen.getByPlaceholderText('玄幻'), '都市异能')
+    await user.click(screen.getByRole('button', { name: '创建项目' }))
+
+    expect(await screen.findByText('项目已初始化。下一步先确认并保存规划信息，再运行 `plan`，不需要先手工改总纲。')).not.toBeNull()
+})

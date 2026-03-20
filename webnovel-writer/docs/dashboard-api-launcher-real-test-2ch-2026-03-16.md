@@ -9,6 +9,14 @@
 - 题材：`都市异能`
 - 结果结论：`阻断于 plan，未进入第 1 章写作`
 
+## 历史说明
+
+本文档保留第三阶段修复前的真实浏览器基线。后续桌面启动器链路的正式验收口径已改为：
+
+- bootstrap 后默认引导到 `Planning Profile`
+- `plan` 若因规划输入不足被阻断，任务状态必须为 `failed`
+- 错误码固定为 `PLAN_INPUT_BLOCKED`，且不再写入空壳 `volume-01-plan.md`
+
 ## 执行记录
 1. 清理了历史测试目录：
    - `D:\CodexProjects\NovelTest-3Ch`

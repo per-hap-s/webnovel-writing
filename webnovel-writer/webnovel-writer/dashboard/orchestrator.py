@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 from scripts.init_project import (
     build_planning_fill_template,
     evaluate_planning_readiness,
+    load_planning_profile,
     normalize_planning_profile,
 )
 from scripts.data_modules.api_client import get_client
@@ -66,6 +67,8 @@ PLAN_OUTLINE_SIGNAL_PHRASES = (
     "主要角色",
     "关键伏笔",
 )
+PLAN_INPUT_BLOCKED_CODE = "PLAN_INPUT_BLOCKED"
+PLAN_INPUT_BLOCKED_MESSAGE = "规划输入不完整，无法生成可执行卷规划。"
 
 SETTING_DOC_PATHS = {
     "worldview": f"{SETTINGS_DIR_NAME}/世界观.md",
@@ -2022,7 +2025,7 @@ class OrchestrationService:
         )
         step_state = self._resolve_runtime_step_state(task, last_event, attempt=attempt)
         if task.get("task_type") == "plan" and (task.get("artifacts") or {}).get("plan_blocked"):
-            step_state = "completed"
+            step_state = "failed"
         step_started_at = self._resolve_step_started_at(task, runtime_events, step_key)
         waiting_since = self._resolve_waiting_since(task, runtime_events, step_key, step_state)
         last_non_heartbeat_activity_at = self._resolve_last_non_heartbeat_activity_at(task, runtime_events, step_key)
@@ -3649,8 +3652,6 @@ class OrchestrationService:
         step_name = step["name"]
         preflight_result = self._run_plan_preflight(task_id, task, step)
         if preflight_result is not None:
-            if preflight_result.get("blocked"):
-                return None
             self.store.mark_failed(task_id, step_name, preflight_result)
             return None
 
@@ -3901,7 +3902,8 @@ class OrchestrationService:
             "readiness": health,
             "raw_payload": payload,
         }
-        self.store.save_step_result(task_id, step["name"], {"success": True, "structured_output": result_payload})
+        error_info = self._build_plan_blocked_error(result_payload)
+        self.store.save_step_result(task_id, step["name"], {"success": False, "structured_output": result_payload, "error": error_info})
         self._persist_plan_blocked_state(
             task_id,
             task,
@@ -3928,8 +3930,7 @@ class OrchestrationService:
             step_name=step["name"],
             payload=result_payload,
         )
-        self.store.mark_completed(task_id)
-        self.store.append_event(task_id, "info", "Task completed")
+        self.store.mark_failed(task_id, step["name"], error_info)
         return True
 
     def _record_step_result(self, task_id: str, step_name: str, result: StepResult) -> None:
@@ -4233,6 +4234,8 @@ class OrchestrationService:
             "review_summary": (task.get("artifacts") or {}).get("review_summary"),
             "plan_health_check": (task.get("artifacts") or {}).get("plan_health_check"),
         }
+        if task.get("task_type") == "plan" or str(step.get("name") or "").strip().lower() == "plan":
+            task_input["planning_profile_summary"] = self._build_plan_profile_summary()
         return {
             "task_id": task["id"],
             "task_type": task["task_type"],
@@ -4348,13 +4351,36 @@ class OrchestrationService:
 
         state_data = self._read_state_data()
         planning = state_data.get("planning") or {}
-        planning_profile = planning.get("profile") or {}
+        project_info = state_data.get("project_info") or {}
+        planning_profile = normalize_planning_profile(
+            {
+                **dict(planning.get("profile") or {}),
+                **dict(
+                    load_planning_profile(
+                        self.project_root,
+                        title=str(project_info.get("title") or "").strip(),
+                        genre=str(project_info.get("genre") or "").strip(),
+                    )
+                    or {}
+                ),
+            },
+            title=str(project_info.get("title") or "").strip(),
+            genre=str(project_info.get("genre") or "").strip(),
+        )
+        planning_project_info = planning.get("project_info") or {}
         planning_readiness = planning.get("readiness") or {}
         if planning_profile:
             project_docs.append(
                 {
                     "path": ".webnovel/planning-profile.json",
                     "content": json.dumps(planning_profile, ensure_ascii=False, indent=2)[:6000],
+                }
+            )
+        if planning_project_info:
+            project_docs.append(
+                {
+                    "path": ".webnovel/planning-project-info.json",
+                    "content": json.dumps(planning_project_info, ensure_ascii=False, indent=2)[:3000],
                 }
             )
         if planning_readiness:
@@ -6668,26 +6694,28 @@ class OrchestrationService:
 
         blocked_payload = {
             "plan_blocked": True,
-            "reason": "planning_profile_incomplete",
-            "blocking_items": health.get("missing_items", []),
+            "reason": str(health.get("reason") or "planning_profile_incomplete"),
+            "blocking_items": health.get("blocking_items", []),
             "next_step": "请先到总览页补齐规划必填信息，然后重新运行 plan。",
             "fill_template": build_planning_fill_template(),
             "readiness": health,
         }
-        self.store.save_step_result(task_id, step["name"], {"success": True, "structured_output": blocked_payload})
+        error_info = self._build_plan_blocked_error(blocked_payload)
+        self.store.save_step_result(task_id, step["name"], {"success": False, "structured_output": blocked_payload, "error": error_info})
         latest_artifacts.update(
             {
                 "plan_blocked": True,
                 "blocking_items": blocked_payload["blocking_items"],
                 "next_step": blocked_payload["next_step"],
                 "fill_template": blocked_payload["fill_template"],
+                "plan_health_check": health,
             }
         )
         self.store.update_task(task_id, artifacts=latest_artifacts)
         self._persist_plan_blocked_state(
             task_id,
             latest_task,
-            reason="planning_profile_incomplete",
+            reason=str(blocked_payload["reason"] or "planning_profile_incomplete"),
             blocking_items=blocked_payload["blocking_items"],
             readiness=health,
         )
@@ -6698,87 +6726,39 @@ class OrchestrationService:
             step_name=step["name"],
             payload=blocked_payload,
         )
-        self.store.mark_completed(task_id)
-        self.store.append_event(task_id, "info", "Task completed")
-        return {"blocked": True}
-
-    def _evaluate_plan_inputs(self) -> Dict[str, Any]:
-        outline_path = self.project_root / OUTLINE_DIR_NAME / OUTLINE_SUMMARY_FILE
-        state_data = self._read_state_data()
-
-        if not outline_path.is_file():
-            return {
-                "ok": False,
-                "reason": "outline_missing",
-                "message": "plan cannot start because the master outline file is missing",
-                "outline_file": f"{OUTLINE_DIR_NAME}/{OUTLINE_SUMMARY_FILE}",
-                "outline_chars": 0,
-                "signal_hits": [],
-                "missing_signals": list(PLAN_OUTLINE_SIGNAL_PHRASES),
-            }
-
-        outline_text = outline_path.read_text(encoding="utf-8")
-        stripped = outline_text.strip()
-        signal_hits = [phrase for phrase in PLAN_OUTLINE_SIGNAL_PHRASES if phrase in stripped]
-        filled_slots = sum(1 for line in stripped.splitlines() if self._outline_line_has_content(line))
-        project_info = state_data.get("project_info") or {}
-        project_basics = {
-            "title": str(project_info.get("title") or "").strip(),
-            "genre": str(project_info.get("genre") or "").strip(),
-        }
-        missing_signals = [phrase for phrase in PLAN_OUTLINE_SIGNAL_PHRASES if phrase not in signal_hits]
-        outline_chars = len(stripped)
-        ok = outline_chars >= MIN_PLAN_OUTLINE_CHARS and len(signal_hits) >= 3 and (filled_slots >= 2 or outline_chars >= 260)
-        reason = "ready"
-        message = "plan input health check passed"
-        if not ok:
-            if outline_chars < MIN_PLAN_OUTLINE_CHARS:
-                reason = "outline_too_short"
-                message = "plan input is too weak: the master outline is too short"
-            elif len(signal_hits) < 3:
-                reason = "outline_missing_signals"
-                message = "plan input is too weak: the master outline misses core planning sections"
-            else:
-                reason = "outline_placeholder_only"
-                message = "plan input is too weak: the master outline is mostly placeholders with no actionable beats"
-        return {
-            "ok": ok,
-            "reason": reason,
-            "message": message,
-            "outline_file": f"{OUTLINE_DIR_NAME}/{OUTLINE_SUMMARY_FILE}",
-            "outline_chars": outline_chars,
-            "signal_hits": signal_hits,
-            "missing_signals": missing_signals,
-            "filled_slots": filled_slots,
-            "project_title": project_basics["title"],
-            "project_genre": project_basics["genre"],
-        }
-
-    def _outline_line_has_content(self, line: str) -> bool:
-        stripped = line.strip().lstrip("-").strip()
-        if not stripped:
-            return False
-        parts = re.split(r"[:：]", stripped, maxsplit=1)
-        if len(parts) != 2:
-            return False
-        value = parts[1].strip()
-        if not value:
-            return False
-        placeholder_markers = ("待填写", "待补充", "TODO", "TBD", "示例", "占位")
-        return not any(marker in value for marker in placeholder_markers)
+        return error_info
 
     def _evaluate_plan_inputs(self) -> Dict[str, Any]:
         outline_path = self.project_root / OUTLINE_DIR_NAME / OUTLINE_SUMMARY_FILE
         state_data = self._read_state_data()
         project_info = state_data.get("project_info") or {}
         planning = state_data.setdefault("planning", {})
+        planning_project_info = planning.setdefault("project_info", {})
+        planning_project_info.setdefault("title", str(project_info.get("title") or "").strip())
+        planning_project_info.setdefault("genre", str(project_info.get("genre") or "").strip())
+        planning_project_info.setdefault("outline_file", f"{OUTLINE_DIR_NAME}/{OUTLINE_SUMMARY_FILE}")
+        file_profile = load_planning_profile(
+            self.project_root,
+            title=str(project_info.get("title") or "").strip(),
+            genre=str(project_info.get("genre") or "").strip(),
+        )
         profile = normalize_planning_profile(
-            planning.get("profile"),
+            {**dict(planning.get("profile") or {}), **dict(file_profile or {})},
             title=str(project_info.get("title") or "").strip(),
             genre=str(project_info.get("genre") or "").strip(),
         )
         outline_text = outline_path.read_text(encoding="utf-8") if outline_path.is_file() else ""
         readiness = evaluate_planning_readiness(profile, outline_text=outline_text)
+        blocking_items = list(readiness.get("blocking_items") or [])
+        if not outline_path.is_file():
+            blocking_items = [
+                {
+                    "field": "outline_file",
+                    "label": "总纲文件",
+                    "format_hint": "请确认大纲/总纲.md 已生成。",
+                },
+                *blocking_items,
+            ]
         readiness.update(
             {
                 "reason": "ready" if readiness["ok"] else "planning_profile_incomplete",
@@ -6786,19 +6766,78 @@ class OrchestrationService:
                 "outline_chars": len(outline_text.strip()),
                 "project_title": str(project_info.get("title") or "").strip(),
                 "project_genre": str(project_info.get("genre") or "").strip(),
+                "planning_project_info": dict(planning_project_info),
+                "source_order": [
+                    ".webnovel/planning-profile.json",
+                    "state.json planning.project_info",
+                    "大纲/总纲.md",
+                ],
+                "blocking_items": blocking_items,
             }
         )
         if not outline_path.is_file():
             readiness["ok"] = False
             readiness["reason"] = "outline_missing"
             readiness["message"] = "master outline file is missing"
+            readiness["missing_count"] = len(blocking_items)
         def _mutate(latest_state: Dict[str, Any]) -> None:
             latest_planning = latest_state.setdefault("planning", {})
             latest_planning["profile"] = profile
+            latest_planning["project_info"] = {
+                **dict(latest_planning.get("project_info") or {}),
+                **dict(planning_project_info),
+            }
             latest_planning["readiness"] = readiness
 
         self._update_state_data(_mutate)
         return readiness
+
+    def _build_plan_blocked_error(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        readiness = payload.get("readiness") or {}
+        return {
+            "code": PLAN_INPUT_BLOCKED_CODE,
+            "message": PLAN_INPUT_BLOCKED_MESSAGE,
+            "retryable": True,
+            "details": {
+                "reason": str(payload.get("reason") or readiness.get("reason") or "planning_profile_incomplete"),
+                "blocking_items": list(payload.get("blocking_items") or readiness.get("blocking_items") or []),
+                "next_step": str(payload.get("next_step") or ""),
+            },
+        }
+
+    def _build_plan_profile_summary(self) -> Dict[str, Any]:
+        state_data = self._read_state_data()
+        project_info = state_data.get("project_info") or {}
+        planning = state_data.get("planning") or {}
+        file_profile = load_planning_profile(
+            self.project_root,
+            title=str(project_info.get("title") or "").strip(),
+            genre=str(project_info.get("genre") or "").strip(),
+        )
+        profile = normalize_planning_profile(
+            {**dict(planning.get("profile") or {}), **dict(file_profile or {})},
+            title=str(project_info.get("title") or "").strip(),
+            genre=str(project_info.get("genre") or "").strip(),
+        )
+        return {
+            "story_logline": profile.get("story_logline") or "",
+            "protagonist": {
+                "name": profile.get("protagonist_name") or "",
+                "identity": profile.get("protagonist_identity") or "",
+                "desire": profile.get("protagonist_desire") or "",
+                "flaw": profile.get("protagonist_flaw") or "",
+            },
+            "core_setting": profile.get("core_setting") or "",
+            "ability_cost": profile.get("ability_cost") or "",
+            "volume_1": {
+                "title": profile.get("volume_1_title") or "",
+                "conflict": profile.get("volume_1_conflict") or "",
+                "climax": profile.get("volume_1_climax") or "",
+            },
+            "major_characters_preview": [line.strip() for line in str(profile.get("major_characters_text") or "").splitlines() if line.strip()][:3],
+            "factions_preview": [line.strip() for line in str(profile.get("factions_text") or "").splitlines() if line.strip()][:3],
+            "rules_preview": [line.strip() for line in str(profile.get("rules_outline") or "").splitlines() if line.strip()][:3],
+        }
 
     def _normalize_state_payload(self, chapter: int, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
         chapter_meta = dict(payload.get("chapter_meta") or {})

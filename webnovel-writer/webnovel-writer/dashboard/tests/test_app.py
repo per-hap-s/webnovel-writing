@@ -340,7 +340,44 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     def fake_run(command, cwd, capture_output, text, encoding, errors, check):
         webnovel_dir = target_root / ".webnovel"
         webnovel_dir.mkdir(parents=True, exist_ok=True)
-        (webnovel_dir / "state.json").write_text("{}", encoding="utf-8")
+        (target_root / "大纲").mkdir(parents=True, exist_ok=True)
+        (target_root / "大纲" / "总纲.md").write_text("# 总纲\n\n## 故事前提\n- 书名：Test Book\n", encoding="utf-8")
+        (webnovel_dir / "planning-profile.json").write_text(
+            json.dumps(
+                {
+                    "story_logline": "Bootstrap seed",
+                    "protagonist_name": "Ari",
+                    "protagonist_identity": "Courier",
+                    "protagonist_initial_state": "Alone in the rain",
+                    "protagonist_desire": "Stay alive and find the clue",
+                    "protagonist_flaw": "Hides too much",
+                    "core_setting": "Short rewind under pressure",
+                    "ability_cost": "Each rewind erases memory",
+                    "volume_1_title": "Rain Loop",
+                    "volume_1_conflict": "Break the anomaly chain",
+                    "volume_1_climax": "Trade memory for evidence",
+                    "major_characters_text": "Ari | lead | self | enters the mainline",
+                    "factions_text": "Bureau | official | unstable ally",
+                    "rules_outline": "Warnings leak ten minutes early",
+                    "foreshadowing_text": "Warning source | 1 | 5 | A",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (webnovel_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "project_info": {"title": "Test Book", "genre": "Urban Fantasy"},
+                    "planning": {
+                        "project_info": {"title": "Test Book", "genre": "Urban Fantasy", "outline_file": "大纲/总纲.md"},
+                        "profile": {"story_logline": "Bootstrap seed"},
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     with patch("dashboard.app.run", side_effect=fake_run):
@@ -359,7 +396,13 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     assert data["project_root"] == str(target_root)
     assert data["project_switch_required"] is True
     assert data["suggested_dashboard_url"].startswith("/?project_root=")
+    assert "bootstrap_hint=planning" in data["suggested_dashboard_url"]
     assert Path(data["state_file"]).is_file()
+    assert (target_root / ".webnovel" / "planning-profile.json").is_file()
+    assert data["planning_profile"]["outline_file"] == "大纲/总纲.md"
+    assert data["planning_profile"]["project_info"]["title"] == "Test Book"
+    assert data["planning_profile"]["profile"]["protagonist_name"] == "Ari"
+    assert data["next_recommended_action"]
 
 
 def test_bootstrap_project_conflict_for_existing_project(client: TestClient, mock_project_root: Path):
@@ -459,10 +502,14 @@ def test_planning_profile_endpoints_sync_state_and_outline(client: TestClient, m
     assert payload["readiness"]["ok"] is True
 
     state = json.loads((mock_project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
+    profile_path = mock_project_root / ".webnovel" / "planning-profile.json"
     assert state["planning"]["profile"]["protagonist_name"] == "Shen Yan"
     assert state["planning"]["readiness"]["ok"] is True
     assert state["chapter_meta"]["1"]["title"] == "Existing Chapter"
     assert state["disambiguation_warnings"][0]["mention"] == "雨城"
+    assert profile_path.is_file()
+    saved_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert saved_profile["protagonist_name"] == "Shen Yan"
     outline_text = outline_path.read_text(encoding="utf-8")
     assert "## 故事前提" in outline_text
     assert "First Rewind in the Rain" in outline_text
