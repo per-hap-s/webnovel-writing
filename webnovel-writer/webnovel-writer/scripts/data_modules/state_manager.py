@@ -1058,15 +1058,13 @@ class StateManager:
             Dict[str, Dict]: 指定层级的实体字典，键为实体 ID，值为包含实体信息和类型的字典。
         """
         if self._sql_state_manager:
-            result = {}
-            for entity_type in self.ENTITY_TYPES:
-                entities = self._sql_state_manager._index_manager.get_entities_by_tier(tier)
-                for e in entities:
-                    eid = e.get("id")
-                    if eid and e.get("type") == entity_type:
-                        result[eid] = {**e, "type": entity_type}
-            if result:
-                return result
+            entities = self._sql_state_manager._index_manager.get_entities_by_tier(tier)
+            if entities:
+                return {
+                    str(e.get("id")): dict(e)
+                    for e in entities
+                    if isinstance(e, dict) and e.get("id")
+                }
 
         result = {}
         for type_name, entities in self._state.get("entities_v3", {}).items():

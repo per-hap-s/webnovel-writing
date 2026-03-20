@@ -10,7 +10,12 @@ const resolveSupervisorItemOperatorActionsMock = vi.fn((item) => item.operatorAc
 vi.mock('./api.js', () => ({
     fetchJSON: (...args) => fetchJSONMock(...args),
     postJSON: (...args) => postJSONMock(...args),
-    normalizeError: (error) => ({ message: error?.message || String(error) }),
+    normalizeError: (error) => ({
+        displayMessage: error?.message || String(error),
+        code: 'REQUEST_FAILED',
+        rawMessage: error?.message || String(error),
+        details: null,
+    }),
 }))
 
 vi.mock('./operatorAction.js', () => ({
@@ -84,6 +89,79 @@ test('restores audit deep-link focus from query state', async () => {
     await screen.findByText('Focus Item')
     await waitFor(() => {
         expect(screen.queryByText('Other Item')).toBeNull()
+    })
+})
+
+test('keeps audit data visible when a later refresh fails', async () => {
+    let phase = 0
+
+    fetchJSONMock.mockImplementation((path) => {
+        if (phase === 0) {
+            if (path === '/api/supervisor/recommendations?include_dismissed=true') {
+                return Promise.resolve([
+                    {
+                        stableKey: 'focus-key',
+                        title: 'Stable Audit Item',
+                        category: 'approval',
+                        categoryLabel: 'Approval',
+                        trackingStatus: '',
+                    },
+                ])
+            }
+            if (path === '/api/supervisor/checklists') {
+                return Promise.resolve([
+                    {
+                        relativePath: '.webnovel/supervisor/checklists/checklist-ch0001-20260320-100000.md',
+                        chapter: 1,
+                        title: 'Stable Checklist',
+                        savedAt: '2026-03-20T10:00:00Z',
+                        content: '# checklist',
+                        summary: 'first snapshot',
+                    },
+                ])
+            }
+            if (path === '/api/supervisor/audit-log') return Promise.resolve([{ stableKey: 'focus-key', action: 'created', timestamp: '2026-03-20T10:00:00Z', title: 'Stable Audit Item' }])
+            if (path === '/api/supervisor/audit-health') return Promise.resolve({ healthy: true, issueCounts: {}, schemaStateCounts: {}, schemaVersionCounts: {}, issues: [] })
+            if (path === '/api/supervisor/audit-repair-preview') return Promise.resolve({ exists: true, proposals: [] })
+            if (path === '/api/supervisor/audit-repair-reports') return Promise.resolve([
+                { filename: 'repair-report.json', relativePath: '.webnovel/supervisor/audit-repair-reports/repair-report.json', generatedAt: '2026-03-20T10:00:00Z', content: {} },
+            ])
+            return Promise.resolve([])
+        }
+
+        return Promise.reject(new Error('network down'))
+    })
+
+    const { rerender } = render(
+        <SupervisorAuditPage
+            projectInfo={{ progress: { current_chapter: 8, total_words: 12000 } }}
+            tasks={[]}
+            onTaskCreated={vi.fn()}
+            onOpenTask={vi.fn()}
+            onTasksMutated={vi.fn()}
+        />,
+    )
+
+    expect((await screen.findAllByText('Stable Audit Item')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('Stable Checklist')).length).toBeGreaterThan(0)
+
+    phase = 1
+    rerender(
+        <SupervisorAuditPage
+            projectInfo={{ progress: { current_chapter: 8, total_words: 12000 } }}
+            tasks={[{ id: 'task-1' }]}
+            onTaskCreated={vi.fn()}
+            onOpenTask={vi.fn()}
+            onTasksMutated={vi.fn()}
+        />,
+    )
+
+    await waitFor(async () => {
+        const alert = await screen.findByRole('alert')
+        expect(alert.textContent || '').toContain('Supervisor Audit 数据刷新失败')
+        expect(alert.textContent || '').toContain('REQUEST_FAILED')
+        expect(screen.getAllByText('Stable Audit Item').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('Stable Checklist').length).toBeGreaterThan(0)
     })
 })
 

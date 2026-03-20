@@ -423,6 +423,11 @@ def test_save_rag_settings_updates_env_and_status(client: TestClient, mock_proje
 
 
 def test_planning_profile_endpoints_sync_state_and_outline(client: TestClient, mock_project_root: Path):
+    state_path = mock_project_root / ".webnovel" / "state.json"
+    seeded = json.loads(state_path.read_text(encoding="utf-8"))
+    seeded["chapter_meta"] = {"1": {"title": "Existing Chapter"}}
+    seeded["disambiguation_warnings"] = [{"chapter": 1, "mention": "雨城"}]
+    state_path.write_text(json.dumps(seeded, ensure_ascii=False, indent=2), encoding="utf-8")
     outline_path = mock_project_root / "大纲" / "总纲.md"
     outline_path.parent.mkdir(parents=True, exist_ok=True)
     outline_path.write_text("# 总纲\n", encoding="utf-8")
@@ -456,6 +461,8 @@ def test_planning_profile_endpoints_sync_state_and_outline(client: TestClient, m
     state = json.loads((mock_project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
     assert state["planning"]["profile"]["protagonist_name"] == "Shen Yan"
     assert state["planning"]["readiness"]["ok"] is True
+    assert state["chapter_meta"]["1"]["title"] == "Existing Chapter"
+    assert state["disambiguation_warnings"][0]["mention"] == "雨城"
     outline_text = outline_path.read_text(encoding="utf-8")
     assert "## 故事前提" in outline_text
     assert "First Rewind in the Rain" in outline_text
@@ -463,6 +470,26 @@ def test_planning_profile_endpoints_sync_state_and_outline(client: TestClient, m
     get_response = client.get("/api/project/planning-profile")
     assert get_response.status_code == 200
     assert get_response.json()["profile"]["volume_1_title"] == "First Rewind in the Rain"
+
+
+def test_planning_profile_endpoints_fail_when_state_file_is_corrupted(client: TestClient, mock_project_root: Path):
+    state_path = mock_project_root / ".webnovel" / "state.json"
+    state_path.write_text("{broken json", encoding="utf-8")
+
+    get_response = client.get("/api/project/planning-profile")
+    assert get_response.status_code == 500
+    assert get_response.json()["code"] == "STATE_FILE_CORRUPTED"
+
+    post_response = client.post(
+        "/api/project/planning-profile",
+        json={
+            "story_logline": "Corrupted state test",
+            "protagonist_name": "Tester",
+            "core_setting": "Broken state",
+        },
+    )
+    assert post_response.status_code == 500
+    assert post_response.json()["code"] == "STATE_FILE_CORRUPTED"
 
 
 def test_project_info_supports_request_scoped_project_root(client: TestClient, mock_project_root: Path):

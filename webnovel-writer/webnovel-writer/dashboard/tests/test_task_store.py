@@ -436,12 +436,15 @@ class TestTaskRetrieval:
 
         验证限制参数被正确应用。
         """
+        created_tasks = []
         for i in range(10):
-            task_store.create_task("write", {"chapter": i}, sample_workflow)
+            created_tasks.append(task_store.create_task("write", {"chapter": i}, sample_workflow))
 
         tasks = task_store.list_tasks(limit=5)
 
         assert len(tasks) == 5
+        assert [task["request"]["chapter"] for task in tasks] == [9, 8, 7, 6, 5]
+        assert [task["id"] for task in tasks] == [item["id"] for item in reversed(created_tasks[-5:])]
 
     def test_list_tasks_empty(self, task_store: TaskStore):
         """

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 import {
     AUDIT_REPAIR_REPORT_SORT_OPTIONS,
@@ -17,6 +17,7 @@ import { resolveSupervisorItemOperatorActions } from './operatorAction.js'
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
 import { MetricCard, downloadTextFile, formatNumber, formatTimestampShort } from './dashboardPageCommon.jsx'
 import { renderOperatorActionButtons } from './operatorActionButtons.jsx'
+import { ErrorNotice } from './appSections.jsx'
 import {
     AUDIT_GROUP_FOCUS_OPTIONS,
     SUPERVISOR_STATUS_FILTER_OPTIONS,
@@ -46,6 +47,7 @@ const DASHBOARD_PAGE_QUERY_KEY = 'page'
 
 export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenTask, onTasksMutated }) {
     const [auditError, setAuditError] = useState(null)
+    const [auditLoadError, setAuditLoadError] = useState(null)
     const [auditSubmitting, setAuditSubmitting] = useState(false)
     const [auditItems, setAuditItems] = useState([])
     const [auditLogEntries, setAuditLogEntries] = useState([])
@@ -72,6 +74,7 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
     const [auditRepairReportSortMode, setAuditRepairReportSortMode] = useState(initialAuditViewState.report_sort)
     const [selectedAuditRepairReportPath, setSelectedAuditRepairReportPath] = useState(initialAuditViewState.report_path)
     const [selectedAuditChecklistPath, setSelectedAuditChecklistPath] = useState('')
+    const loadSeqRef = useRef(0)
 
     const auditViewState = {
         category: auditCategoryFilter,
@@ -120,8 +123,10 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
     ])
 
     useEffect(() => {
-        let active = true
-        Promise.all([
+        const loadSeq = ++loadSeqRef.current
+        let cancelled = false
+
+        Promise.allSettled([
             fetchJSON('/api/supervisor/recommendations?include_dismissed=true'),
             fetchJSON('/api/supervisor/checklists', { limit: 20 }),
             fetchJSON('/api/supervisor/audit-log', { limit: 200 }),
@@ -129,28 +134,55 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
             fetchJSON('/api/supervisor/audit-repair-preview', { proposal_limit: 20 }),
             fetchJSON('/api/supervisor/audit-repair-reports', { limit: 20 }),
         ])
-            .then(([items, checklists, logEntries, healthPayload, repairPreviewPayload, repairReportsPayload]) => {
-                if (!active) return
-                setAuditItems(Array.isArray(items) ? items : [])
-                setAuditChecklists(Array.isArray(checklists) ? checklists : [])
-                setAuditLogEntries(Array.isArray(logEntries) ? logEntries : [])
-                setAuditHealth(healthPayload || null)
-                setAuditRepairPreview(repairPreviewPayload || null)
-                setAuditRepairReports(Array.isArray(repairReportsPayload) ? repairReportsPayload : [])
-                setAuditError(null)
+            .then(([itemsResult, checklistsResult, logEntriesResult, healthResult, repairPreviewResult, repairReportsResult]) => {
+                if (cancelled || loadSeq !== loadSeqRef.current) return
+
+                const errors = []
+                if (itemsResult.status === 'fulfilled') {
+                    setAuditItems(Array.isArray(itemsResult.value) ? itemsResult.value : [])
+                } else {
+                    errors.push(normalizeError(itemsResult.reason))
+                }
+
+                if (checklistsResult.status === 'fulfilled') {
+                    setAuditChecklists(Array.isArray(checklistsResult.value) ? checklistsResult.value : [])
+                } else {
+                    errors.push(normalizeError(checklistsResult.reason))
+                }
+
+                if (logEntriesResult.status === 'fulfilled') {
+                    setAuditLogEntries(Array.isArray(logEntriesResult.value) ? logEntriesResult.value : [])
+                } else {
+                    errors.push(normalizeError(logEntriesResult.reason))
+                }
+
+                if (healthResult.status === 'fulfilled') {
+                    setAuditHealth(healthResult.value || null)
+                } else {
+                    errors.push(normalizeError(healthResult.reason))
+                }
+
+                if (repairPreviewResult.status === 'fulfilled') {
+                    setAuditRepairPreview(repairPreviewResult.value || null)
+                } else {
+                    errors.push(normalizeError(repairPreviewResult.reason))
+                }
+
+                if (repairReportsResult.status === 'fulfilled') {
+                    setAuditRepairReports(Array.isArray(repairReportsResult.value) ? repairReportsResult.value : [])
+                } else {
+                    errors.push(normalizeError(repairReportsResult.reason))
+                }
+
+                setAuditLoadError(errors[0] || null)
             })
             .catch((err) => {
-                if (!active) return
-                setAuditItems([])
-                setAuditChecklists([])
-                setAuditLogEntries([])
-                setAuditHealth(null)
-                setAuditRepairPreview(null)
-                setAuditRepairReports([])
-                setAuditError(normalizeError(err))
+                if (cancelled || loadSeq !== loadSeqRef.current) return
+                setAuditLoadError(normalizeError(err))
             })
         return () => {
-            active = false
+            cancelled = true
+            loadSeqRef.current += 1
         }
     }, [tasks, projectInfo?.progress?.current_chapter, auditRefreshToken])
 
@@ -410,6 +442,7 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
                     <MetricCard label="已保存清单" value={formatNumber(auditChecklists.length)} />
                 </div>
             </section>
+            <ErrorNotice error={auditLoadError} title="Supervisor Audit 数据刷新失败" />
             <SupervisorAuditFilterPanel
                 auditCategoryFilter={auditCategoryFilter}
                 setAuditCategoryFilter={setAuditCategoryFilter}

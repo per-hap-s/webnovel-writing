@@ -39,7 +39,7 @@ Start-Webnovel-Writer.bat
 
 也可以直接运行：
 
-```bash
+```powershell
 webnovel dashboard
 ```
 
@@ -49,11 +49,13 @@ webnovel dashboard
 .\Launch-Webnovel-Dashboard.ps1
 ```
 
+以下命令示例默认都以 PowerShell 为准。
+
 ## 快速上手
 
 ### 1. 安装插件
 
-```bash
+```powershell
 claude plugin marketplace add lingfengQAQ/webnovel-writer --scope user
 claude plugin install webnovel-writer@webnovel-writer-marketplace --scope user
 ```
@@ -62,7 +64,7 @@ claude plugin install webnovel-writer@webnovel-writer-marketplace --scope user
 
 ### 2. 安装 Python 依赖
 
-```bash
+```powershell
 python -m pip install -r https://raw.githubusercontent.com/lingfengQAQ/webnovel-writer/HEAD/requirements.txt
 ```
 
@@ -72,7 +74,7 @@ python -m pip install -r https://raw.githubusercontent.com/lingfengQAQ/webnovel-
 
 在目标工作区执行：
 
-```bash
+```powershell
 webnovel init
 ```
 
@@ -102,16 +104,16 @@ webnovel init
 
 也可以手动编辑项目根目录 `.env`。当前面板写入的核心变量如下：
 
-```bash
-WEBNOVEL_LLM_PROVIDER=openai-compatible
-WEBNOVEL_LLM_BASE_URL=https://api.openai.com/v1
-WEBNOVEL_LLM_MODEL=gpt-4.1-mini
-WEBNOVEL_LLM_API_KEY=your_llm_api_key
+```powershell
+$env:WEBNOVEL_LLM_PROVIDER = "openai-compatible"
+$env:WEBNOVEL_LLM_BASE_URL = "https://api.openai.com/v1"
+$env:WEBNOVEL_LLM_MODEL = "gpt-4.1-mini"
+$env:WEBNOVEL_LLM_API_KEY = "your_llm_api_key"
 
-WEBNOVEL_RAG_BASE_URL=https://api.siliconflow.cn/v1
-WEBNOVEL_RAG_EMBED_MODEL=BAAI/bge-m3
-WEBNOVEL_RAG_RERANK_MODEL=BAAI/bge-reranker-v2-m3
-WEBNOVEL_RAG_API_KEY=your_rag_api_key
+$env:WEBNOVEL_RAG_BASE_URL = "https://api.siliconflow.cn/v1"
+$env:WEBNOVEL_RAG_EMBED_MODEL = "BAAI/bge-m3"
+$env:WEBNOVEL_RAG_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+$env:WEBNOVEL_RAG_API_KEY = "your_rag_api_key"
 ```
 
 补充说明：
@@ -122,7 +124,7 @@ WEBNOVEL_RAG_API_KEY=your_rag_api_key
 
 ### 5. 开始使用
 
-```bash
+```powershell
 webnovel plan 1
 webnovel write 1
 webnovel review 1-5
@@ -157,6 +159,12 @@ webnovel review 1-5
 - `POST /api/settings/rag` 会更新 `WEBNOVEL_RAG_BASE_URL`、`WEBNOVEL_RAG_EMBED_MODEL`、`WEBNOVEL_RAG_RERANK_MODEL`、`WEBNOVEL_RAG_API_KEY`
 
 接口保存位置都是项目根目录 `.env`，不会修改系统级环境变量文件。
+
+## Frontend 门禁与产物
+
+- `dashboard/frontend/dist/` 是 Dashboard 运行时直接服务的静态产物目录，当前保持入库。
+- 如果修改了 `dashboard/frontend/src/`，同一次变更中需要运行 `npm run build` 并提交对应的 `dist/` 更新。
+- 前端默认自检门禁包括 `npm run lint`、`npm run typecheck`、`npm run test:state`、`npm run test:ui` 和 `npm run build`。
 
 ## 文档导航
 
@@ -194,7 +202,7 @@ webnovel review 1-5
 
 欢迎提交 Issue 和 PR：
 
-```bash
+```powershell
 git checkout -b feature/your-feature
 git commit -m "feat: add your feature"
 git push origin feature/your-feature

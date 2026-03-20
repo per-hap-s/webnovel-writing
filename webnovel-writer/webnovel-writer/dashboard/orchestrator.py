@@ -23,6 +23,10 @@ from scripts.data_modules.config import get_config
 from scripts.data_modules.index_manager import ChapterMeta, EntityMeta, IndexManager, RelationshipMeta, ReviewMetrics
 from scripts.data_modules.narrative_graph import NarrativeGraph
 from scripts.data_modules.state_manager import StateManager
+from scripts.data_modules.state_file import (
+    read_project_state,
+    update_project_state,
+)
 from scripts.data_modules.state_validator import get_chapter_meta_entry
 from scripts.data_modules.story_plan_locator import load_story_plan_for_chapter
 
@@ -4041,18 +4045,10 @@ class OrchestrationService:
         return payload
 
     def _read_state_data(self) -> Dict[str, Any]:
-        state_path = self.project_root / ".webnovel" / "state.json"
-        if not state_path.is_file():
-            return {}
-        try:
-            return json.loads(state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
+        return read_project_state(self.project_root, strict=False)
 
-    def _write_state_data(self, state_data: Dict[str, Any]) -> None:
-        state_path = self.project_root / ".webnovel" / "state.json"
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _update_state_data(self, mutator) -> Dict[str, Any]:
+        return update_project_state(self.project_root, mutator, strict=False)
 
     def _is_plan_payload_blocked(self, payload: Dict[str, Any]) -> bool:
         volume_plan = payload.get("volume_plan") or {}
@@ -4092,18 +4088,21 @@ class OrchestrationService:
         blocking_items: List[Dict[str, Any]],
         readiness: Dict[str, Any],
     ) -> None:
-        state_data = self._read_state_data()
-        planning = state_data.setdefault("planning", {})
-        planning["readiness"] = readiness
-        planning["last_blocked"] = {
-            "task_id": task_id,
-            "volume": str((task.get("request") or {}).get("volume") or "1"),
-            "reason": reason,
-            "blocking_items": blocking_items,
-            "next_step": "请在总览页补齐规划必填信息后重新运行 plan。",
-            "updated_at": (self.store.get_task(task_id) or task).get("updated_at"),
-        }
-        self._write_state_data(state_data)
+        latest_task = self.store.get_task(task_id) or task
+
+        def _mutate(state_data: Dict[str, Any]) -> None:
+            planning = state_data.setdefault("planning", {})
+            planning["readiness"] = readiness
+            planning["last_blocked"] = {
+                "task_id": task_id,
+                "volume": str((task.get("request") or {}).get("volume") or "1"),
+                "reason": reason,
+                "blocking_items": blocking_items,
+                "next_step": "请在总览页补齐规划必填信息后重新运行 plan。",
+                "updated_at": latest_task.get("updated_at"),
+            }
+
+        self._update_state_data(_mutate)
 
     async def _maybe_retry_invalid_output_step(
         self,
@@ -5508,32 +5507,34 @@ class OrchestrationService:
         outline_content = self._build_volume_plan_markdown(volume, payload)
         outline_path = self._write_project_text(outline_file, outline_content)
 
-        state_data = self._read_state_data()
-        planning = state_data.setdefault("planning", {})
-        volume_plans = planning.setdefault("volume_plans", {})
         latest_task = self.store.get_task(task_id) or task
         chapters = [item for item in (payload.get("chapters") or []) if isinstance(item, dict)]
         chapters_range = self._infer_plan_chapters_range(chapters)
-        volume_plans[volume] = {
-            "outline_file": self._relative_project_path(outline_path),
-            "updated_at": latest_task.get("updated_at"),
-            "summary": self._summarize_volume_plan(payload),
-            "chapter_count": len(payload.get("chapters") or []),
-        }
-        planning["latest_volume"] = volume
-        planning["last_blocked"] = None
-        progress = state_data.setdefault("progress", {})
-        try:
-            progress["current_volume"] = max(1, int(volume))
-        except ValueError:
-            progress.setdefault("current_volume", 1)
-        if chapters_range:
-            progress["volumes_planned"] = self._upsert_volume_plan_progress(
-                progress.get("volumes_planned"),
-                volume=progress.get("current_volume") or 1,
-                chapters_range=chapters_range,
-            )
-        self._write_state_data(state_data)
+
+        def _mutate(state_data: Dict[str, Any]) -> None:
+            planning = state_data.setdefault("planning", {})
+            volume_plans = planning.setdefault("volume_plans", {})
+            volume_plans[volume] = {
+                "outline_file": self._relative_project_path(outline_path),
+                "updated_at": latest_task.get("updated_at"),
+                "summary": self._summarize_volume_plan(payload),
+                "chapter_count": len(payload.get("chapters") or []),
+            }
+            planning["latest_volume"] = volume
+            planning["last_blocked"] = None
+            progress = state_data.setdefault("progress", {})
+            try:
+                progress["current_volume"] = max(1, int(volume))
+            except ValueError:
+                progress.setdefault("current_volume", 1)
+            if chapters_range:
+                progress["volumes_planned"] = self._upsert_volume_plan_progress(
+                    progress.get("volumes_planned"),
+                    volume=progress.get("current_volume") or 1,
+                    chapters_range=chapters_range,
+                )
+
+        self._update_state_data(_mutate)
         self._sync_core_setting_docs(
             task_id=task_id,
             trigger="plan",
@@ -6289,16 +6290,17 @@ class OrchestrationService:
             self._build_review_report_markdown(task, summary, start_chapter=start_chapter, end_chapter=end_chapter),
         )
         reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state_data = self._read_state_data()
-        self._upsert_review_checkpoint(
-            state_data,
-            start_chapter=start_chapter,
-            end_chapter=end_chapter,
-            report_file=self._relative_project_path(report_path),
-            reviewed_at=reviewed_at,
-            summary=summary,
-        )
-        self._write_state_data(state_data)
+        def _mutate(state_data: Dict[str, Any]) -> None:
+            self._upsert_review_checkpoint(
+                state_data,
+                start_chapter=start_chapter,
+                end_chapter=end_chapter,
+                report_file=self._relative_project_path(report_path),
+                reviewed_at=reviewed_at,
+                summary=summary,
+            )
+
+        self._update_state_data(_mutate)
         metrics = ReviewMetrics(
             start_chapter=start_chapter,
             end_chapter=end_chapter,
@@ -6702,13 +6704,7 @@ class OrchestrationService:
 
     def _evaluate_plan_inputs(self) -> Dict[str, Any]:
         outline_path = self.project_root / OUTLINE_DIR_NAME / OUTLINE_SUMMARY_FILE
-        state_path = self.project_root / ".webnovel" / "state.json"
-        state_data: Dict[str, Any] = {}
-        if state_path.is_file():
-            try:
-                state_data = json.loads(state_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                state_data = {}
+        state_data = self._read_state_data()
 
         if not outline_path.is_file():
             return {
@@ -6796,9 +6792,12 @@ class OrchestrationService:
             readiness["ok"] = False
             readiness["reason"] = "outline_missing"
             readiness["message"] = "master outline file is missing"
-        planning["profile"] = profile
-        planning["readiness"] = readiness
-        self._write_state_data(state_data)
+        def _mutate(latest_state: Dict[str, Any]) -> None:
+            latest_planning = latest_state.setdefault("planning", {})
+            latest_planning["profile"] = profile
+            latest_planning["readiness"] = readiness
+
+        self._update_state_data(_mutate)
         return readiness
 
     def _normalize_state_payload(self, chapter: int, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -7323,37 +7322,31 @@ class OrchestrationService:
         )
 
     def _merge_world_settings(self, updates: Dict[str, List[Dict[str, Any]]]) -> None:
-        state_path = self.project_root / ".webnovel" / "state.json"
-        state_data: Dict[str, Any] = {}
-        if state_path.is_file():
-            try:
-                state_data = json.loads(state_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                state_data = {}
-        world_settings = state_data.setdefault("world_settings", {"power_system": [], "factions": [], "locations": []})
-        for category in ("power_system", "factions", "locations"):
-            existing_items = world_settings.setdefault(category, [])
-            if not isinstance(existing_items, list):
-                existing_items = []
-                world_settings[category] = existing_items
-            existing_by_name = {
-                self._slugify_setting_name(str(item.get("name") or "")): item
-                for item in existing_items
-                if isinstance(item, dict) and str(item.get("name") or "").strip()
-            }
-            for item in updates.get(category, []):
-                item_name = str(item.get("name") or "").strip()
-                if not item_name:
-                    continue
-                key = self._slugify_setting_name(item_name)
-                if key in existing_by_name:
-                    existing_by_name[key].update(item)
-                else:
-                    cloned = dict(item)
-                    existing_items.append(cloned)
-                    existing_by_name[key] = cloned
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        def _mutate(state_data: Dict[str, Any]) -> None:
+            world_settings = state_data.setdefault("world_settings", {"power_system": [], "factions": [], "locations": []})
+            for category in ("power_system", "factions", "locations"):
+                existing_items = world_settings.setdefault(category, [])
+                if not isinstance(existing_items, list):
+                    existing_items = []
+                    world_settings[category] = existing_items
+                existing_by_name = {
+                    self._slugify_setting_name(str(item.get("name") or "")): item
+                    for item in existing_items
+                    if isinstance(item, dict) and str(item.get("name") or "").strip()
+                }
+                for item in updates.get(category, []):
+                    item_name = str(item.get("name") or "").strip()
+                    if not item_name:
+                        continue
+                    key = self._slugify_setting_name(item_name)
+                    if key in existing_by_name:
+                        existing_by_name[key].update(item)
+                    else:
+                        cloned = dict(item)
+                        existing_items.append(cloned)
+                        existing_by_name[key] = cloned
+
+        self._update_state_data(_mutate)
 
     def _upsert_structured_entities(self, chapter: int, entities: List[Dict[str, Any]]) -> None:
         seen_ids: set[str] = set()

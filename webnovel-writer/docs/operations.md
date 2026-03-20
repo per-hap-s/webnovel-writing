@@ -33,40 +33,55 @@ project-root/
 
 ## 常用环境变量
 
-```bash
-export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$PWD}"
-export PLUGIN_ROOT="/path/to/webnovel-writer"
-export SCRIPTS_DIR="${PLUGIN_ROOT}/scripts"
-export PROJECT_ROOT="$(python "${SCRIPTS_DIR}/webnovel.py" --project-root "${WORKSPACE_ROOT}" where)"
+```powershell
+$env:WORKSPACE_ROOT = if ($env:WORKSPACE_ROOT) { $env:WORKSPACE_ROOT } else { (Get-Location).Path }
+$env:PLUGIN_ROOT = "D:\path\to\webnovel-writer"
+$env:SCRIPTS_DIR = Join-Path $env:PLUGIN_ROOT "scripts"
+$env:PROJECT_ROOT = python (Join-Path $env:SCRIPTS_DIR "webnovel.py") --project-root $env:WORKSPACE_ROOT where
 ```
 
 ## 常用运维命令
 
 ### 索引检查
 
-```bash
-python "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" index stats
+```powershell
+python (Join-Path $env:SCRIPTS_DIR "webnovel.py") --project-root $env:PROJECT_ROOT index stats
 ```
 
 ### 状态报告
 
-```bash
-python "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" status -- --focus all
-python "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" status -- --focus urgency
+```powershell
+python (Join-Path $env:SCRIPTS_DIR "webnovel.py") --project-root $env:PROJECT_ROOT status -- --focus all
+python (Join-Path $env:SCRIPTS_DIR "webnovel.py") --project-root $env:PROJECT_ROOT status -- --focus urgency
 ```
 
 ### RAG 检查
 
-```bash
-python "${SCRIPTS_DIR}/webnovel.py" --project-root "${PROJECT_ROOT}" rag stats
+```powershell
+python (Join-Path $env:SCRIPTS_DIR "webnovel.py") --project-root $env:PROJECT_ROOT rag stats
 ```
 
 ### 测试入口
 
-```bash
-pwsh "${PLUGIN_ROOT}/scripts/run_tests.ps1" -Mode smoke
-pwsh "${PLUGIN_ROOT}/scripts/run_tests.ps1" -Mode full
+```powershell
+pwsh (Join-Path $env:PLUGIN_ROOT "scripts/run_tests.ps1") -Mode smoke
+pwsh (Join-Path $env:PLUGIN_ROOT "scripts/run_tests.ps1") -Mode full
 ```
+
+### 开发依赖前置
+
+在直接运行 `pytest`、打包或前端静态检查之前，先安装开发依赖：
+
+```powershell
+python -m pip install -e "$($env:PLUGIN_ROOT)[dev,dashboard]"
+Set-Location (Join-Path $env:PLUGIN_ROOT "dashboard/frontend")
+npm install
+```
+
+说明：
+
+- `pytest-cov` 属于 Python 测试前置依赖；如果未安装，仓库根的 `pytest` 配置会因覆盖率参数缺失而失败。
+- `npm run lint`、`npm run typecheck`、`npm run test:*` 都依赖前端本地 `node_modules/`。
 
 ## Dashboard Frontend Artifact Maintenance
 
@@ -77,3 +92,13 @@ Rules:
 - If `dashboard/frontend/src/` changes, run `npm run build` and commit the resulting `dist/` update in the same change.
 - `dist/index.html` and `dist/assets/` must come from the same build output.
 - Remove superseded hashed files from `dist/assets/` when a new build replaces them.
+
+## Runtime State File Discipline
+
+`.webnovel/state.json` is a shared runtime file for dashboard and orchestration flows.
+
+Rules:
+
+- Read and write it through the shared state access layer in `scripts/data_modules/state_file.py`.
+- Runtime writes must follow `FileLock` + lock-in reread + incremental mutation + atomic write.
+- Do not add new direct `read_text()/write_text()` mutation paths for `.webnovel/state.json`.

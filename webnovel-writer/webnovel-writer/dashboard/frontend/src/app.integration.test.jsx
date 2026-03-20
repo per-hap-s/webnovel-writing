@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 const fetchJSONMock = vi.fn()
@@ -81,6 +81,7 @@ vi.mock('./appSections.jsx', async () => {
 import App from './App.jsx'
 
 afterEach(() => {
+    vi.useRealTimers()
     cleanup()
 })
 
@@ -115,6 +116,65 @@ test('app refreshes task state and jumps to task detail after page-level task cr
     await user.click(await screen.findByRole('button', { name: 'create-from-supervisor' }))
 
     expect(await screen.findByText('selected:task-new;count:1;summary:\u7b49\u5f85\u5b8c\u6210|none')).not.toBeNull()
+})
+
+test('sse refreshes are debounced and remain single-flight while in progress', async () => {
+    vi.useFakeTimers()
+    let pendingTaskResolve = null
+    let taskFetchCount = 0
+
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 8, total_words: 12000 } })
+        if (path === '/api/tasks') {
+            taskFetchCount += 1
+            if (taskFetchCount === 2) {
+                return new Promise((resolve) => {
+                    pendingTaskResolve = resolve
+                })
+            }
+            return Promise.resolve(tasksResponse)
+        }
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+    await act(async () => {
+        await Promise.resolve()
+    })
+
+    expect(taskFetchCount).toBe(1)
+    const onMessage = subscribeSSEMock.mock.calls[0][0]
+
+    act(() => {
+        onMessage({ data: '{"kind":"modified"}' })
+        onMessage({ data: '{"kind":"modified"}' })
+    })
+    await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+        await Promise.resolve()
+    })
+    expect(taskFetchCount).toBe(2)
+
+    act(() => {
+        onMessage({ data: '{"kind":"modified"}' })
+    })
+    await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+        await Promise.resolve()
+    })
+    expect(taskFetchCount).toBe(2)
+
+    await act(async () => {
+        pendingTaskResolve?.(tasksResponse)
+        await Promise.resolve()
+    })
+    await act(async () => {
+        await Promise.resolve()
+    })
+
+    expect(taskFetchCount).toBe(3)
 })
 
 test('overview task creation refreshes into tasks page with derived explanation state', async () => {

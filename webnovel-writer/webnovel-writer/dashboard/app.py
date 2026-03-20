@@ -33,6 +33,12 @@ from scripts.init_project import (
     normalize_planning_profile,
     sync_master_outline_with_profile,
 )
+from scripts.data_modules.state_file import (
+    ProjectStateCorruptedError,
+    ProjectStateNotFoundError,
+    read_project_state,
+    update_project_state,
+)
 
 from .orchestrator import OrchestrationService
 from .path_guard import safe_resolve
@@ -540,15 +546,30 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         return merged
 
     def _read_state_data(project_root_value: Path | None = None) -> dict[str, Any]:
-        state_path = _state_path(project_root_value)
-        if not state_path.is_file():
-            raise HTTPException(404, '未找到 state.json。')
-        return json.loads(state_path.read_text(encoding='utf-8'))
+        try:
+            return read_project_state(project_root_value or _get_project_root(), strict=True)
+        except ProjectStateNotFoundError as exc:
+            raise HTTPException(404, '未找到 state.json。') from exc
+        except ProjectStateCorruptedError as exc:
+            raise APIError(
+                500,
+                'STATE_FILE_CORRUPTED',
+                '项目状态文件损坏，请检查最近一次写回。',
+                {'original_message': str(exc)},
+            ) from exc
 
-    def _write_state_data(state_data: dict[str, Any], project_root_value: Path | None = None) -> None:
-        state_path = _state_path(project_root_value)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding='utf-8')
+    def _update_state_data(mutator: Callable[[dict[str, Any]], dict[str, Any] | None], project_root_value: Path | None = None) -> dict[str, Any]:
+        try:
+            return update_project_state(project_root_value or _get_project_root(), mutator, strict=True)
+        except ProjectStateNotFoundError as exc:
+            raise HTTPException(404, '未找到 state.json。') from exc
+        except ProjectStateCorruptedError as exc:
+            raise APIError(
+                500,
+                'STATE_FILE_CORRUPTED',
+                '项目状态文件损坏，请检查最近一次写回。',
+                {'original_message': str(exc)},
+            ) from exc
 
     def _planning_profile_payload(state_data: dict[str, Any], project_root_value: Path) -> dict[str, Any]:
         project_info = state_data.get('project_info') or {}
@@ -853,7 +874,15 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
         project_root_value = _resolve_request_project_root(http_request)
         state_data = _read_state_data(project_root_value)
         payload = _sync_planning_profile(state_data, request.model_dump(), project_root_value)
-        _write_state_data(state_data, project_root_value)
+        profile = payload['profile']
+        readiness = payload['readiness']
+
+        def _mutate(latest_state: dict[str, Any]) -> None:
+            planning = latest_state.setdefault('planning', {})
+            planning['profile'] = profile
+            planning['readiness'] = readiness
+
+        _update_state_data(_mutate, project_root_value)
         return payload
 
     @app.post('/api/project/bootstrap')
@@ -1557,7 +1586,8 @@ def _build_project_state_tree(root: Path) -> list[dict]:
 
 def _read_text_preview(path: Path) -> str:
     try:
-        return path.read_text(encoding='utf-8')
+        with path.open('r', encoding='utf-8') as handle:
+            return handle.read(2048)
     except Exception:
         return ''
 

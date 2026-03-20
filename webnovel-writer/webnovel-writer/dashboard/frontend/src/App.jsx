@@ -80,33 +80,35 @@ export default function App() {
     const [ragStatus, setRagStatus] = useState(null)
     const [tasks, setTasks] = useState([])
     const [selectedTaskId, setSelectedTaskId] = useState(null)
-    const [refreshToken, setRefreshToken] = useState(0)
+    const [coreRefreshVersion, setCoreRefreshVersion] = useState(0)
+    const [coreLoadError, setCoreLoadError] = useState(null)
+    const [statusLoadError, setStatusLoadError] = useState(null)
     const [connected, setConnected] = useState(false)
-    const refreshDebounceRef = useRef(null)
-    const lastStatusRefreshRef = useRef(0)
+    const coreRefreshTimerRef = useRef(null)
+    const coreRefreshInFlightRef = useRef(false)
+    const coreRefreshPendingRef = useRef(false)
+    const coreRefreshSeqRef = useRef(0)
+    const statusRefreshSeqRef = useRef(0)
     const optimisticTasksRef = useRef(new Map())
 
     useEffect(() => {
-        reloadCore()
-    }, [refreshToken])
+        void flushCoreRefresh()
+    }, [])
 
     useEffect(() => {
         writeDashboardPageToQuery(page)
     }, [page])
 
     useEffect(() => {
-        reloadServiceStatus()
+        void reloadServiceStatus()
         const dispose = subscribeSSE(
             () => {
-                if (refreshDebounceRef.current) {
-                    window.clearTimeout(refreshDebounceRef.current)
+                if (coreRefreshTimerRef.current) {
+                    window.clearTimeout(coreRefreshTimerRef.current)
                 }
-                refreshDebounceRef.current = window.setTimeout(() => {
-                    refreshDebounceRef.current = null
-                    setRefreshToken((value) => value + 1)
-                    if (Date.now() - lastStatusRefreshRef.current > 60000) {
-                        reloadServiceStatus()
-                    }
+                coreRefreshTimerRef.current = window.setTimeout(() => {
+                    coreRefreshTimerRef.current = null
+                    void flushCoreRefresh()
                 }, 250)
             },
             {
@@ -115,56 +117,115 @@ export default function App() {
             },
         )
         const statusTimer = window.setInterval(() => {
-            reloadServiceStatus()
+            void reloadServiceStatus()
         }, 60000)
         return () => {
             dispose()
             window.clearInterval(statusTimer)
-            if (refreshDebounceRef.current) {
-                window.clearTimeout(refreshDebounceRef.current)
-                refreshDebounceRef.current = null
+            if (coreRefreshTimerRef.current) {
+                window.clearTimeout(coreRefreshTimerRef.current)
+                coreRefreshTimerRef.current = null
             }
+            coreRefreshSeqRef.current += 1
+            statusRefreshSeqRef.current += 1
             setConnected(false)
         }
     }, [])
 
-    function reloadCore() {
-        fetchJSON('/api/project/info').then(setProjectInfo).catch(() => setProjectInfo(null))
-        fetchJSON('/api/tasks').then((items) => {
-            const mergedItems = mergeFetchedTasksWithOptimistic(items, optimisticTasksRef.current)
+    function scheduleCoreRefresh() {
+        if (coreRefreshTimerRef.current) {
+            window.clearTimeout(coreRefreshTimerRef.current)
+        }
+        coreRefreshTimerRef.current = window.setTimeout(() => {
+            coreRefreshTimerRef.current = null
+            void flushCoreRefresh()
+        }, 250)
+    }
+
+    async function flushCoreRefresh() {
+        if (coreRefreshInFlightRef.current) {
+            coreRefreshPendingRef.current = true
+            return
+        }
+
+        coreRefreshInFlightRef.current = true
+        try {
+            do {
+                coreRefreshPendingRef.current = false
+                const refreshId = ++coreRefreshSeqRef.current
+                await reloadCore(refreshId)
+                if (refreshId === coreRefreshSeqRef.current) {
+                    setCoreRefreshVersion((value) => value + 1)
+                }
+            } while (coreRefreshPendingRef.current)
+        } finally {
+            coreRefreshInFlightRef.current = false
+        }
+    }
+
+    async function reloadCore(refreshId) {
+        const [projectResult, tasksResult] = await Promise.allSettled([
+            fetchJSON('/api/project/info'),
+            fetchJSON('/api/tasks'),
+        ])
+        if (refreshId !== coreRefreshSeqRef.current) return
+
+        const errors = []
+        if (projectResult.status === 'fulfilled') {
+            setProjectInfo(projectResult.value)
+        } else {
+            errors.push(normalizeError(projectResult.reason))
+        }
+
+        if (tasksResult.status === 'fulfilled') {
+            const mergedItems = mergeFetchedTasksWithOptimistic(tasksResult.value, optimisticTasksRef.current)
             setTasks(mergedItems)
             setSelectedTaskId((currentId) => {
                 if (mergedItems.length === 0) return null
                 if (currentId && mergedItems.some((item) => item.id === currentId)) return currentId
                 return mergedItems[0].id
             })
-        }).catch(() => {
-            const optimisticItems = Array.from(optimisticTasksRef.current.values())
-            setTasks(optimisticItems)
-            setSelectedTaskId((currentId) => {
-                if (optimisticItems.length === 0) return null
-                if (currentId && optimisticItems.some((item) => item.id === currentId)) return currentId
-                return optimisticItems[0].id
-            })
-        })
+        } else {
+            errors.push(normalizeError(tasksResult.reason))
+        }
+
+        setCoreLoadError(errors[0] || null)
     }
 
-    function reloadServiceStatus() {
-        lastStatusRefreshRef.current = Date.now()
-        fetchJSON('/api/llm/status').then(setLlmStatus).catch(() => setLlmStatus(null))
-        fetchJSON('/api/rag/status').then(setRagStatus).catch(() => setRagStatus(null))
+    async function reloadServiceStatus() {
+        const refreshId = ++statusRefreshSeqRef.current
+        const [llmResult, ragResult] = await Promise.allSettled([
+            fetchJSON('/api/llm/status'),
+            fetchJSON('/api/rag/status'),
+        ])
+        if (refreshId !== statusRefreshSeqRef.current) return
+
+        const errors = []
+        if (llmResult.status === 'fulfilled') {
+            setLlmStatus(llmResult.value)
+        } else {
+            errors.push(normalizeError(llmResult.reason))
+        }
+
+        if (ragResult.status === 'fulfilled') {
+            setRagStatus(ragResult.value)
+        } else {
+            errors.push(normalizeError(ragResult.reason))
+        }
+
+        setStatusLoadError(errors[0] || null)
     }
 
     function handleTaskCreated(task) {
         if (!task?.id) {
-            setRefreshToken((value) => value + 1)
+            scheduleCoreRefresh()
             return
         }
         optimisticTasksRef.current.set(task.id, task)
         setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
         setSelectedTaskId(task.id)
         setPage('tasks')
-        setRefreshToken((value) => value + 1)
+        scheduleCoreRefresh()
     }
 
     function handleOpenTask(taskId) {
@@ -203,6 +264,8 @@ export default function App() {
             </aside>
 
             <main className="content">
+                <ErrorNotice error={coreLoadError} title="核心数据刷新失败" />
+                <ErrorNotice error={statusLoadError} title="模型状态刷新失败" />
                 {page === 'control' && (
                     <ControlPage
                         projectInfo={projectInfo}
@@ -217,10 +280,10 @@ export default function App() {
                                 return
                             }
                             setPage('control')
-                            setRefreshToken((value) => value + 1)
+                            scheduleCoreRefresh()
                         }}
                         onOpenTask={handleOpenTask}
-                        onTasksMutated={() => setRefreshToken((value) => value + 1)}
+                        onTasksMutated={scheduleCoreRefresh}
                     />
                 )}
                 {page === 'supervisor' && (
@@ -229,7 +292,7 @@ export default function App() {
                         tasks={tasks}
                         onTaskCreated={handleTaskCreated}
                         onOpenTask={handleOpenTask}
-                        onTasksMutated={() => setRefreshToken((value) => value + 1)}
+                        onTasksMutated={scheduleCoreRefresh}
                     />
                 )}
                 {page === 'supervisor-audit' && (
@@ -238,7 +301,7 @@ export default function App() {
                         tasks={tasks}
                         onTaskCreated={handleTaskCreated}
                         onOpenTask={handleOpenTask}
-                        onTasksMutated={() => setRefreshToken((value) => value + 1)}
+                        onTasksMutated={scheduleCoreRefresh}
                     />
                 )}
                 {page === 'tasks' && (
@@ -246,13 +309,13 @@ export default function App() {
                         tasks={tasks}
                         selectedTask={selectedTask}
                         onSelectTask={setSelectedTaskId}
-                        onMutated={() => setRefreshToken((value) => value + 1)}
+                        onMutated={scheduleCoreRefresh}
                         onNavigateOverview={() => setPage('control')}
                     />
                 )}
-                {page === 'data' && <DataPage refreshToken={refreshToken} />}
-                {page === 'files' && <FilesPage refreshToken={refreshToken} />}
-                {page === 'quality' && <QualityPage refreshToken={refreshToken} onMutated={() => setRefreshToken((value) => value + 1)} />}
+                {page === 'data' && <DataPage refreshToken={coreRefreshVersion} />}
+                {page === 'files' && <FilesPage refreshToken={coreRefreshVersion} />}
+                {page === 'quality' && <QualityPage refreshToken={coreRefreshVersion} onMutated={scheduleCoreRefresh} />}
             </main>
         </div>
     )

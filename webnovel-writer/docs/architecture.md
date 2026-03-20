@@ -2,6 +2,12 @@
 
 ## 核心理念
 
+## Runtime State Access
+
+- `.webnovel/state.json` 是 Dashboard、编排器和数据层共享的运行时状态文件。
+- 该文件的运行时写入统一通过 `scripts/data_modules/state_file.py` 处理，约束为：`FileLock`、锁内重读、增量合并、原子写回。
+- 新增功能如果需要更新项目状态，不能再直接对 `.webnovel/state.json` 做 `read_text()/write_text()` 覆盖式写入。
+
 ### 防幻觉三定律
 
 | 定律 | 说明 | 执行方式 |

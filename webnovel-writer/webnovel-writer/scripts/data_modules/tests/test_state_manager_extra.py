@@ -564,3 +564,26 @@ def test_save_state_timeout(monkeypatch, temp_project):
     monkeypatch.setattr(sm.filelock, "FileLock", FakeLock)
     with pytest.raises(RuntimeError):
         manager.save_state()
+
+
+def test_get_entities_by_tier_uses_single_sql_query(temp_project, monkeypatch):
+    manager = StateManager(temp_project)
+    assert manager._sql_state_manager is not None
+
+    call_count = {"count": 0}
+
+    def fake_get_entities_by_tier(tier):
+        call_count["count"] += 1
+        assert tier == "鏍稿績"
+        return [
+            {"id": "xiaoyan", "name": "钀х値", "type": "瑙掕壊", "tier": "鏍稿績"},
+            {"id": "yaolao", "name": "鑰佽嵂", "type": "瑙掕壊", "tier": "鏍稿績"},
+        ]
+
+    monkeypatch.setattr(manager._sql_state_manager._index_manager, "get_entities_by_tier", fake_get_entities_by_tier)
+
+    result = manager.get_entities_by_tier("鏍稿績")
+
+    assert call_count["count"] == 1
+    assert set(result) == {"xiaoyan", "yaolao"}
+    assert result["xiaoyan"]["tier"] == "鏍稿績"

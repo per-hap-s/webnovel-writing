@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 import { ErrorNotice } from './appSections.jsx'
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
@@ -115,6 +115,7 @@ function buildSupervisorChecklistMarkdown({ projectInfo, items, categoryFilter, 
 
 export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, onTasksMutated }) {
     const [supervisorError, setSupervisorError] = useState(null)
+    const [supervisorLoadError, setSupervisorLoadError] = useState(null)
     const [supervisorSubmitting, setSupervisorSubmitting] = useState(false)
     const [rawSupervisorItems, setRawSupervisorItems] = useState([])
     const [dismissDrafts, setDismissDrafts] = useState({})
@@ -130,6 +131,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
     const [checklistNote, setChecklistNote] = useState('')
     const [recentChecklists, setRecentChecklists] = useState([])
     const [selectedChecklistPath, setSelectedChecklistPath] = useState('')
+    const loadSeqRef = useRef(0)
 
     const supervisorCategoryOptions = useMemo(() => {
         const seen = new Map()
@@ -176,47 +178,64 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
         [projectInfo, checklistItems, categoryFilter, sortMode],
     )
 
-    function reloadSupervisorItems(active = true) {
-        fetchJSON('/api/supervisor/recommendations?include_dismissed=true')
-            .then((items) => {
-                if (!active) return
-                setRawSupervisorItems(Array.isArray(items) ? items : [])
-            })
-            .catch(() => {
-                if (!active) return
-                setRawSupervisorItems([])
-            })
-    }
-
-    function reloadSupervisorChecklists(active = true) {
-        fetchJSON('/api/supervisor/checklists', { limit: 8 })
-            .then((items) => {
-                if (!active) return
-                const nextItems = Array.isArray(items) ? items : []
-                setRecentChecklists(nextItems)
-                setSelectedChecklistPath((current) => {
-                    if (current && nextItems.some((item) => item.relativePath === current)) return current
-                    return nextItems[0]?.relativePath || ''
-                })
-            })
-            .catch(() => {
-                if (!active) return
-                setRecentChecklists([])
-                setSelectedChecklistPath('')
-            })
-    }
-
     const selectedChecklist = useMemo(
         () => recentChecklists.find((item) => item.relativePath === selectedChecklistPath) || recentChecklists[0] || null,
         [recentChecklists, selectedChecklistPath],
     )
 
+    async function refreshSupervisorChecklists() {
+        try {
+            const items = await fetchJSON('/api/supervisor/checklists', { limit: 8 })
+            const nextItems = Array.isArray(items) ? items : []
+            setRecentChecklists(nextItems)
+            setSelectedChecklistPath((current) => {
+                if (current && nextItems.some((item) => item.relativePath === current)) return current
+                return nextItems[0]?.relativePath || ''
+            })
+            setSupervisorLoadError(null)
+        } catch (err) {
+            setSupervisorLoadError(normalizeError(err))
+        }
+    }
+
     useEffect(() => {
-        let active = true
-        reloadSupervisorItems(active)
-        reloadSupervisorChecklists(active)
+        const loadSeq = ++loadSeqRef.current
+        let cancelled = false
+
+        Promise.allSettled([
+            fetchJSON('/api/supervisor/recommendations?include_dismissed=true'),
+            fetchJSON('/api/supervisor/checklists', { limit: 8 }),
+        ])
+            .then(([itemsResult, checklistsResult]) => {
+                if (cancelled || loadSeq !== loadSeqRef.current) return
+
+                const errors = []
+                if (itemsResult.status === 'fulfilled') {
+                    setRawSupervisorItems(Array.isArray(itemsResult.value) ? itemsResult.value : [])
+                } else {
+                    errors.push(normalizeError(itemsResult.reason))
+                }
+
+                if (checklistsResult.status === 'fulfilled') {
+                    const nextItems = Array.isArray(checklistsResult.value) ? checklistsResult.value : []
+                    setRecentChecklists(nextItems)
+                    setSelectedChecklistPath((current) => {
+                        if (current && nextItems.some((item) => item.relativePath === current)) return current
+                        return nextItems[0]?.relativePath || ''
+                    })
+                } else {
+                    errors.push(normalizeError(checklistsResult.reason))
+                }
+
+                setSupervisorLoadError(errors[0] || null)
+            })
+            .catch((err) => {
+                if (cancelled || loadSeq !== loadSeqRef.current) return
+                setSupervisorLoadError(normalizeError(err))
+            })
         return () => {
-            active = false
+            cancelled = true
+            loadSeqRef.current += 1
         }
     }, [tasks, projectInfo?.progress?.current_chapter])
 
@@ -484,7 +503,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
                 note: checklistNote,
             })
             setSavedChecklistMeta(response)
-            reloadSupervisorChecklists(true)
+            await refreshSupervisorChecklists()
         } catch (err) {
             setSupervisorError(normalizeError(err))
         } finally {
@@ -505,6 +524,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
                     <MetricCard label="项目总字数" value={formatNumber(projectInfo?.progress?.total_words || 0)} />
                 </div>
             </section>
+            <ErrorNotice error={supervisorLoadError} title="Supervisor 数据刷新失败" />
             <section className="panel full-span">
                 <div className="panel-title">筛选与排序</div>
                 <div className="detail-grid">

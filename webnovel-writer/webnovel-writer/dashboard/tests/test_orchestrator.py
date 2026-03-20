@@ -6,8 +6,11 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from dashboard.llm_runner import StepResult
 from dashboard.orchestrator import OrchestrationService
+from scripts.data_modules.state_file import ProjectStateCorruptedError
 
 
 def step_result(step_name: str, *, success: bool = True, payload: dict | None = None, error: dict | None = None) -> StepResult:
@@ -82,6 +85,48 @@ def make_project(tmp_path: Path) -> Path:
     outline_dir.mkdir(parents=True)
     (outline_dir / "总纲.md").write_text("# outline\n", encoding="utf-8")
     return project_root
+
+
+def test_read_state_data_raises_for_corrupted_json(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    (project_root / ".webnovel" / "state.json").write_text("{broken json", encoding="utf-8")
+    service = OrchestrationService(project_root, runner=MappingRunner())
+
+    with pytest.raises(ProjectStateCorruptedError):
+        service._read_state_data()
+
+
+def test_apply_plan_writeback_preserves_unrelated_state_fields(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    state_path = project_root / ".webnovel" / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "project_info": {"title": "Test Novel", "genre": "Urban Fantasy"},
+                "progress": {"current_chapter": 7, "total_words": 3200},
+                "chapter_meta": {"7": {"title": "Existing Chapter"}},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    service._sync_core_setting_docs = lambda **kwargs: None
+    task = service.store.create_task("plan", {"volume": 1}, {"name": "plan", "version": 1, "steps": []})
+
+    service._apply_plan_writeback(
+        task["id"],
+        task,
+        {
+            "chapters": [{"chapter": 1}, {"chapter": 12}],
+            "summary": "Volume summary",
+        },
+    )
+
+    updated = json.loads(state_path.read_text(encoding="utf-8"))
+    assert updated["chapter_meta"]["7"]["title"] == "Existing Chapter"
+    assert updated["planning"]["volume_plans"]["1"]["chapter_count"] == 2
 
 
 def test_probe_rag_returns_client_probe(tmp_path: Path):

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+from heapq import nlargest
 import logging
 import os
 import tempfile
@@ -10,7 +11,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from filelock import FileLock, Timeout
 
@@ -202,15 +203,23 @@ class TaskStore:
         返回按创建时间倒序排列的任务列表。
         解析失败的文件会被跳过并记录警告日志。
         """
-        tasks: List[Dict[str, Any]] = []
-        for path in self.base_dir.glob("*.json"):
-            try:
-                tasks.append(json.loads(path.read_text(encoding="utf-8")))
-            except json.JSONDecodeError as e:
-                logger.warning("任务文件 JSON 解析失败，文件: %s，错误: %s", str(path), e)
-                continue
-        tasks.sort(key=lambda item: _parse_sort_datetime(item.get("created_at")), reverse=True)
-        return tasks[:limit]
+        if limit <= 0:
+            return []
+
+        def _iter_tasks() -> Iterator[tuple[Dict[str, Any], int]]:
+            for path in self.base_dir.glob("*.json"):
+                try:
+                    yield json.loads(path.read_text(encoding="utf-8")), path.stat().st_mtime_ns
+                except json.JSONDecodeError as e:
+                    logger.warning("任务文件 JSON 解析失败，文件: %s，错误: %s", str(path), e)
+                    continue
+
+        ranked = nlargest(
+            limit,
+            _iter_tasks(),
+            key=lambda entry: (_parse_sort_datetime(entry[0].get("created_at")), entry[1]),
+        )
+        return [item for item, _ in ranked]
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """
