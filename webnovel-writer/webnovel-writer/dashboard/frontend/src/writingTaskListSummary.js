@@ -7,6 +7,13 @@ export function supportsWritingTaskContinuation(task) {
     return WRITING_MAINLINE_TASK_TYPES.has(String(task?.task_type || '').trim())
 }
 
+function resolvePrimaryAction(actions) {
+    if (!Array.isArray(actions) || actions.length === 0) return null
+    const action = actions.find((item) => item?.variant === 'primary') || actions[0] || null
+    if (!action || action.kind === 'complete-noop') return null
+    return action
+}
+
 function resolveBlockedKind(task, derived, detailSummary) {
     if (detailSummary.continuation === '可以继续') return 'continuable'
     if (detailSummary.continuation === '无需操作') return 'noop'
@@ -44,14 +51,15 @@ export function buildWritingTaskListSummary({ task, derived = null } = {}) {
         resumeRun: resolved.resumeRun,
         operatorActions: resolved.operatorActions,
     })
+    const primaryAction = resolvePrimaryAction(resolved.operatorActions)
 
-    const primaryActionLabel = detailSummary.actionLabel && detailSummary.actionLabel !== '-' ? detailSummary.actionLabel : ''
     return {
         ...detailSummary,
         detailSummary: detailSummary.summary,
         continuationLabel: detailSummary.continuation,
         reasonLabel: detailSummary.summary || detailSummary.reasons[0] || '-',
-        primaryActionLabel,
+        primaryAction,
+        primaryActionLabel: primaryAction?.label || '',
         blockedKind: resolveBlockedKind(task, resolved, detailSummary),
         isContinuable: detailSummary.continuation === '可以继续',
     }

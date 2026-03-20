@@ -666,6 +666,15 @@ export function TaskCenterPageSection({
         }
     }
 
+    function handleTaskPrimaryActionClick(event, task, action) {
+        event.stopPropagation()
+        if (action) {
+            executeOperatorAction(action)
+            return
+        }
+        onSelectTask(task.id)
+    }
+
     async function cancelTask(task) {
         if (!task?.id || !canCancelTask) return
         setCancelSubmitting(true)
@@ -699,27 +708,44 @@ export function TaskCenterPageSection({
                     {tasks.map((task) => {
                         const liveTask = withLiveRuntimeStatus(task, runtimeNow)
                         const writingSummary = buildWritingTaskListSummary({ task: liveTask })
+                        const primaryAction = writingSummary?.primaryAction || null
                         const recommendedLabel = writingSummary?.primaryActionLabel || writingSummary?.nextStep || ''
                         return (
-                        <button key={task.id} className={`task-item ${selectedTask?.id === task.id ? 'active' : ''}`} onClick={() => onSelectTask(task.id)}>
-                            <div className="task-item-header">
-                                <div>{translateTaskType(liveTask.task_type)}</div>
-                                <span className={`runtime-badge ${resolveRuntimeBadgeTone(liveTask)}`}>{resolveRuntimeBadgeLabel(liveTask)}</span>
-                            </div>
-                            <div className="tiny task-target">{resolveTargetLabel ? resolveTargetLabel(liveTask) : (liveTask.runtime_status?.target_label || '-')}</div>
-                            <div className="muted">{resolveTaskStatusLabel ? resolveTaskStatusLabel(liveTask) : translateTaskStatus(liveTask.status)}</div>
-                            <div className="tiny">{resolveCurrentStepLabel ? resolveCurrentStepLabel(liveTask) : translateStepName(liveTask.current_step || 'idle')}</div>
-                            <div className="tiny runtime-summary">{buildRuntimeSummary(liveTask)}</div>
-                            {writingSummary ? (
-                                <div className="task-followup">
-                                    <div className="task-followup-header">
-                                        <span className={`runtime-badge ${mapContinuationToneToBadgeTone(writingSummary.tone)}`}>{writingSummary.continuationLabel}</span>
-                                        {recommendedLabel ? <span className="tiny task-followup-action">{recommendedLabel}</span> : null}
+                        <div key={task.id} className={`task-item ${selectedTask?.id === task.id ? 'active' : ''}`}>
+                            <button className="task-item-main" onClick={() => onSelectTask(task.id)}>
+                                <div className="task-item-header">
+                                    <div>{translateTaskType(liveTask.task_type)}</div>
+                                    <span className={`runtime-badge ${resolveRuntimeBadgeTone(liveTask)}`}>{resolveRuntimeBadgeLabel(liveTask)}</span>
+                                </div>
+                                <div className="tiny task-target">{resolveTargetLabel ? resolveTargetLabel(liveTask) : (liveTask.runtime_status?.target_label || '-')}</div>
+                                <div className="muted">{resolveTaskStatusLabel ? resolveTaskStatusLabel(liveTask) : translateTaskStatus(liveTask.status)}</div>
+                                <div className="tiny">{resolveCurrentStepLabel ? resolveCurrentStepLabel(liveTask) : translateStepName(liveTask.current_step || 'idle')}</div>
+                                <div className="tiny runtime-summary">{buildRuntimeSummary(liveTask)}</div>
+                                {writingSummary ? (
+                                    <div className="task-followup">
+                                        <div className="task-followup-header">
+                                            <span className={`runtime-badge ${mapContinuationToneToBadgeTone(writingSummary.tone)}`}>{writingSummary.continuationLabel}</span>
+                                            {recommendedLabel ? <span className="tiny task-followup-action">{recommendedLabel}</span> : null}
+                                        </div>
+                                        <div className="tiny task-followup-summary">{writingSummary.reasonLabel}</div>
                                     </div>
-                                    <div className="tiny task-followup-summary">{writingSummary.reasonLabel}</div>
+                                ) : null}
+                            </button>
+                            {writingSummary ? (
+                                <div className="task-item-actions">
+                                    <button
+                                        className={primaryAction ? 'primary-button' : 'secondary-button'}
+                                        onClick={(event) => handleTaskPrimaryActionClick(event, liveTask, primaryAction)}
+                                        disabled={Boolean(primaryAction && (followupSubmitting || primaryAction.disabled))}
+                                        title={primaryAction ? (primaryAction.reason || primaryAction.label) : '查看任务'}
+                                    >
+                                        {primaryAction
+                                            ? (followupSubmitting ? '处理中...' : primaryAction.label)
+                                            : '查看任务'}
+                                    </button>
                                 </div>
                             ) : null}
-                        </button>
+                        </div>
                     )})}
                     {tasks.length === 0 && <div className="empty-state">暂无任务</div>}
                 </div>

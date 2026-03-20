@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchJSON, subscribeSSE } from './api.js'
+import { fetchJSON, normalizeError, postJSON, subscribeSSE } from './api.js'
 import {
     ApiSettingsSection,
     DataPageSection,
@@ -27,232 +27,50 @@ import {
     translateTaskStatus,
     translateTaskType,
 } from './dashboardPageCommon.jsx'
+import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
 import { SupervisorPage } from './supervisorPage.jsx'
 import { SupervisorAuditPage } from './supervisorAuditPage.jsx'
 import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
 
 const NAV_ITEMS = [
-    { id: 'control', label: '\u603b\u89c8' },
-    { id: 'supervisor', label: '\u7763\u529e' },
-    { id: 'supervisor-audit', label: '\u7763\u529e\u5ba1\u8ba1' },
-    { id: 'tasks', label: '\u4efb\u52a1' },
-    { id: 'data', label: '\u6570\u636e' },
-    { id: 'files', label: '\u6587\u4ef6' },
-    { id: 'quality', label: '\u8d28\u91cf' },
+    { id: 'control', label: '总览' },
+    { id: 'supervisor', label: '督办' },
+    { id: 'supervisor-audit', label: '督办审计' },
+    { id: 'tasks', label: '任务' },
+    { id: 'data', label: '数据' },
+    { id: 'files', label: '文件' },
+    { id: 'quality', label: '质量' },
 ]
 
 const MODE_OPTIONS = [
-    { value: 'standard', label: '\u6807\u51c6' },
-    { value: 'fast', label: '\u5feb\u901f' },
-    { value: 'minimal', label: '\u7cbe\u7b80' },
+    { value: 'standard', label: '标准' },
+    { value: 'fast', label: '快速' },
+    { value: 'minimal', label: '精简' },
 ]
 
 const TASK_TEMPLATES = [
-    { key: 'init', title: '\u8865\u79cd\u9879\u76ee\u9aa8\u67b6\uff08\u65e7\u5165\u53e3\uff09', fields: ['project_root'] },
-    { key: 'plan', title: '\u89c4\u5212\u5377', fields: ['volume', 'mode'] },
-    { key: 'write', title: '\u64b0\u5199\u7ae0\u8282', fields: ['chapter', 'mode', 'require_manual_approval'] },
-    { key: 'guarded-write', title: '\u62a4\u680f\u63a8\u8fdb\u4e00\u7ae0', fields: ['chapter', 'mode', 'require_manual_approval'] },
-    { key: 'guarded-batch-write', title: '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb', fields: ['start_chapter', 'max_chapters', 'mode', 'require_manual_approval'] },
-    { key: 'review', title: '\u6267\u884c\u5ba1\u67e5', fields: ['chapter_range', 'mode'] },
-    { key: 'resume', title: '\u6062\u590d\u4efb\u52a1', fields: ['mode'] },
+    { key: 'init', title: '补种项目骨架（旧入口）', fields: ['project_root'] },
+    { key: 'plan', title: '规划卷', fields: ['volume', 'mode'] },
+    { key: 'write', title: '撰写章节', fields: ['chapter', 'mode', 'require_manual_approval'] },
+    { key: 'guarded-write', title: '护栏推进一章', fields: ['chapter', 'mode', 'require_manual_approval'] },
+    { key: 'guarded-batch-write', title: '护栏批量推进', fields: ['start_chapter', 'max_chapters', 'mode', 'require_manual_approval'] },
+    { key: 'review', title: '执行审查', fields: ['chapter_range', 'mode'] },
+    { key: 'resume', title: '恢复任务', fields: ['mode'] },
 ]
-
-const PROJECT_BOOTSTRAP_TEMPLATE = {
-    key: 'bootstrap',
-    endpoint: '/api/project/bootstrap',
-    title: '\u521b\u5efa\u9879\u76ee',
-    submitLabel: '\u521b\u5efa\u9879\u76ee',
-    fields: ['project_root', 'title', 'genre'],
-}
-
-const TASK_TYPE_LABELS = {
-    init: '\u65e7\u521d\u59cb\u5316',
-    plan: '\u89c4\u5212\u5377',
-    write: '\u64b0\u5199\u7ae0\u8282',
-    'guarded-write': '\u62a4\u680f\u63a8\u8fdb',
-    'guarded-batch-write': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb',
-    review: '\u6267\u884c\u5ba1\u67e5',
-    resume: '\u6062\u590d\u4efb\u52a1',
-}
 
 const DASHBOARD_PAGE_QUERY_KEY = 'page'
 
-const STATUS_LABELS = {
-    queued: '\u5df2\u6392\u961f',
-    running: '\u8fd0\u884c\u4e2d',
-    awaiting_writeback_approval: '\u7b49\u5f85\u56de\u5199\u5ba1\u6279',
-    completed: '\u5df2\u5b8c\u6210',
-    failed: '\u5931\u8d25',
-    interrupted: '\u5df2\u4e2d\u65ad',
-    rejected: '\u5df2\u62d2\u7edd',
-}
-
-const APPROVAL_STATUS_LABELS = {
-    not_required: '\u65e0\u9700\u5ba1\u6279',
-    pending: '\u5f85\u6279\u51c6\u56de\u5199',
-    approved: '\u5df2\u6279\u51c6',
-    rejected: '\u5df2\u62d2\u7edd',
-}
-
-const STEP_LABELS = {
-    init: '\u521d\u59cb\u5316',
-    plan: '\u89c4\u5212',
-    resume: '\u6062\u590d',
-    'guarded-chapter-runner': '\u62a4\u680f\u63a8\u8fdb\u4e00\u7ae0',
-    'guarded-batch-runner': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb',
-    'story-director': '\u591a\u7ae0\u53d9\u4e8b\u89c4\u5212',
-    'chapter-director': '\u5355\u7ae0\u5bfc\u6f14\u51b3\u7b56',
-    context: '\u4e0a\u4e0b\u6587\u51c6\u5907',
-    draft: '\u8349\u7a3f\u751f\u6210',
-    'consistency-review': '\u4e00\u81f4\u6027\u5ba1\u67e5',
-    'continuity-review': '\u8fde\u7eed\u6027\u5ba1\u67e5',
-    'ooc-review': '\u89d2\u8272\u4e00\u81f4\u6027\u5ba1\u67e5',
-    'review-summary': '\u5ba1\u67e5\u6c47\u603b',
-    polish: '\u6da6\u8272',
-    'approval-gate': '\u5ba1\u6279\u5173\u5361',
-    'data-sync': '\u6570\u636e\u540c\u6b65',
-    idle: '\u7a7a\u95f2',
-}
-
-const EVENT_LEVEL_LABELS = {
-    info: '\u4fe1\u606f',
-    warning: '\u8b66\u544a',
-    error: '\u9519\u8bef',
-}
-
-const TABLE_HEADER_LABELS = {
-    name: '\u540d\u79f0',
-    canonical_name: '\u6807\u51c6\u540d\u79f0',
-    type: '\u7c7b\u578b',
-    tier: '\u5c42\u7ea7',
-    last_appearance: '\u6700\u540e\u51fa\u73b0\u7ae0\u8282',
-    from_entity: '\u8d77\u59cb\u5b9e\u4f53',
-    to_entity: '\u76ee\u6807\u5b9e\u4f53',
-    from_entity_display: '\u8d77\u59cb\u5b9e\u4f53',
-    to_entity_display: '\u76ee\u6807\u5b9e\u4f53',
-    type_label: '\u5173\u7cfb\u7c7b\u578b',
-    chapter: '\u7ae0\u8282',
-    title: '\u6807\u9898',
-    location: '\u5730\u70b9',
-    word_count: '\u5b57\u6570',
-    end_chapter: '\u7ed3\u675f\u7ae0\u8282',
-    overall_score: '\u603b\u8bc4\u5206',
-    created_at: '\u521b\u5efa\u65f6\u95f4',
-    template: '\u6a21\u677f',
-    score: '\u5206\u6570',
-    completion_rate: '\u5b8c\u6210\u7387',
-    query_type: '\u67e5\u8be2\u7c7b\u578b',
-    query: '\u67e5\u8be2\u5185\u5bb9',
-    results_count: '\u7ed3\u679c\u6570',
-    latency_ms: '\u5ef6\u8fdf(ms)',
-    tool_name: '\u5de5\u5177\u540d',
-    success: '\u6210\u529f',
-    retry_count: '\u91cd\u8bd5\u6b21\u6570',
-    source_type: '\u6765\u6e90\u7c7b\u578b',
-    source_id: '\u6765\u6e90 ID',
-    from_entity_name: '\u8d77\u59cb\u5b9e\u4f53',
-    to_entity_name: '\u76ee\u6807\u5b9e\u4f53',
-    target_label: '\u4efb\u52a1\u76ee\u6807',
-}
-
-const RELATIONSHIP_TYPE_LABELS = {
-    family: '\u5bb6\u5ead',
-    ally: '\u540c\u76df',
-    enemy: '\u654c\u5bf9',
-    mentor: '\u5e08\u53cb',
-    subordinate: '\u4e0a\u4e0b\u7ea7',
-    colleague: '\u540c\u4e8b',
-    suspect: '\u5acc\u7591',
-    investigating: '\u8c03\u67e5',
-    conflict: '\u51b2\u7a81',
-    owes: '\u6b20\u8d26',
-    protects: '\u4fdd\u62a4',
-    watches: '\u76d1\u89c6',
-    warned_by: '\u9884\u8b66\u6765\u6e90',
-}
-
-const EXACT_EVENT_MESSAGES = {
-    'Retry requested': '\u5df2\u8bf7\u6c42\u91cd\u8bd5',
-    'Writeback approved': '\u5df2\u6279\u51c6\u56de\u5199',
-    'Writeback rejected': '\u5df2\u62d2\u7edd\u56de\u5199',
-    'Rejected by operator': '\u5df2\u88ab\u64cd\u4f5c\u4eba\u62d2\u7edd',
-    'Schema validation failed': '\u7ed3\u6784\u6821\u9a8c\u5931\u8d25',
-    'Task completed': '\u4efb\u52a1\u5df2\u5b8c\u6210',
-    'Story director prepared': '\u591a\u7ae0\u53d9\u4e8b\u89c4\u5212\u5df2\u751f\u6210',
-    'Chapter director prepared': '\u5355\u7ae0\u5bfc\u6f14\u7b80\u62a5\u5df2\u751f\u6210',
-    'Context story contract synced': '\u4e0a\u4e0b\u6587\u5df2\u540c\u6b65\u53d9\u4e8b\u5bfc\u6f14\u5408\u540c',
-    'Story plan refresh suggested': '\u5efa\u8bae\u91cd\u65b0\u751f\u6210\u6eda\u52a8\u89c4\u5212',
-    'Guarded runner blocked by story refresh': '\u62a4\u680f\u63a8\u8fdb\u56e0\u6eda\u52a8\u89c4\u5212\u5237\u65b0\u5efa\u8bae\u800c\u505c\u6b62',
-    'Guarded runner child task created': '\u62a4\u680f\u63a8\u8fdb\u5df2\u521b\u5efa write \u5b50\u4efb\u52a1',
-    'Guarded runner stopped at approval gate': '\u62a4\u680f\u63a8\u8fdb\u5728\u5ba1\u6279\u5173\u5361\u505c\u6b62',
-    'Guarded runner blocked by review gate': '\u62a4\u680f\u63a8\u8fdb\u88ab\u5ba1\u67e5\u5173\u5361\u62e6\u622a',
-    'Guarded runner child task failed': '\u62a4\u680f\u63a8\u8fdb\u5b50\u4efb\u52a1\u5931\u8d25',
-    'Guarded runner completed one chapter': '\u62a4\u680f\u63a8\u8fdb\u5df2\u5b8c\u6210\u4e00\u7ae0',
-    'Guarded batch child task created': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u5df2\u521b\u5efa\u5b50\u4efb\u52a1',
-    'Guarded batch stopped by child outcome': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u56e0\u5b50\u4efb\u52a1\u7ed3\u679c\u800c\u505c\u6b62',
-    'Guarded batch child task failed': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u5b50\u4efb\u52a1\u5931\u8d25',
-    'Guarded batch completed requested chapters': '\u62a4\u680f\u6279\u91cf\u63a8\u8fdb\u5df2\u5b8c\u6210\u8bf7\u6c42\u7ae0\u6570',
-    'Review summary persisted': '\u5ba1\u67e5\u6c47\u603b\u5df2\u5199\u5165',
-    'Review gate blocked execution': '\u5ba1\u67e5\u95f8\u95e8\u963b\u6b62\u7ee7\u7eed\u6267\u884c',
-    'Waiting for writeback approval': '\u7b49\u5f85\u56de\u5199\u5ba1\u6279',
-    'Write target normalized': '\u5df2\u6309\u4efb\u52a1\u7ae0\u8282\u53f7\u7ea0\u6b63\u5199\u56de\u76ee\u6807',
-    'Data sync completed': '\u5199\u56de\u540c\u6b65\u5b8c\u6210',
-    'Data sync payload enriched': '\u5df2\u8865\u9f50\u5199\u56de\u6240\u9700\u7684\u7ed3\u6784\u5316\u4fe1\u606f',
-    'Plan writeback completed': '\u5377\u89c4\u5212\u5199\u56de\u5b8c\u6210',
-    'Core setting docs synced': '\u6838\u5fc3\u8bbe\u5b9a\u96c6\u5df2\u66f4\u65b0',
-    'Chapter body written': '\u6b63\u6587\u5df2\u5199\u5165',
-    'Step writeback failed': '\u6b65\u9aa4\u5199\u56de\u5931\u8d25',
-    'Resume target resolved': '\u5df2\u786e\u5b9a\u9700\u8981\u6062\u590d\u7684\u4efb\u52a1',
-    'Resume target scheduled': '\u5df2\u91cd\u65b0\u6392\u5165\u6062\u590d\u961f\u5217',
-    'Resume target already running': '\u76ee\u6807\u4efb\u52a1\u6b63\u5728\u8fd0\u884c\uff0c\u65e0\u9700\u91cd\u590d\u6062\u590d',
-    'Resume schedule failed': '\u6062\u590d\u6392\u7a0b\u5931\u8d25',
-    'Task scheduled for resume': '\u4efb\u52a1\u5df2\u51c6\u5907\u6062\u590d',
-    'Task auto-completed during resume recovery': '\u6062\u590d\u68c0\u67e5\u65f6\u68c0\u6d4b\u5230\u4efb\u52a1\u5df2\u5b8c\u6210',
-    'Resume target failed': '\u6062\u590d\u76ee\u6807\u6267\u884c\u5931\u8d25',
-    'Workflow spec not found': '\u672a\u627e\u5230\u5de5\u4f5c\u6d41\u5951\u7ea6',
-    'Workflow parse failed': '\u5de5\u4f5c\u6d41\u5951\u7ea6\u89e3\u6790\u5931\u8d25',
-    'Workflow config error': '\u5de5\u4f5c\u6d41\u914d\u7f6e\u6709\u8bef',
-    'Task execution failed': '\u4efb\u52a1\u6267\u884c\u5931\u8d25',
-    plan_blocked: '\u89c4\u5212\u5f85\u8865\u4fe1\u606f',
-    writeback_rollback_started: '\u5f00\u59cb\u56de\u6eda\u5931\u8d25\u5199\u56de',
-    writeback_rollback_finished: '\u5931\u8d25\u5199\u56de\u5df2\u56de\u6eda',
-}
-
-Object.assign(EXACT_EVENT_MESSAGES, {
-    'Review summary prepared': '\u5ba1\u67e5\u6c47\u603b\u5df2\u751f\u6210',
-    'prompt_compiled': '\u63d0\u793a\u8bcd\u5df2\u7ec4\u88c5\u5b8c\u6210',
-    'request_dispatched': '\u5df2\u5411\u4e0a\u6e38\u53d1\u51fa\u8bf7\u6c42',
-    'awaiting_model_response': '\u6b63\u5728\u7b49\u5f85\u6a21\u578b\u54cd\u5e94',
-    'response_received': '\u5df2\u6536\u5230\u6a21\u578b\u54cd\u5e94',
-    'parsing_output': '\u6b63\u5728\u89e3\u6790\u8f93\u51fa',
-    'step_heartbeat': '\u6b65\u9aa4\u4ecd\u5728\u8fd0\u884c',
-    'step_retry_scheduled': '\u5df2\u5b89\u6392\u6b65\u9aa4\u91cd\u8bd5',
-    'step_retry_started': '\u6b65\u9aa4\u91cd\u8bd5\u5f00\u59cb',
-    'step_waiting_approval': '\u7b49\u5f85\u4eba\u5de5\u6279\u51c6\u56de\u5199',
-    'step_auto_retried': '\u6b65\u9aa4\u5df2\u81ea\u52a8\u91cd\u8bd5',
-    'raw_output_parse_failed': '\u539f\u59cb\u8f93\u51fa\u89e3\u6790\u5931\u8d25',
-    'json_extraction_recovered': '\u5df2\u4ece\u539f\u59cb\u8f93\u51fa\u4e2d\u6062\u590d JSON',
-})
-
 const UI_COPY = {
-    overviewPlanningTitle: '\u89c4\u5212\u5fc5\u586b\u4fe1\u606f',
-    projectCreateHint: '\u4ec5\u7528\u4e8e\u65b0\u7a7a\u76ee\u5f55\u521b\u5efa\u9879\u76ee\uff1b\u5982\u679c\u4f60\u662f\u4ece\u684c\u9762\u542f\u52a8\u5668\u8fdb\u5165\uff0c\u901a\u5e38\u4e0d\u7528\u518d\u70b9\u201c\u521b\u5efa\u9879\u76ee\u201d\u3002',
-    taskEntryHint: '\u4e3b\u94fe\u5efa\u8bae\u6309\u201c\u89c4\u5212\u5377 -> \u64b0\u5199\u7ae0\u8282 -> \u6267\u884c\u5ba1\u67e5 / \u6062\u590d\u4efb\u52a1\u201d\u4f7f\u7528\uff1b\u201c\u8865\u79cd\u9879\u76ee\u9aa8\u67b6\uff08\u65e7\u5165\u53e3\uff09\u201d\u53ea\u7528\u4e8e\u517c\u5bb9\u65e7\u9879\u76ee\u3002',
-    planningHint: '\u5148\u628a\u8fd9\u91cc\u7684\u89c4\u5212\u4fe1\u606f\u8865\u9f50\uff0c\u518d\u8fd0\u884c\u201c\u89c4\u5212\u5377\u201d\u3002\u5982\u679c\u4fe1\u606f\u4e0d\u8db3\uff0c\u7cfb\u7edf\u4f1a\u63d0\u793a\u4f60\u56de\u5230\u8fd9\u91cc\u7ee7\u7eed\u8865\u8d44\u6599\u3002',
-    planBlockedStatus: '\u5df2\u5b8c\u6210 / \u5f85\u8865\u8d44\u6599',
-    planBlockedStep: '\u5f85\u8865\u8d44\u6599',
-    approvalNotApplicable: '\u4e0d\u9002\u7528',
-    approvalNotRequired: '\u672c\u4efb\u52a1\u65e0\u9700\u4f60\u5904\u7406',
-    approvalNotReached: '\u5c1a\u672a\u8fdb\u5165\u5ba1\u6279',
-    approvalPending: '\u7b49\u4f60\u6279\u51c6\u56de\u5199',
-    approvalApproved: '\u5df2\u6279\u51c6',
-    approvalApprovedWritingBack: '\u4f60\u5df2\u6279\u51c6\uff0c\u7cfb\u7edf\u6b63\u5728\u5199\u56de',
-    approvalApprovedCompleted: '\u5df2\u6279\u51c6\uff0c\u5199\u56de\u5df2\u5b8c\u6210',
-    approvalRejected: '\u5df2\u62d2\u7edd\u56de\u5199',
-    unknownSystemEvent: '\u7cfb\u7edf\u4e8b\u4ef6',
-    unknownSystemEventWithDetail: '\u7cfb\u7edf\u4e8b\u4ef6\uff08\u8bf7\u67e5\u770b\u8be6\u60c5\u533a\uff09',
-    writingEngine: '\u5199\u4f5c\u5f15\u64ce',
-    retrievalEngine: '\u68c0\u7d22\u5f15\u64ce',
+    overviewPlanningTitle: '规划必填信息',
+    projectCreateHint: '仅用于新空目录创建项目；如果你是从桌面启动器进入，通常不用再点“创建项目”。',
+    taskEntryHint: '主链建议按“规划卷 -> 撰写章节 -> 执行审查 / 恢复任务”使用；“补种项目骨架（旧入口）”只用于兼容旧项目。',
+    planningHint: '先把这里的规划信息补齐，再运行“规划卷”。如果信息不足，系统会提示你回到这里继续补资料。',
+    writingEngine: '写作引擎',
+    retrievalEngine: '检索引擎',
+    overviewMainlineTitle: '写作主链',
+    overviewMainlineEmpty: '暂无可展示的写作主链任务；创建 write / guarded / resume 任务后会在这里展示解释摘要。',
+    viewTask: '查看任务',
+    suggestedNextStep: '建议下一步',
 }
 
 export default function App() {
@@ -266,6 +84,7 @@ export default function App() {
     const [connected, setConnected] = useState(false)
     const refreshDebounceRef = useRef(null)
     const lastStatusRefreshRef = useRef(0)
+    const optimisticTasksRef = useRef(new Map())
 
     useEffect(() => {
         reloadCore()
@@ -312,13 +131,22 @@ export default function App() {
     function reloadCore() {
         fetchJSON('/api/project/info').then(setProjectInfo).catch(() => setProjectInfo(null))
         fetchJSON('/api/tasks').then((items) => {
-            setTasks(items)
+            const mergedItems = mergeFetchedTasksWithOptimistic(items, optimisticTasksRef.current)
+            setTasks(mergedItems)
             setSelectedTaskId((currentId) => {
-                if (items.length === 0) return null
-                if (currentId && items.some((item) => item.id === currentId)) return currentId
-                return items[0].id
+                if (mergedItems.length === 0) return null
+                if (currentId && mergedItems.some((item) => item.id === currentId)) return currentId
+                return mergedItems[0].id
             })
-        }).catch(() => setTasks([]))
+        }).catch(() => {
+            const optimisticItems = Array.from(optimisticTasksRef.current.values())
+            setTasks(optimisticItems)
+            setSelectedTaskId((currentId) => {
+                if (optimisticItems.length === 0) return null
+                if (currentId && optimisticItems.some((item) => item.id === currentId)) return currentId
+                return optimisticItems[0].id
+            })
+        })
     }
 
     function reloadServiceStatus() {
@@ -327,16 +155,33 @@ export default function App() {
         fetchJSON('/api/rag/status').then(setRagStatus).catch(() => setRagStatus(null))
     }
 
+    function handleTaskCreated(task) {
+        if (!task?.id) {
+            setRefreshToken((value) => value + 1)
+            return
+        }
+        optimisticTasksRef.current.set(task.id, task)
+        setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
+        setSelectedTaskId(task.id)
+        setPage('tasks')
+        setRefreshToken((value) => value + 1)
+    }
+
+    function handleOpenTask(taskId) {
+        setSelectedTaskId(taskId)
+        setPage('tasks')
+    }
+
     const selectedTask = useMemo(() => tasks.find((item) => item.id === selectedTaskId) || null, [tasks, selectedTaskId])
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
-    const projectTitle = projectMeta?.project_name || projectMeta?.title || dashboardContext?.title || '\u672a\u52a0\u8f7d\u9879\u76ee'
+    const projectTitle = projectMeta?.project_name || projectMeta?.title || dashboardContext?.title || '未加载项目'
 
     return (
         <div className="shell">
             <aside className="sidebar">
                 <div>
-                    <div className="brand">{'\u5c0f\u8bf4\u63a7\u5236\u53f0'}</div>
+                    <div className="brand">小说控制台</div>
                     <div className="project-title">{projectTitle}</div>
                 </div>
                 <nav className="nav">
@@ -351,7 +196,7 @@ export default function App() {
                     ))}
                 </nav>
                 <div className="status-stack">
-                    <StatusPill tone={connected ? 'good' : 'danger'} label={connected ? '\u5b9e\u65f6\u540c\u6b65\u5df2\u8fde\u63a5' : '\u5b9e\u65f6\u540c\u6b65\u5df2\u65ad\u5f00'} />
+                    <StatusPill tone={connected ? 'good' : 'danger'} label={connected ? '实时同步已连接' : '实时同步已断开'} />
                     <StatusPill tone={getWritingModelTone(llmStatus)} label={formatWritingModelPill(llmStatus)} />
                     <StatusPill tone={getRagTone(ragStatus)} label={formatRagStatusLabel(ragStatus)} />
                 </div>
@@ -364,12 +209,7 @@ export default function App() {
                         llmStatus={llmStatus}
                         ragStatus={ragStatus}
                         tasks={tasks}
-                        onTaskCreated={(task) => {
-                            setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
-                            setSelectedTaskId(task.id)
-                            setPage('tasks')
-                            setRefreshToken((value) => value + 1)
-                        }}
+                        onTaskCreated={handleTaskCreated}
                         onProjectBootstrapped={(response) => {
                             if (response?.project_switch_required && response?.project_root) {
                                 const nextUrl = response.suggested_dashboard_url || `/?project_root=${encodeURIComponent(response.project_root)}`
@@ -379,26 +219,16 @@ export default function App() {
                             setPage('control')
                             setRefreshToken((value) => value + 1)
                         }}
-                        onOpenTask={(taskId) => {
-                            setSelectedTaskId(taskId)
-                            setPage('tasks')
-                        }}
+                        onOpenTask={handleOpenTask}
+                        onTasksMutated={() => setRefreshToken((value) => value + 1)}
                     />
                 )}
                 {page === 'supervisor' && (
                     <SupervisorPage
                         projectInfo={projectInfo}
                         tasks={tasks}
-                        onTaskCreated={(task) => {
-                            setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
-                            setSelectedTaskId(task.id)
-                            setPage('tasks')
-                            setRefreshToken((value) => value + 1)
-                        }}
-                        onOpenTask={(taskId) => {
-                            setSelectedTaskId(taskId)
-                            setPage('tasks')
-                        }}
+                        onTaskCreated={handleTaskCreated}
+                        onOpenTask={handleOpenTask}
                         onTasksMutated={() => setRefreshToken((value) => value + 1)}
                     />
                 )}
@@ -406,16 +236,8 @@ export default function App() {
                     <SupervisorAuditPage
                         projectInfo={projectInfo}
                         tasks={tasks}
-                        onTaskCreated={(task) => {
-                            setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
-                            setSelectedTaskId(task.id)
-                            setPage('tasks')
-                            setRefreshToken((value) => value + 1)
-                        }}
-                        onOpenTask={(taskId) => {
-                            setSelectedTaskId(taskId)
-                            setPage('tasks')
-                        }}
+                        onTaskCreated={handleTaskCreated}
+                        onOpenTask={handleOpenTask}
                         onTasksMutated={() => setRefreshToken((value) => value + 1)}
                     />
                 )}
@@ -450,48 +272,46 @@ function getWritingModelTone(llmStatus) {
 }
 
 function formatWritingModelPill(llmStatus) {
-    if (!llmStatus?.installed) return '\u672a\u914d\u7f6e\u53ef\u7528\u7684\u5199\u4f5c\u5f15\u64ce'
+    if (!llmStatus?.installed) return '未配置可用的写作引擎'
     const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
-    if (effectiveStatus === 'failed') return `${UI_COPY.writingEngine}\u8fde\u63a5\u5931\u8d25 ${formatWritingModelValue(llmStatus)}`
-    if (effectiveStatus === 'degraded') return `${UI_COPY.writingEngine}\u63a2\u6d3b\u5f02\u5e38\uff0c\u4f46\u6700\u8fd1\u8fd0\u884c\u6210\u529f ${formatWritingModelValue(llmStatus)}`
-    if (effectiveStatus === 'connected') return `${UI_COPY.writingEngine}\u5df2\u8fde\u63a5 ${formatWritingModelValue(llmStatus)}`
-    return `${UI_COPY.writingEngine}\u5df2\u914d\u7f6e ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'failed') return `${UI_COPY.writingEngine}连接失败 ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'degraded') return `${UI_COPY.writingEngine}探活异常，但最近运行成功 ${formatWritingModelValue(llmStatus)}`
+    if (effectiveStatus === 'connected') return `${UI_COPY.writingEngine}已连接 ${formatWritingModelValue(llmStatus)}`
+    return `${UI_COPY.writingEngine}已配置 ${formatWritingModelValue(llmStatus)}`
 }
 
 function formatWritingModelValue(llmStatus) {
-    if (!llmStatus) return '\u672a\u914d\u7f6e'
+    if (!llmStatus) return '未配置'
     if (llmStatus.mode === 'cli') {
-        return llmStatus.version ? `\u672c\u5730 CLI\uff08${llmStatus.version}\uff09` : '\u672c\u5730 CLI'
+        return llmStatus.version ? `本地 CLI（${llmStatus.version}）` : '本地 CLI'
     }
     if (llmStatus.mode === 'api') {
-        const model = llmStatus.model || '\u672a\u6307\u5b9a\u6a21\u578b'
-        return `\u6a21\u578b\uff1a${model}`
+        return `模型：${llmStatus.model || '未指定模型'}`
     }
     if (llmStatus.mode === 'mock') {
-        return '\u6a21\u62df\u8fd0\u884c\u5668'
+        return '模拟运行器'
     }
-    return llmStatus.provider || '\u672a\u914d\u7f6e'
+    return llmStatus.provider || '未配置'
 }
 
 function formatWritingModelDetail(llmStatus) {
-    if (!llmStatus?.installed) return '\u672a\u914d\u7f6e'
+    if (!llmStatus?.installed) return '未配置'
     const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
     const statusSuffix = effectiveStatus === 'connected'
-        ? '\uff08\u5df2\u8054\u901a\uff09'
+        ? '（已联通）'
         : effectiveStatus === 'degraded'
-            ? '\uff08\u63a2\u6d3b\u5f02\u5e38\uff0c\u6700\u8fd1\u6267\u884c\u6210\u529f\uff09'
-        : effectiveStatus === 'failed'
-            ? '\uff08\u8fde\u63a5\u5931\u8d25\uff09'
-            : '\uff08\u5df2\u914d\u7f6e\uff09'
+            ? '（探活异常，最近执行成功）'
+            : effectiveStatus === 'failed'
+                ? '（连接失败）'
+                : '（已配置）'
     if (llmStatus.mode === 'cli') {
-        const base = llmStatus.binary ? `\u672c\u5730 CLI\uff08${llmStatus.binary}\uff09` : '\u672c\u5730 CLI'
+        const base = llmStatus.binary ? `本地 CLI（${llmStatus.binary}）` : '本地 CLI'
         return `${base}${statusSuffix}`
     }
     if (llmStatus.mode === 'api') {
-        const model = llmStatus.model || '\u672a\u6307\u5b9a\u6a21\u578b'
-        return `\u6a21\u578b\uff1a${model}${statusSuffix}`
+        return `模型：${llmStatus.model || '未指定模型'}${statusSuffix}`
     }
-    return `${llmStatus.provider || '\u5df2\u914d\u7f6e'}${statusSuffix}`
+    return `${llmStatus.provider || '已配置'}${statusSuffix}`
 }
 
 function getRagTone(ragStatus) {
@@ -502,22 +322,26 @@ function getRagTone(ragStatus) {
 }
 
 function formatRagStatusLabel(ragStatus) {
-    if (!ragStatus?.configured) return `${UI_COPY.retrievalEngine}\u672a\u914d\u7f6e`
-    if (ragStatus?.connection_status === 'failed') return `${UI_COPY.retrievalEngine}\u8fde\u63a5\u5931\u8d25\uff1a${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`
-    if (ragStatus?.connection_status === 'connected') return `${UI_COPY.retrievalEngine}\u5df2\u8fde\u63a5 ${ragStatus?.embed_model || ''}`.trim()
-    return `${UI_COPY.retrievalEngine}\u5df2\u914d\u7f6e ${ragStatus?.embed_model || ''}`.trim()
+    if (!ragStatus?.configured) return `${UI_COPY.retrievalEngine}未配置`
+    if (ragStatus?.connection_status === 'failed') {
+        return `${UI_COPY.retrievalEngine}连接失败：${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`
+    }
+    if (ragStatus?.connection_status === 'connected') {
+        return `${UI_COPY.retrievalEngine}已连接 ${ragStatus?.embed_model || ''}`.trim()
+    }
+    return `${UI_COPY.retrievalEngine}已配置 ${ragStatus?.embed_model || ''}`.trim()
 }
 
 function formatRagDetail(ragStatus) {
-    if (!ragStatus?.configured) return '\u672a\u914d\u7f6e'
-    if (ragStatus?.connection_status === 'failed') return '\u8fde\u63a5\u5931\u8d25'
-    if (ragStatus?.connection_status === 'connected') return '\u5df2\u8054\u901a'
-    return '\u5df2\u914d\u7f6e'
+    if (!ragStatus?.configured) return '未配置'
+    if (ragStatus?.connection_status === 'failed') return '连接失败'
+    if (ragStatus?.connection_status === 'connected') return '已联通'
+    return '已配置'
 }
 
 function formatRagErrorSummary(error) {
-    if (!error) return '\u672a\u77e5\u9519\u8bef'
-    const stage = error?.details?.stage ? `${error.details.stage}` : '\u68c0\u7d22'
+    if (!error) return '未知错误'
+    const stage = error?.details?.stage ? String(error.details.stage) : '检索'
     const code = error?.code || 'UNKNOWN'
     return `${stage} / ${code}`
 }
@@ -550,6 +374,23 @@ function compareTaskFreshness(left, right) {
     return String(left?.id || '').localeCompare(String(right?.id || ''))
 }
 
+function mergeFetchedTasksWithOptimistic(items, optimisticTasks) {
+    const fetchedItems = Array.isArray(items) ? items : []
+    if (!(optimisticTasks instanceof Map) || optimisticTasks.size === 0) {
+        return fetchedItems
+    }
+
+    const fetchedIds = new Set(fetchedItems.map((item) => item?.id).filter(Boolean))
+    fetchedIds.forEach((taskId) => optimisticTasks.delete(taskId))
+
+    const pendingItems = Array.from(optimisticTasks.values())
+        .filter((item) => item?.id && !fetchedIds.has(item.id))
+
+    if (pendingItems.length === 0) return fetchedItems
+
+    return [...pendingItems, ...fetchedItems]
+}
+
 function mapContinuationToneToBadgeTone(tone) {
     if (tone === 'success') return 'success'
     if (tone === 'warning') return 'warning'
@@ -557,9 +398,12 @@ function mapContinuationToneToBadgeTone(tone) {
     return 'muted'
 }
 
-function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, onProjectBootstrapped, onOpenTask }) {
+function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, onProjectBootstrapped, onOpenTask, onTasksMutated }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
+    const [submittingActionKey, setSubmittingActionKey] = useState('')
+    const [actionError, setActionError] = useState(null)
+
     const writingTaskCards = useMemo(() => (
         (tasks || [])
             .filter((task) => supportsWritingTaskContinuation(task))
@@ -572,23 +416,50 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, 
             .filter((item) => item.summary)
     ), [tasks])
 
+    async function executeOverviewAction(action) {
+        if (!action || action.disabled || action.kind === 'complete-noop') return
+        const actionKey = action.id || `${action.kind}:${action.taskId || action.taskType || action.label}`
+        setActionError(null)
+        setSubmittingActionKey(actionKey)
+        try {
+            await executeRuntimeOperatorAction({
+                action,
+                postJSON,
+                onOpenTask,
+                onTasksMutated: () => onTasksMutated?.(),
+                onTaskCreated: (response) => {
+                    if (response?.id) {
+                        onTaskCreated?.(response)
+                        return
+                    }
+                    onTasksMutated?.()
+                },
+            })
+        } catch (err) {
+            setActionError(normalizeError(err))
+        } finally {
+            setSubmittingActionKey('')
+        }
+    }
+
     return (
         <div className="page-grid">
             <section className="panel hero-panel">
-                <div className="panel-title">{'\u9879\u76ee\u6982\u89c8'}</div>
+                <div className="panel-title">项目概览</div>
                 <div className="metric-grid">
-                    <MetricCard label={'\u603b\u5b57\u6570'} value={formatNumber(projectInfo?.progress?.total_words || 0)} />
-                    <MetricCard label={'\u5f53\u524d\u7ae0\u8282'} value={`\u7b2c ${projectInfo?.progress?.current_chapter || 0} \u7ae0`} />
-                    <MetricCard label={'\u9898\u6750'} value={projectMeta?.genre || '\u672a\u77e5'} />
+                    <MetricCard label="总字数" value={formatNumber(projectInfo?.progress?.total_words || 0)} />
+                    <MetricCard label="当前章节" value={`第 ${projectInfo?.progress?.current_chapter || 0} 章`} />
+                    <MetricCard label="题材" value={projectMeta?.genre || '未知'} />
                     <MetricCard label={UI_COPY.writingEngine} value={formatWritingModelDetail(llmStatus)} />
                     <MetricCard label={UI_COPY.retrievalEngine} value={formatRagDetail(ragStatus)} />
                 </div>
                 {(ragStatus?.connection_status === 'failed' || ragStatus?.last_error) && (
-                    <div className="empty-state">{`${UI_COPY.retrievalEngine}\u6700\u8fd1\u9519\u8bef\uff1a`}{formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}</div>
+                    <div className="empty-state">{`${UI_COPY.retrievalEngine}最近错误：${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`}</div>
                 )}
             </section>
+
             <section className="panel">
-                <div className="panel-title">{'\u9879\u76ee\u521b\u5efa'}</div>
+                <div className="panel-title">项目创建</div>
                 <div className="empty-state">{UI_COPY.projectCreateHint}</div>
                 <div className="launcher-grid">
                     <ProjectBootstrapSection
@@ -600,8 +471,9 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, 
                     />
                 </div>
             </section>
+
             <section className="panel">
-                <div className="panel-title">{'\u4efb\u52a1\u5165\u53e3'}</div>
+                <div className="panel-title">任务入口</div>
                 <div className="empty-state">{UI_COPY.taskEntryHint}</div>
                 <div className="launcher-grid">
                     {TASK_TEMPLATES.map((template) => (
@@ -615,47 +487,77 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, onTaskCreated, 
                     ))}
                 </div>
             </section>
+
             <section className="panel full-span">
-                <div className="panel-title">写作主链</div>
+                <div className="panel-title">{UI_COPY.overviewMainlineTitle}</div>
+                <ErrorNotice error={actionError} />
                 {writingTaskCards.length === 0 ? (
-                    <div className="empty-state">暂无可展示的写作主链任务；创建 write / guarded / resume 任务后会在这里展示解释摘要。</div>
+                    <div className="empty-state">{UI_COPY.overviewMainlineEmpty}</div>
                 ) : (
                     <div className="summary-grid">
-                        {writingTaskCards.map(({ task, summary }) => {
-                            const recommendedLabel = summary.primaryActionLabel || summary.nextStep || '查看任务详情'
-                            return (
-                                <div key={task.id} className="summary-card">
-                                    <div className="task-item-header">
-                                        <div className="summary-card-title">{translateTaskType(task.task_type)}</div>
-                                        <span className={`runtime-badge ${mapContinuationToneToBadgeTone(summary.tone)}`}>{summary.continuationLabel}</span>
-                                    </div>
-                                    <div className="tiny task-target">{resolveTaskTargetLabel(task)}</div>
-                                    <div className="summary-card-meta">{resolveTaskStatusLabel(task)}</div>
-                                    <div className="summary-card-meta">{summary.reasonLabel}</div>
-                                    <div className="summary-card-meta">{`建议下一步：${recommendedLabel}`}</div>
-                                    <div className="button-row">
-                                        <button className="secondary-button" onClick={() => onOpenTask(task.id)}>查看任务</button>
-                                    </div>
-                                </div>
-                            )
-                        })}
+                        {writingTaskCards.map(({ task, summary }) => (
+                            <WritingTaskOverviewCard
+                                key={task.id}
+                                task={task}
+                                summary={summary}
+                                submitting={Boolean(summary.primaryAction && submittingActionKey === (summary.primaryAction.id || `${summary.primaryAction.kind}:${summary.primaryAction.taskId || summary.primaryAction.taskType || summary.primaryAction.label}`))}
+                                onOpenTask={onOpenTask}
+                                onAction={executeOverviewAction}
+                            />
+                        ))}
                     </div>
                 )}
             </section>
+
             <section className="panel full-span">
                 <div className="panel-title">{UI_COPY.overviewPlanningTitle}</div>
                 <div className="empty-state">{UI_COPY.planningHint}</div>
                 <PlanningProfileSection onSaved={() => onProjectBootstrapped()} />
             </section>
+
             <section className="panel full-span">
-                <div className="panel-title">{'API \u63a5\u5165\u8bbe\u7f6e'}</div>
-                <div className="empty-state">{'\u5728\u8fd9\u91cc\u586b\u5199\u5199\u4f5c\u6a21\u578b\u548c RAG \u63a5\u53e3\u914d\u7f6e\uff0c\u4fdd\u5b58\u540e\u4f1a\u5199\u5165\u9879\u76ee\u6839\u76ee\u5f55 `.env` \u5e76\u7acb\u5373\u5237\u65b0\u5f53\u524d\u9762\u677f\u72b6\u6001\u3002'}</div>
-                <ApiSettingsSection
-                    llmStatus={llmStatus}
-                    ragStatus={ragStatus}
-                    onSaved={() => onProjectBootstrapped()}
-                />
+                <div className="panel-title">API 接入设置</div>
+                <div className="empty-state">在这里填写写作模型和 RAG 接口配置，保存后会写入项目根目录 `.env` 并立即刷新当前面板状态。</div>
+                <ApiSettingsSection llmStatus={llmStatus} ragStatus={ragStatus} onSaved={() => onProjectBootstrapped()} />
             </section>
+        </div>
+    )
+}
+
+function WritingTaskOverviewCard({ task, summary, submitting, onOpenTask, onAction }) {
+    const recommendedLabel = summary.primaryActionLabel || summary.nextStep || UI_COPY.viewTask
+
+    return (
+        <div className="summary-card">
+            <div className="task-item-header">
+                <div className="summary-card-title">{translateTaskType(task.task_type)}</div>
+                <span className={`runtime-badge ${mapContinuationToneToBadgeTone(summary.tone)}`}>{summary.continuationLabel}</span>
+            </div>
+            <div className="tiny task-target">{resolveTaskTargetLabel(task)}</div>
+            <div className="summary-card-meta">{resolveTaskStatusLabel(task)}</div>
+            <div className="summary-card-meta">{summary.reasonLabel}</div>
+            <div className="summary-card-meta">{`${UI_COPY.suggestedNextStep}：${recommendedLabel}`}</div>
+            <div className="button-row">
+                {summary.primaryAction ? (
+                    <button
+                        className="primary-button"
+                        onClick={() => onAction(summary.primaryAction)}
+                        disabled={submitting || summary.primaryAction.disabled}
+                        title={summary.primaryAction.reason || summary.primaryAction.label}
+                    >
+                        {submitting ? '处理中...' : summary.primaryActionLabel}
+                    </button>
+                ) : (
+                    <button className="secondary-button" onClick={() => onOpenTask(task.id)}>
+                        {UI_COPY.viewTask}
+                    </button>
+                )}
+                {summary.primaryAction ? (
+                    <button className="secondary-button" onClick={() => onOpenTask(task.id)}>
+                        {UI_COPY.viewTask}
+                    </button>
+                ) : null}
+            </div>
         </div>
     )
 }

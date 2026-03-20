@@ -303,11 +303,22 @@ pre {
     gap: 10px;
 }
 .task-item {
-    padding: 12px 14px;
     border-radius: 14px;
     border: 1px solid var(--line);
     background: white;
     text-align: left;
+    overflow: hidden;
+}
+.task-item-main {
+    width: 100%;
+    padding: 12px 14px;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    text-align: left;
+    display: grid;
+    gap: 0;
+    cursor: pointer;
 }
 .task-item-header {
     display: flex;
@@ -318,6 +329,11 @@ pre {
 .task-item.active {
     border-color: var(--accent);
     background: var(--panel-strong);
+}
+.task-item-actions {
+    padding: 0 14px 12px;
+    display: flex;
+    justify-content: flex-start;
 }
 .runtime-badge {
     display: inline-flex;

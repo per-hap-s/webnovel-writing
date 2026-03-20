@@ -1,28 +1,38 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 const fetchJSONMock = vi.fn()
+const postJSONMock = vi.fn()
 const subscribeSSEMock = vi.fn(() => () => {})
 let tasksResponse = []
 
 vi.mock('./api.js', () => ({
     fetchJSON: (...args) => fetchJSONMock(...args),
-    postJSON: vi.fn(),
-    normalizeError: (error) => ({ message: error?.message || String(error) }),
+    postJSON: (...args) => postJSONMock(...args),
+    normalizeError: (error) => {
+        if (error?.displayMessage) return error
+        return {
+            displayMessage: error?.message || String(error),
+            code: 'REQUEST_FAILED',
+            rawMessage: error?.message || String(error),
+            details: null,
+        }
+    },
     subscribeSSE: (...args) => subscribeSSEMock(...args),
 }))
 
 vi.mock('./supervisorPage.jsx', () => ({
     SupervisorPage: ({ onTaskCreated }) => (
-        <button onClick={() => onTaskCreated({
-            id: 'task-new',
-            task_type: 'write',
-            status: 'queued',
-            current_step: 'draft',
-            request: { chapter: 9 },
-            runtime_status: { target_label: '第 9 章' },
-        })}
+        <button
+            onClick={() => onTaskCreated({
+                id: 'task-new',
+                task_type: 'write',
+                status: 'queued',
+                current_step: 'draft',
+                request: { chapter: 9 },
+                runtime_status: { target_label: '\u7b2c 9 \u7ae0' },
+            })}
         >
             create-from-supervisor
         </button>
@@ -49,12 +59,12 @@ vi.mock('./appSections.jsx', async () => {
                     request: { chapter: 9, require_manual_approval: true },
                     artifacts: {
                         writeback: {
-                            story_alignment: { satisfied: ['主线推进'], missed: [], deferred: [] },
-                            director_alignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+                            story_alignment: { satisfied: ['mainline'], missed: [], deferred: [] },
+                            director_alignment: { satisfied: ['hook'], missed: [], deferred: [] },
                         },
                     },
                     operatorActions: [
-                        { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: '继续第 10 章', variant: 'primary' },
+                        { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
                     ],
                 })}
             >
@@ -76,6 +86,7 @@ afterEach(() => {
 
 beforeEach(() => {
     fetchJSONMock.mockReset()
+    postJSONMock.mockReset()
     subscribeSSEMock.mockClear()
     tasksResponse = []
     fetchJSONMock.mockImplementation((path) => {
@@ -83,7 +94,7 @@ beforeEach(() => {
         if (path === '/api/tasks') return Promise.resolve(tasksResponse)
         if (path === '/api/llm/status') return Promise.resolve({ installed: false })
         if (path === '/api/rag/status') return Promise.resolve({ configured: false })
-        throw new Error(`unexpected fetch path: ${path}`)
+        return Promise.resolve({})
     })
     window.history.replaceState({}, '', '/?page=supervisor')
 })
@@ -99,11 +110,11 @@ test('app refreshes task state and jumps to task detail after page-level task cr
         status: 'queued',
         current_step: 'draft',
         request: { chapter: 9 },
-        runtime_status: { target_label: '第 9 章' },
+        runtime_status: { target_label: '\u7b2c 9 \u7ae0' },
     }]
     await user.click(await screen.findByRole('button', { name: 'create-from-supervisor' }))
 
-    expect(await screen.findByText('selected:task-new;count:1;summary:等待完成|none')).not.toBeNull()
+    expect(await screen.findByText('selected:task-new;count:1;summary:\u7b49\u5f85\u5b8c\u6210|none')).not.toBeNull()
 })
 
 test('overview task creation refreshes into tasks page with derived explanation state', async () => {
@@ -119,12 +130,12 @@ test('overview task creation refreshes into tasks page with derived explanation 
         request: { chapter: 9, require_manual_approval: true },
         artifacts: {
             writeback: {
-                story_alignment: { satisfied: ['主线推进'], missed: [], deferred: [] },
-                director_alignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+                story_alignment: { satisfied: ['mainline'], missed: [], deferred: [] },
+                director_alignment: { satisfied: ['hook'], missed: [], deferred: [] },
             },
         },
         operatorActions: [
-            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: '继续第 10 章', variant: 'primary' },
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
         ],
     }]
 
@@ -132,5 +143,93 @@ test('overview task creation refreshes into tasks page with derived explanation 
 
     await user.click(await screen.findByRole('button', { name: 'launch-write' }))
 
-    expect(await screen.findByText('selected:task-overview;count:1;summary:可以继续|继续第 10 章')).not.toBeNull()
+    expect(await screen.findByText('selected:task-overview;count:1;summary:\u53ef\u4ee5\u7ee7\u7eed|Continue chapter 10')).not.toBeNull()
+})
+
+test('overview primary action button launches the next task through operator runtime', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+    tasksResponse = [{
+        id: 'task-overview',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'data-sync',
+        updated_at: '2026-03-20T10:00:00Z',
+        request: { chapter: 9, require_manual_approval: true },
+        artifacts: {
+            writeback: {
+                story_alignment: { satisfied: ['mainline'], missed: [], deferred: [] },
+                director_alignment: { satisfied: ['hook'], missed: [], deferred: [] },
+            },
+        },
+        operatorActions: [
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
+        ],
+    }]
+    postJSONMock.mockResolvedValue({ id: 'task-next', task_type: 'write', status: 'queued', request: { chapter: 10 }, runtime_status: { target_label: '\u7b2c 10 \u7ae0' } })
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Continue chapter 10' }))
+
+    await waitFor(() => {
+        expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/write', { chapter: 10 })
+        expect(screen.getByText('selected:task-next;count:2;summary:\u7b49\u5f85\u5b8c\u6210|none')).not.toBeNull()
+    })
+})
+
+test('overview renders disabled primary action label instead of falling back to view task', async () => {
+    window.history.replaceState({}, '', '/')
+    tasksResponse = [{
+        id: 'task-blocked',
+        task_type: 'resume',
+        status: 'failed',
+        current_step: 'resume',
+        updated_at: '2026-03-20T10:00:00Z',
+        artifacts: {
+            resume: {
+                blocking_reason: 'target task missing',
+            },
+        },
+        operatorActions: [
+            { kind: 'open-blocked-task', label: 'Open blocked task', variant: 'primary', disabled: true, reason: 'missing target_task_id' },
+        ],
+    }]
+
+    render(<App />)
+
+    const actionButton = await screen.findByRole('button', { name: 'Open blocked task' })
+    expect(actionButton.getAttribute('disabled')).not.toBeNull()
+    expect(actionButton.getAttribute('title')).toBe('missing target_task_id')
+})
+
+test('overview primary action surfaces request errors', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+    tasksResponse = [{
+        id: 'task-overview',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'data-sync',
+        updated_at: '2026-03-20T10:00:00Z',
+        request: { chapter: 9, require_manual_approval: true },
+        artifacts: {
+            writeback: {
+                story_alignment: { satisfied: ['mainline'], missed: [], deferred: [] },
+                director_alignment: { satisfied: ['hook'], missed: [], deferred: [] },
+            },
+        },
+        operatorActions: [
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
+        ],
+    }]
+    postJSONMock.mockRejectedValue(new Error('launch failed'))
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Continue chapter 10' }))
+
+    expect(await screen.findByText('launch failed')).not.toBeNull()
 })

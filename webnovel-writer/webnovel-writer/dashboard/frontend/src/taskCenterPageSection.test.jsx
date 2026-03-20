@@ -1,5 +1,5 @@
-import { beforeEach, expect, test, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
     MetricCard,
@@ -20,7 +20,15 @@ const postJSONMock = vi.fn()
 vi.mock('./api.js', () => ({
     fetchJSON: (...args) => fetchJSONMock(...args),
     postJSON: (...args) => postJSONMock(...args),
-    normalizeError: (error) => ({ message: error?.message || String(error) }),
+    normalizeError: (error) => {
+        if (error?.displayMessage) return error
+        return {
+            displayMessage: error?.message || String(error),
+            code: 'REQUEST_FAILED',
+            rawMessage: error?.message || String(error),
+            details: null,
+        }
+    },
 }))
 
 vi.mock('./operatorAction.js', () => ({
@@ -57,6 +65,10 @@ beforeEach(() => {
     fetchJSONMock.mockResolvedValue([])
 })
 
+afterEach(() => {
+    cleanup()
+})
+
 test('task list and detail share the same continuation outcome and primary action label', async () => {
     const onSelectTask = vi.fn()
     const onMutated = vi.fn()
@@ -71,8 +83,8 @@ test('task list and detail share the same continuation outcome and primary actio
         request: { chapter: 8, require_manual_approval: true },
         artifacts: {
             writeback: {
-                story_alignment: { satisfied: ['主线推进'], missed: [], deferred: [] },
-                director_alignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+                story_alignment: { satisfied: ['mainline'], missed: [], deferred: [] },
+                director_alignment: { satisfied: ['hook'], missed: [], deferred: [] },
             },
         },
         operatorActions: [
@@ -84,13 +96,12 @@ test('task list and detail share the same continuation outcome and primary actio
 
     renderTaskCenter([task], task, { onSelectTask, onMutated })
 
-    const taskButton = screen.getByRole('button', { name: /撰写章节/ })
-    expect(within(taskButton).getByText('可以继续')).not.toBeNull()
-    expect(within(taskButton).getByText('Launch continuation')).not.toBeNull()
-    expect(screen.getByText('当前可继续下一章')).not.toBeNull()
+    const taskItem = screen.getByRole('button', { name: /\u64b0\u5199\u7ae0\u8282/ })
+    expect(within(taskItem).getByText('\u53ef\u4ee5\u7ee7\u7eed')).not.toBeNull()
+    expect(screen.getByText(/\u5f53\u524d\u53ef\u7ee7\u7eed\u4e0b\u4e00\u7ae0/)).not.toBeNull()
     expect(screen.getAllByText('Launch continuation').length).toBeGreaterThanOrEqual(2)
 
-    await user.click(screen.getByRole('button', { name: 'Launch continuation' }))
+    await user.click(screen.getAllByRole('button', { name: 'Launch continuation' })[0])
 
     await waitFor(() => {
         expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/write', { chapter: 9 })
@@ -123,11 +134,11 @@ test('guarded review block renders the same blocked reason in task list and deta
 
     renderTaskCenter([task], task)
 
-    const taskButton = screen.getByRole('button', { name: /护栏推进/ })
-    expect(within(taskButton).getByText('不可继续')).not.toBeNull()
-    expect(within(taskButton).getByText(/记录了 2 个问题/)).not.toBeNull()
-    expect(screen.getByText('继续前必须处理审查阻断')).not.toBeNull()
-    expect(screen.getAllByText(/记录了 2 个问题/).length).toBeGreaterThanOrEqual(2)
+    const taskItem = screen.getByRole('button', { name: /\u62a4\u680f\u63a8\u8fdb/ })
+    expect(within(taskItem).getByText('\u4e0d\u53ef\u7ee7\u7eed')).not.toBeNull()
+    expect(within(taskItem).getByText(/\u8bb0\u5f55\u4e86 2 \u4e2a\u95ee\u9898/)).not.toBeNull()
+    expect(screen.getByText('\u7ee7\u7eed\u524d\u5fc5\u987b\u5904\u7406\u5ba1\u67e5\u963b\u65ad')).not.toBeNull()
+    expect(screen.getAllByText(/\u8bb0\u5f55\u4e86 2 \u4e2a\u95ee\u9898/).length).toBeGreaterThanOrEqual(2)
 })
 
 test('guarded batch child failure renders blocked batch summary in task list', () => {
@@ -153,8 +164,72 @@ test('guarded batch child failure renders blocked batch summary in task list', (
 
     renderTaskCenter([task], task)
 
-    const taskButton = screen.getByRole('button', { name: /护栏批量推进/ })
-    expect(within(taskButton).getByText('不可继续')).not.toBeNull()
-    expect(within(taskButton).getByText(/子任务失败停止/)).not.toBeNull()
-    expect(within(taskButton).getByText('打开失败子任务')).not.toBeNull()
+    const taskItem = screen.getByRole('button', { name: /\u62a4\u680f\u6279\u91cf\u63a8\u8fdb/ })
+    const taskCard = taskItem.closest('.task-item')
+    expect(within(taskItem).getByText('\u4e0d\u53ef\u7ee7\u7eed')).not.toBeNull()
+    expect(within(taskItem).getByText(/\u5b50\u4efb\u52a1\u5931\u8d25\u505c\u6b62/)).not.toBeNull()
+    expect(taskCard).not.toBeNull()
+    expect(within(taskCard).getByRole('button', { name: '打开失败子任务' })).not.toBeNull()
+})
+
+test('clicking task list action button does not trigger card selection for the current item', async () => {
+    const onSelectTask = vi.fn()
+    const user = userEvent.setup()
+    const task = {
+        id: 'task-open-1',
+        task_type: 'guarded-write',
+        status: 'completed',
+        current_step: 'review-summary',
+        updated_at: '2026-03-20T10:00:00Z',
+        runtime_status: {},
+        request: { chapter: 8 },
+        artifacts: {
+            guarded_runner: {
+                outcome: 'blocked_by_review',
+                review_summary: { issues: [{ title: '节奏失衡' }] },
+            },
+        },
+        operatorActions: [
+            { kind: 'open-task', taskId: 'task-child-1', label: '打开阻断子任务', variant: 'primary' },
+        ],
+    }
+
+    renderTaskCenter([task], task, { onSelectTask })
+
+    const taskItem = screen.getByRole('button', { name: /\u62a4\u680f\u63a8\u8fdb/ })
+    const taskCard = taskItem.closest('.task-item')
+    expect(taskCard).not.toBeNull()
+
+    await user.click(within(taskCard).getByRole('button', { name: '打开阻断子任务' }))
+
+    expect(onSelectTask).toHaveBeenCalledTimes(1)
+    expect(onSelectTask).toHaveBeenCalledWith('task-child-1')
+})
+
+test('disabled primary action keeps label and renders as disabled in task list', () => {
+    const task = {
+        id: 'task-disabled-1',
+        task_type: 'resume',
+        status: 'failed',
+        current_step: 'resume',
+        updated_at: '2026-03-20T10:00:00Z',
+        runtime_status: {},
+        artifacts: {
+            resume: {
+                blocking_reason: 'target task missing',
+            },
+        },
+        operatorActions: [
+            { kind: 'open-blocked-task', label: 'Open blocked task', variant: 'primary', disabled: true, reason: 'missing target_task_id' },
+        ],
+    }
+
+    renderTaskCenter([task], task)
+
+    const taskItem = screen.getByRole('button', { name: /\u6062\u590d\u4efb\u52a1/ })
+    const taskCard = taskItem.closest('.task-item')
+    expect(taskCard).not.toBeNull()
+    const actionButton = within(taskCard).getByRole('button', { name: 'Open blocked task' })
+    expect(actionButton.getAttribute('disabled')).not.toBeNull()
+    expect(actionButton.getAttribute('title')).toBe('missing target_task_id')
 })
