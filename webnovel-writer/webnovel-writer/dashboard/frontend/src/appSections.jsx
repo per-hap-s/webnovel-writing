@@ -1,7 +1,6 @@
 ﻿import { useEffect, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 
-import { resolveTaskOperatorActions } from './operatorAction.js'
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
 import {
     AlignmentResultsSection,
@@ -14,6 +13,10 @@ import {
     TaskContinuationSection,
 } from './taskDetailPanels.jsx'
 import { buildTaskContinuationSummary } from './writingContinuation.js'
+import { formatTimestampShort } from './dashboardPageCommon.jsx'
+import { renderOperatorActionButtons } from './operatorActionButtons.jsx'
+import { deriveWritingTaskContext } from './writingTaskDerived.js'
+import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
 
 const RELATIONSHIP_TYPE_LABELS = {
     family: '家庭',
@@ -663,19 +666,6 @@ export function TaskCenterPageSection({
         }
     }
 
-    function renderOperatorActionButtons(actions) {
-        return (actions || []).map((action) => (
-            <button
-                key={action.id || `${action.kind}:${action.taskId || action.taskType || action.label}`}
-                className={action.variant === 'secondary' ? 'secondary-button' : 'primary-button'}
-                onClick={() => executeOperatorAction(action)}
-                disabled={followupSubmitting || action.disabled}
-            >
-                {followupSubmitting ? '创建中...' : (action.label || '执行操作')}
-            </button>
-        ))
-    }
-
     async function cancelTask(task) {
         if (!task?.id || !canCancelTask) return
         setCancelSubmitting(true)
@@ -708,6 +698,8 @@ export function TaskCenterPageSection({
                 <div className="task-list">
                     {tasks.map((task) => {
                         const liveTask = withLiveRuntimeStatus(task, runtimeNow)
+                        const writingSummary = buildWritingTaskListSummary({ task: liveTask })
+                        const recommendedLabel = writingSummary?.primaryActionLabel || writingSummary?.nextStep || ''
                         return (
                         <button key={task.id} className={`task-item ${selectedTask?.id === task.id ? 'active' : ''}`} onClick={() => onSelectTask(task.id)}>
                             <div className="task-item-header">
@@ -718,6 +710,15 @@ export function TaskCenterPageSection({
                             <div className="muted">{resolveTaskStatusLabel ? resolveTaskStatusLabel(liveTask) : translateTaskStatus(liveTask.status)}</div>
                             <div className="tiny">{resolveCurrentStepLabel ? resolveCurrentStepLabel(liveTask) : translateStepName(liveTask.current_step || 'idle')}</div>
                             <div className="tiny runtime-summary">{buildRuntimeSummary(liveTask)}</div>
+                            {writingSummary ? (
+                                <div className="task-followup">
+                                    <div className="task-followup-header">
+                                        <span className={`runtime-badge ${mapContinuationToneToBadgeTone(writingSummary.tone)}`}>{writingSummary.continuationLabel}</span>
+                                        {recommendedLabel ? <span className="tiny task-followup-action">{recommendedLabel}</span> : null}
+                                    </div>
+                                    <div className="tiny task-followup-summary">{writingSummary.reasonLabel}</div>
+                                </div>
+                            ) : null}
                         </button>
                     )})}
                     {tasks.length === 0 && <div className="empty-state">暂无任务</div>}
@@ -728,35 +729,39 @@ export function TaskCenterPageSection({
                 {!selectedTask && <div className="empty-state">请选择任务查看详情</div>}
                 {selectedTask && (() => {
                     const liveSelectedTask = withLiveRuntimeStatus(selectedTask, runtimeNow)
-                    const storyPlan = resolveStoryPlan(liveSelectedTask)
-                    const directorBrief = resolveDirectorBrief(liveSelectedTask)
-                    const guardedRun = resolveGuardedRunnerResult(liveSelectedTask)
-                    const guardedBatchRun = resolveGuardedBatchRunnerResult(liveSelectedTask)
-                    const resumeRun = resolveResumeResult(liveSelectedTask)
-                    const writeback = liveSelectedTask.artifacts?.writeback || {}
-                    const storyAlignment = normalizeAlignment(writeback.story_alignment)
-                    const directorAlignment = normalizeAlignment(writeback.director_alignment)
-                    const storyRefresh = normalizeStoryRefresh(writeback.story_refresh || liveSelectedTask.artifacts?.story_refresh)
-                    const currentStorySlot = resolveStoryPlanSlot(storyPlan, Number(liveSelectedTask?.request?.chapter || 0))
+                    const writingContext = deriveWritingTaskContext(liveSelectedTask)
+                    const {
+                        storyPlan,
+                        directorBrief,
+                        guardedRun,
+                        guardedBatchRun,
+                        resumeRun,
+                        storyAlignment,
+                        directorAlignment,
+                        storyRefresh,
+                        currentStorySlot,
+                        operatorActions,
+                    } = writingContext
                     const parentTask = liveSelectedTask?.parent_task_id ? (tasks.find((item) => item.id === liveSelectedTask.parent_task_id) || null) : null
                     const rootTask = liveSelectedTask?.root_task_id ? (tasks.find((item) => item.id === liveSelectedTask.root_task_id) || null) : null
-                    const operatorActions = resolveTaskOperatorActions(liveSelectedTask)
                     const guardedBatchRuns = Array.isArray(guardedBatchRun?.runs) ? guardedBatchRun.runs : []
                     const lastGuardedBatchRun = guardedBatchRuns.length ? guardedBatchRuns[guardedBatchRuns.length - 1] : null
                     const lastSuccessfulBatchRun = [...guardedBatchRuns].reverse().find((item) => item?.task_status === 'completed') || null
                     const nextRecommendedAction = operatorActions.find((action) => action.variant === 'primary') || operatorActions[0] || null
-                    const continuationSummary = buildTaskContinuationSummary({
-                        task: liveSelectedTask,
-                        storyPlan,
-                        directorBrief,
-                        storyAlignment,
-                        directorAlignment,
-                        storyRefresh,
-                        guardedRun,
-                        guardedBatchRun,
-                        resumeRun,
-                        operatorActions,
-                    })
+                    const continuationSummary = supportsWritingTaskContinuation(liveSelectedTask)
+                        ? buildTaskContinuationSummary({
+                            task: liveSelectedTask,
+                            storyPlan,
+                            directorBrief,
+                            storyAlignment,
+                            directorAlignment,
+                            storyRefresh,
+                            guardedRun,
+                            guardedBatchRun,
+                            resumeRun,
+                            operatorActions,
+                        })
+                        : null
                     const canRefreshStoryPlan = Boolean(
                         storyRefresh?.should_refresh &&
                         !['queued', 'running', 'awaiting_writeback_approval'].includes(liveSelectedTask.status)
@@ -820,12 +825,14 @@ export function TaskCenterPageSection({
                                 </div>
                             </div>
                         ) : null}
-                        <TaskContinuationSection
-                            continuationSummary={continuationSummary}
-                            operatorActions={operatorActions}
-                            renderOperatorActionButtons={renderOperatorActionButtons}
-                            MetricCard={MetricCard}
-                        />
+                        {continuationSummary ? (
+                            <TaskContinuationSection
+                                continuationSummary={continuationSummary}
+                                operatorActions={operatorActions}
+                                renderOperatorActionButtons={(actions) => renderOperatorActionButtons(actions, executeOperatorAction, followupSubmitting, '', '创建中...')}
+                                MetricCard={MetricCard}
+                            />
+                        ) : null}
                         <NarrativeContractsSection
                             storyPlan={storyPlan}
                             directorBrief={directorBrief}
@@ -917,80 +924,6 @@ export function TaskCenterPageSection({
             </section>
         </div>
     )
-}
-
-function resolveStoryPlan(task) {
-    const stepResults = task?.artifacts?.step_results || {}
-    const storyStep = stepResults['story-director']?.structured_output
-    if (storyStep && typeof storyStep === 'object') return storyStep
-    const contextStoryPlan = stepResults.context?.structured_output?.story_plan
-    if (contextStoryPlan && typeof contextStoryPlan === 'object' && Object.keys(contextStoryPlan).length > 0) return contextStoryPlan
-    return null
-}
-
-function resolveDirectorBrief(task) {
-    const stepResults = task?.artifacts?.step_results || {}
-    const directorStep = stepResults['chapter-director']?.structured_output
-    if (directorStep && typeof directorStep === 'object') return directorStep
-    const contextDirectorBrief = stepResults.context?.structured_output?.director_brief
-    if (contextDirectorBrief && typeof contextDirectorBrief === 'object' && Object.keys(contextDirectorBrief).length > 0) return contextDirectorBrief
-    return null
-}
-
-function resolveGuardedRunnerResult(task) {
-    const stepResults = task?.artifacts?.step_results || {}
-    const guardedStep = stepResults['guarded-chapter-runner']?.structured_output
-    if (guardedStep && typeof guardedStep === 'object') return guardedStep
-    const guardedArtifact = task?.artifacts?.guarded_runner
-    if (guardedArtifact && typeof guardedArtifact === 'object') return guardedArtifact
-    return null
-}
-
-function resolveGuardedBatchRunnerResult(task) {
-    const stepResults = task?.artifacts?.step_results || {}
-    const guardedStep = stepResults['guarded-batch-runner']?.structured_output
-    if (guardedStep && typeof guardedStep === 'object') return guardedStep
-    const guardedArtifact = task?.artifacts?.guarded_batch_runner
-    if (guardedArtifact && typeof guardedArtifact === 'object') return guardedArtifact
-    return null
-}
-
-function resolveResumeResult(task) {
-    const stepResults = task?.artifacts?.step_results || {}
-    const resumeStep = stepResults.resume?.structured_output
-    if (resumeStep && typeof resumeStep === 'object') return resumeStep
-    const resumeArtifact = task?.artifacts?.resume
-    if (resumeArtifact && typeof resumeArtifact === 'object') return resumeArtifact
-    return null
-}
-
-function resolveStoryPlanSlot(storyPlan, chapter) {
-    if (!storyPlan || !Array.isArray(storyPlan.chapters)) return null
-    return storyPlan.chapters.find((item) => Number(item?.chapter || 0) === Number(chapter || 0)) || null
-}
-
-function normalizeAlignment(value) {
-    const alignment = value && typeof value === 'object' ? value : {}
-    return {
-        satisfied: Array.isArray(alignment.satisfied) ? alignment.satisfied : [],
-        missed: Array.isArray(alignment.missed) ? alignment.missed : [],
-        deferred: Array.isArray(alignment.deferred) ? alignment.deferred : [],
-    }
-}
-
-function normalizeStoryRefresh(value) {
-    if (!value || typeof value !== 'object') return null
-    return {
-        should_refresh: Boolean(value.should_refresh),
-        recommended_resume_from: value.recommended_resume_from || null,
-        reasons: Array.isArray(value.reasons) ? value.reasons : [],
-        reason_codes: Array.isArray(value.reason_codes) ? value.reason_codes : [],
-        consecutive_missed_chapters: Number(value.consecutive_missed_chapters || 0),
-        current_missed_count: Number(value.current_missed_count || 0),
-        current_satisfied_count: Number(value.current_satisfied_count || 0),
-        current_deferred_count: Number(value.current_deferred_count || 0),
-        suggested_action: value.suggested_action || '',
-    }
 }
 
 export function DataPageSection({ SimpleTable, refreshToken }) {
@@ -1294,6 +1227,13 @@ function resolveRuntimeBadgeTone(task) {
     return 'muted'
 }
 
+function mapContinuationToneToBadgeTone(tone) {
+    if (tone === 'success') return 'success'
+    if (tone === 'warning') return 'warning'
+    if (tone === 'danger') return 'danger'
+    return 'muted'
+}
+
 function buildRuntimeSummary(task) {
     if (task?.artifacts?.plan_blocked) return '需先回总览补录规划信息'
     const runtime = task?.runtime_status || {}
@@ -1383,23 +1323,6 @@ function formatCountValue(value, allowZero = false) {
 function formatRetryableValue(value) {
     if (value === null || value === undefined) return '-'
     return value ? '是' : '否'
-}
-
-function formatTimestampShort(value) {
-    if (!value || value === '-') return '-'
-    const text = String(value)
-    const normalized = text.includes('T') ? text : text.replace(' ', 'T')
-    const parsed = new Date(normalized)
-    if (Number.isNaN(parsed.getTime())) {
-        return text.replace('T', ' ').replace(/\.\d+/, '')
-    }
-    const year = parsed.getFullYear()
-    const month = String(parsed.getMonth() + 1).padStart(2, '0')
-    const day = String(parsed.getDate()).padStart(2, '0')
-    const hour = String(parsed.getHours()).padStart(2, '0')
-    const minute = String(parsed.getMinutes()).padStart(2, '0')
-    const second = String(parsed.getSeconds()).padStart(2, '0')
-    return `${year}-${month}-${day} ${hour}:${minute}:${second}`
 }
 
 function buildBootstrapForm(projectRoot, title, genre) {

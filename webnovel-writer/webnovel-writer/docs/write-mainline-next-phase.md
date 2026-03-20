@@ -18,9 +18,11 @@ The dashboard now consumes the same action contract across task detail, guarded 
 
 ## This Round
 
-This round switches back from batch-only recovery to the write mainline detail layer:
+This round extends the write-mainline explanation chain from task detail into shared derivation, task list, and overview surfaces:
 
 - Task detail now shows a unified continuation summary.
+- Task list now renders a compact continuation explanation for write / guarded / batch / resume tasks, using the same decision source as task detail.
+- Overview now renders write-mainline entry cards that show the latest continuation state, blocking reason, and recommended next step before jumping into task detail.
 - The continuation summary explains why the current chapter can continue, why it must stop, or why it should replan first.
 - The same summary consumes:
   - director inputs (`story-director`, `chapter-director`)
@@ -28,13 +30,18 @@ This round switches back from batch-only recovery to the write mainline detail l
   - guarded outcomes
   - resume outcomes
   - unified `operator_actions`
+- Task derivation is now split into:
+  - `writingTaskDerived.js` for task -> normalized write-context data
+  - `writingTaskListSummary.js` for list/overview-safe explanation adapters
 - Action buttons are now rendered once from the continuation panel instead of being repeated across guarded and resume subsections.
 - Task detail panels are now split into a dedicated frontend module instead of staying fully inside `appSections.jsx`.
 - Review / approval recovery copy is now aligned through a shared frontend recovery semantics helper so task detail, Supervisor Inbox, and Supervisor Audit do not drift.
 - Task detail, Supervisor Inbox, and Supervisor Audit now reuse the same frontend operator-action runtime helper for launch / retry / open behavior instead of each page carrying its own execution branch logic.
+- Task detail, Supervisor Inbox, and Supervisor Audit now reuse the same frontend action-button renderer, so launch / retry / open controls no longer diverge between surfaces.
 - Supervisor cards are now split into a dedicated frontend module so `App.jsx` no longer owns both active and dismissed card markup directly.
 - Audit timeline cards are now split into a dedicated frontend module so grouped audit threads and raw audit events are no longer rendered inline inside `App.jsx`.
 - Supervisor Audit page panels are now split into a dedicated frontend module so filter controls, timeline containers, and archive panels are no longer rendered inline inside `App.jsx`.
+- Supervisor and Supervisor Audit pages are now split into dedicated page modules, and the Audit grouped/filter/report derivation now lives in a standalone helper module instead of inside `App.jsx`.
 
 In practice this means the operator can open a task and immediately see:
 
@@ -49,6 +56,7 @@ In practice this means the operator can open a task and immediately see:
 - `operator_actions` remains the primary operator-facing action model.
 - `resume_action` remains a single-action alias for resume results and is mirrored into `operator_actions`.
 - Task detail continuation summary is frontend-derived only.
+- Task list / overview continuation summaries are also frontend-derived adapters over the same detail summary, not a second rule set.
 - No new database table or write API is introduced for this phase.
 - `next_action`, `action`, and `secondaryAction` remain available during migration.
 
@@ -72,7 +80,8 @@ In practice this means the operator can open a task and immediately see:
 4. Write-mainline clarity follow-ups
 
 - Make `write -> guarded-write -> guarded-batch-write` continuation language even more uniform.
-- Surface clearer "why this chapter is safe / unsafe to continue" wording in more list and overview surfaces if needed.
+- Keep list and overview surfaces thin adapters over the shared derivation instead of adding per-page explanation branches.
+- If `appSections.jsx` grows again after more task-surface work, split task list / task detail shells only when the file is carrying derivation and multiple render surfaces at once.
 
 ## Validation
 
@@ -81,5 +90,6 @@ Use the following checks for this phase:
 ```powershell
 python -m pytest dashboard\tests\test_guarded_runner.py dashboard\tests\test_guarded_batch_runner.py dashboard\tests\test_supervisor_recommendations.py dashboard\tests\test_app.py dashboard\tests\test_dashboard_smoke_contract.py scripts\data_modules\tests\test_webnovel_unified_cli.py -q
 npm run test:state
+npm run test:ui
 npm run build
 ```

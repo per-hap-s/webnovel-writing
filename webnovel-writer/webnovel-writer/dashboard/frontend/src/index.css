@@ -356,6 +356,26 @@ pre {
 .runtime-summary {
     margin-top: 4px;
 }
+.task-followup {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(31, 27, 24, 0.12);
+    display: grid;
+    gap: 6px;
+}
+.task-followup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.task-followup-action {
+    color: var(--accent);
+    font-weight: 700;
+}
+.task-followup-summary {
+    line-height: 1.45;
+}
 .task-target {
     margin-top: 4px;
     color: var(--accent);

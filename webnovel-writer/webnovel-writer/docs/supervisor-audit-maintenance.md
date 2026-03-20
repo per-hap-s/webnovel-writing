@@ -43,7 +43,13 @@ The Supervisor Audit page uses two state layers:
 1. Local preferences
 2. Query deep links
 
-The local preference payload and the query payload are normalized in the frontend helper module, while `App.jsx` keeps only the page-level read/write wrappers that bind them to `localStorage` and URL deep links.
+The local preference payload and the query payload are normalized in the frontend helper module. The page-level browser bindings now live in dedicated frontend modules:
+
+- `src/supervisorAuditPage.jsx`
+- `src/supervisorAuditPageState.js`
+- `src/supervisorAuditDerived.js`
+
+`App.jsx` now only wires the route and parent callbacks for Supervisor Audit.
 
 ## Contract Notes
 
@@ -99,6 +105,13 @@ The Supervisor Audit page sections are also split into dedicated frontend panels
 
 This keeps `App.jsx` focused on state orchestration and derived data, while panel layout lives outside the main app shell.
 
+Supervisor and Supervisor Audit themselves are now split into dedicated page modules:
+
+- `src/supervisorPage.jsx`
+- `src/supervisorAuditPage.jsx`
+
+The Audit grouped / filter / report derivation is also moved out of the app shell into `src/supervisorAuditDerived.js`, so the page module mainly owns state, effects, and parent callback wiring.
+
 For this phase, keep the audit surface read-only and do not add a new repair summary write path unless the frontend derivation becomes materially more expensive.
 
 ## Offline Repair
@@ -130,6 +143,7 @@ Repair rules:
 ```powershell
 cd dashboard/frontend
 npm run test:state
+npm run test:ui
 npm run build
 
 python -m pytest dashboard/tests/test_dashboard_smoke_contract.py -q

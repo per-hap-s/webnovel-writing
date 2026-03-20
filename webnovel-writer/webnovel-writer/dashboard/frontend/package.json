@@ -11,7 +11,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:state": "node --test src/supervisorAuditState.test.js src/operatorAction.test.js src/operatorActionRuntime.test.js src/writingContinuation.test.js src/recoverySemantics.test.js",
+    "test:state": "node --test src/supervisorAuditState.test.js src/operatorAction.test.js src/operatorActionRuntime.test.js src/writingContinuation.test.js src/writingTaskDerived.test.js src/writingTaskListSummary.test.js src/recoverySemantics.test.js",
+    "test:ui": "vitest run --environment jsdom src/supervisorAuditDerived.test.jsx src/supervisorAuditPage.test.jsx src/taskCenterPageSection.test.jsx src/app.integration.test.jsx",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"
   },
@@ -21,9 +22,13 @@
     "react-force-graph-3d": "^1.29.1"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.4.0",
-    "vite": "^6.2.0"
+    "jsdom": "^29.0.1",
+    "vite": "^6.2.0",
+    "vitest": "^4.1.0"
   }
 }
