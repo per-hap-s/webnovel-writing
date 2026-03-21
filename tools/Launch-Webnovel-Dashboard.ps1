@@ -39,51 +39,50 @@ function Get-LocalIPv4 {
     return $null
 }
 
-Write-Host 'Webnovel Dashboard 启动器'
+Write-Host 'Webnovel Dashboard Launcher'
 Write-Host
 
 if (-not (Test-Path $pythonExe)) {
-    throw "未找到 Python 虚拟环境：$pythonExe"
+    throw "Python virtualenv not found: $pythonExe"
 }
 
 $resolvedProjectRoot = $null
 if ($ProjectRoot) {
     if (-not (Test-Path $ProjectRoot)) {
-        Write-Warning "指定的项目目录不存在，将改为仅启动工作台：$ProjectRoot"
+        Write-Warning "Project root does not exist. Starting workbench mode instead: $ProjectRoot"
     } else {
         $resolvedProjectRoot = (Resolve-Path $ProjectRoot).Path
         $stateFile = Join-Path $resolvedProjectRoot '.webnovel\state.json'
         if (-not (Test-Path $stateFile)) {
-            Write-Warning "指定目录尚未初始化为小说项目，将改为仅启动工作台：$resolvedProjectRoot"
+            Write-Warning "Project root is not initialized. Starting workbench mode instead: $resolvedProjectRoot"
             $resolvedProjectRoot = $null
         }
     }
 }
 
-Write-Host ('工作区目录：' + $workspaceRoot)
+Write-Host ('Workspace root: ' + $workspaceRoot)
 if ($resolvedProjectRoot) {
-    Write-Host ('当前项目：' + $resolvedProjectRoot)
+    Write-Host ('Project root: ' + $resolvedProjectRoot)
     $env:WEBNOVEL_PROJECT_ROOT = $resolvedProjectRoot
 } else {
-    Write-Host '当前模式：全局工作台（先进入 Web，再选/建项目）'
+    Write-Host 'Mode: workbench shell'
     Remove-Item Env:WEBNOVEL_PROJECT_ROOT -ErrorAction SilentlyContinue
 }
-Write-Host '正在启动 Dashboard...'
-Write-Host '使用 Dashboard 期间请保持此窗口开启。'
-Write-Host ('本机访问地址：http://127.0.0.1:' + $Port)
+Write-Host 'Starting dashboard...'
+Write-Host 'Keep this window open while the dashboard is running.'
+Write-Host ('Local URL: http://127.0.0.1:' + $Port)
 if ($ListenHost -eq '0.0.0.0') {
     $lanIp = Get-LocalIPv4
     if ($lanIp) {
-        Write-Host ('局域网访问地址：http://' + $lanIp + ':' + $Port)
+        Write-Host ('LAN URL: http://' + $lanIp + ':' + $Port)
     } else {
-        Write-Host ('局域网访问地址：请使用本机局域网 IP，端口 ' + $Port)
+        Write-Host ('LAN URL: use your local IPv4 address on port ' + $Port)
     }
-    Write-Host '手机和电脑需要处于同一局域网，且 Windows 防火墙需要放行该端口。'
 }
 Write-Host
 
 Set-Location $appRoot
-$args = @('-m', 'dashboard.server', '--workspace-root', $workspaceRoot, '--host', $ListenHost, '--port', $Port)
+$args = @('-m', 'dashboard.server', '--workspace-root', $workspaceRoot, '--host', $ListenHost, '--port', "$Port")
 if ($resolvedProjectRoot) {
     $args += @('--project-root', $resolvedProjectRoot)
 }
@@ -94,5 +93,5 @@ if ($NoBrowser) {
 & $pythonExe @args
 $exitCode = $LASTEXITCODE
 Write-Host
-Write-Host ('Dashboard 已停止，退出码：' + $exitCode)
+Write-Host ('Dashboard stopped with exit code: ' + $exitCode)
 exit $exitCode

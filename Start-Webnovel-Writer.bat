@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-set "TARGET=%~dp0tools\Launch-Webnovel-Dashboard.bat"
+set "TARGET=%~dp0tools\Start-Webnovel-Writer.bat"
 if not exist "%TARGET%" (
     echo Launcher not found:
     echo %TARGET%
