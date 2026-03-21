@@ -75,7 +75,8 @@ pre {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: 16px;
     padding-right: 4px;
 }
