@@ -39,13 +39,15 @@ function writeLandingPreference(key, value) {
 
 export function WorkbenchPage({
     hubData,
+    tab = 'hub',
     currentProjectRoot,
     landingPreferenceKey,
     landingPreferences,
     onNavigate,
+    onTabChange,
+    onOpenProject,
     onRefresh,
 }) {
-    const [tab, setTab] = useState('hub')
     const [message, setMessage] = useState('')
     const [error, setError] = useState(null)
     const [busyKey, setBusyKey] = useState('')
@@ -53,12 +55,24 @@ export function WorkbenchPage({
     const [landingPreference, setLandingPreference] = useState(() => readLandingPreference(landingPreferenceKey))
 
     const currentProject = hubData?.current_project || null
-    const projectCards = hubData?.projects || []
     const missingCards = hubData?.missing_projects || []
 
     async function pickFolder() {
         const response = await postJSON('/api/workbench/pick-folder', {})
         return String(response?.project_root || '').trim()
+    }
+
+    async function handleOpenProject(projectRoot, fallbackUrl = '') {
+        if (!projectRoot) return
+        if (!onOpenProject) return
+        const response = await onOpenProject(projectRoot, fallbackUrl)
+        if (response?.opened) {
+            setMessage('')
+            setDraftRoot('')
+            return
+        }
+        setDraftRoot(projectRoot)
+        setMessage(response?.next_recommended_action || '该目录尚未初始化，可以直接改为新建项目。')
     }
 
     async function openPickedProject() {
@@ -68,7 +82,7 @@ export function WorkbenchPage({
         try {
             const pickedRoot = await pickFolder()
             if (!pickedRoot) return
-            await openProjectByRoot(pickedRoot)
+            await handleOpenProject(pickedRoot)
         } catch (requestError) {
             setError(normalizeError(requestError))
         } finally {
@@ -101,6 +115,7 @@ export function WorkbenchPage({
             if (action === 'remove-project' && projectRoot === currentProjectRoot) {
                 onNavigate('/')
                 await onRefresh({ projectRoot: '' })
+                onTabChange?.('hub')
                 return
             }
             await onRefresh()
@@ -132,20 +147,6 @@ export function WorkbenchPage({
         setLandingPreference(nextValue)
     }
 
-    async function openProjectByRoot(projectRoot, fallbackUrl = '') {
-        const response = await postJSON('/api/workbench/open-project', { project_root: projectRoot })
-        if (response?.opened) {
-            const targetUrl = response?.suggested_dashboard_url || fallbackUrl
-            if (targetUrl) {
-                onNavigate(targetUrl)
-            }
-            await onRefresh({ projectRoot })
-            return
-        }
-        setDraftRoot(projectRoot)
-        setMessage(response?.next_recommended_action || '该目录还没有初始化，可以直接新建项目。')
-    }
-
     return (
         <div className="page-grid workbench-layout">
             <section className="panel full-span workbench-hero">
@@ -153,42 +154,47 @@ export function WorkbenchPage({
                     <div>
                         <div className="workbench-eyebrow">Workbench</div>
                         <div className="panel-title">项目工作台</div>
-                        <div className="workbench-hero-copy">先选项目，再进入写作面板。项目切换、工具动作和启动偏好都集中在这里。</div>
-                    </div>
-                    <div className="workbench-tabbar" role="tablist" aria-label="工作台切换">
-                        <button className={`workbench-tab ${tab === 'hub' ? 'active' : ''}`} onClick={() => setTab('hub')}>项目主页</button>
-                        <button className={`workbench-tab ${tab === 'tools' ? 'active' : ''}`} onClick={() => setTab('tools')}>工具页</button>
+                        <div className="workbench-hero-copy">左侧用于快速进入项目，右侧保留项目管理、创建入口和工具动作。工作台本身不再重复堆放整套项目列表。</div>
                     </div>
                 </div>
-                <div className="tiny workbench-workspace">工作区：{hubData?.workspace_root || '未加载'}</div>
+                <div className="tiny workbench-workspace">{`工作区：${hubData?.workspace_root || '未加载'}`}</div>
                 <ErrorNotice error={error} />
-                {message ? <div className="planning-warning subtle"><div className="tiny">{message}</div></div> : null}
+                {message ? (
+                    <div className="planning-warning subtle">
+                        <div className="tiny">{message}</div>
+                    </div>
+                ) : null}
             </section>
 
             {tab === 'hub' ? (
                 <>
                     <section className="panel workbench-panel">
                         <div className="panel-title">默认落地方式</div>
-                        <div className="workbench-section-copy">这个偏好只保存在当前浏览器，用来决定双击后先停在工作台，还是自动回到上次项目。</div>
-                        <div className="field-stack">
-                            <label className="tiny" htmlFor="landing-pref">启动后默认去哪里</label>
-                            <select id="landing-pref" value={landingPreference} onChange={(event) => updateLandingPreference(event.target.value)}>
-                                {landingPreferences.map((item) => (
-                                    <option key={item.value} value={item.value}>{item.label}</option>
-                                ))}
-                            </select>
+                        <div className="workbench-section-copy">这个偏好只保存在当前浏览器，用来决定双击启动后优先停在工作台，还是自动回到上次项目。</div>
+                        <div className="workbench-preference-switch" role="tablist" aria-label="启动落地偏好">
+                            {landingPreferences.map((item) => (
+                                <button
+                                    key={item.value}
+                                    type="button"
+                                    className={`workbench-preference-option ${landingPreference === item.value ? 'active' : ''}`}
+                                    aria-pressed={landingPreference === item.value}
+                                    onClick={() => updateLandingPreference(item.value)}
+                                >
+                                    {item.label}
+                                </button>
+                            ))}
                         </div>
                     </section>
 
                     <section className="panel workbench-panel">
                         <div className="panel-title">当前项目</div>
-                        <div className="workbench-section-copy">这里展示当前正在作为活动上下文的项目；打开、固定和移除都会同步写回工作台注册表。</div>
+                        <div className="workbench-section-copy">这里保留当前项目的详情与管理动作。真正的快速切换入口已经收口到左侧项目轨道。</div>
                         {currentProject ? (
                             <WorkbenchProjectCard
                                 project={currentProject}
                                 current
                                 busyKey={busyKey}
-                                onOpen={() => openProjectByRoot(currentProject.project_root, currentProject.dashboard_url)}
+                                onOpen={() => handleOpenProject(currentProject.project_root, currentProject.dashboard_url)}
                                 onPinToggle={() => mutateProject(currentProject.pinned ? 'unpin-project' : 'pin-project', currentProject.project_root)}
                                 onRemove={() => mutateProject('remove-project', currentProject.project_root)}
                             />
@@ -199,7 +205,7 @@ export function WorkbenchPage({
 
                     <section className="panel workbench-panel">
                         <div className="panel-title">打开已有项目</div>
-                        <div className="workbench-section-copy">通过系统文件夹选择器打开已初始化项目；如果目录还没初始化，会自动切到新建项目流程。</div>
+                        <div className="workbench-section-copy">通过系统文件夹选择器打开已初始化项目；如果目录尚未初始化，工作台会把目录自动带入新建流程。</div>
                         <button className="primary-button workbench-button" onClick={openPickedProject} disabled={busyKey === 'open-existing'}>
                             {busyKey === 'open-existing' ? '打开中...' : '打开已有项目'}
                         </button>
@@ -207,7 +213,7 @@ export function WorkbenchPage({
 
                     <section className="panel full-span workbench-panel">
                         <div className="panel-title">新建项目</div>
-                        <div className="workbench-section-copy">先选目录，再填写标题和题材。创建成功后会直接进入该项目的 Dashboard。</div>
+                        <div className="workbench-section-copy">先选目录，再填写标题和题材。创建成功后会直接进入该项目 Dashboard。</div>
                         <div className="task-row-actions workbench-inline-actions">
                             <button className="secondary-button workbench-button" onClick={startCreateFlow} disabled={busyKey === 'pick-create'}>
                                 {busyKey === 'pick-create' ? '选择中...' : '先选项目目录'}
@@ -222,36 +228,15 @@ export function WorkbenchPage({
                                 onSuccess={(response) => {
                                     const nextUrl = response?.suggested_dashboard_url || (response?.project_root ? `/?project_root=${encodeURIComponent(response.project_root)}&bootstrap_hint=planning` : '/')
                                     onNavigate(nextUrl)
-                                    void onRefresh()
+                                    void onRefresh({ projectRoot: response?.project_root || '' })
                                 }}
                             />
                         </div>
                     </section>
 
                     <section className="panel full-span workbench-panel">
-                        <div className="panel-title">最近与固定项目</div>
-                        <div className="workbench-section-copy">最近项目和固定项目共用一套卡片风格；点击进入时会同步更新当前项目和最近打开时间。</div>
-                        {projectCards.length === 0 ? (
-                            <div className="empty-state">还没有项目记录。先打开一个项目，或直接新建一个项目。</div>
-                        ) : (
-                            <div className="summary-grid">
-                                {projectCards.map((project) => (
-                                    <WorkbenchProjectCard
-                                        key={project.project_root}
-                                        project={project}
-                                        busyKey={busyKey}
-                                        onOpen={() => openProjectByRoot(project.project_root, project.dashboard_url)}
-                                        onPinToggle={() => mutateProject(project.pinned ? 'unpin-project' : 'pin-project', project.project_root)}
-                                        onRemove={() => mutateProject('remove-project', project.project_root)}
-                                    />
-                                ))}
-                            </div>
-                        )}
-                    </section>
-
-                    <section className="panel full-span workbench-panel">
                         <div className="panel-title">失效记录</div>
-                        <div className="workbench-section-copy">这里是路径失效或项目损坏的记录，只会移除工作台登记，不会删除磁盘内容。</div>
+                        <div className="workbench-section-copy">这里是路径失效或项目损坏的记录，只会清理工作台登记，不会删除磁盘内容。</div>
                         {missingCards.length === 0 ? (
                             <div className="empty-state">没有失效项目记录。</div>
                         ) : (
@@ -273,7 +258,7 @@ export function WorkbenchPage({
             ) : (
                 <section className="panel full-span workbench-panel">
                     <div className="panel-title">工具页</div>
-                    <div className="workbench-section-copy">这些入口对应原启动器里的常用动作，现在统一收进工作台里直接执行。</div>
+                    <div className="workbench-section-copy">这里承接原启动器里的常用动作，统一做成可直接执行的按钮。</div>
                     <div className="summary-grid">
                         <WorkbenchToolCard
                             title="登录 Codex CLI"
@@ -293,7 +278,7 @@ export function WorkbenchPage({
                         />
                         <WorkbenchToolCard
                             title="开启局域网分享"
-                            description="以当前项目启动局域网可访问的 Dashboard。"
+                            description="以当前项目启动可局域网访问的 Dashboard。"
                             actionLabel="开启 LAN 模式"
                             disabled={!currentProject}
                             busy={busyKey === 'tool:start-lan-dashboard'}

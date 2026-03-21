@@ -33,7 +33,7 @@ import { SupervisorAuditPage } from './supervisorAuditPage.jsx'
 import { WorkbenchPage, readLandingPreference, syncDashboardQuery } from './workbenchPage.jsx'
 import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
 
-const NAV_ITEMS = [
+const PROJECT_NAV_ITEMS = [
     { id: 'workbench', label: '项目工作台' },
     { id: 'control', label: '总览' },
     { id: 'supervisor', label: '督办' },
@@ -42,6 +42,10 @@ const NAV_ITEMS = [
     { id: 'data', label: '数据' },
     { id: 'files', label: '文件' },
     { id: 'quality', label: '质量' },
+]
+const WORKBENCH_TABS = [
+    { id: 'hub', label: '项目主页' },
+    { id: 'tools', label: '工具页' },
 ]
 
 const MODE_OPTIONS = [
@@ -85,6 +89,7 @@ export default function App() {
     const [currentProjectRoot, setCurrentProjectRoot] = useState(() => readProjectRootFromQuery())
     const [page, setPage] = useState(() => readDashboardPageFromQuery())
     const [bootstrapHint, setBootstrapHint] = useState(() => readBootstrapHintFromQuery())
+    const [workbenchTab, setWorkbenchTab] = useState('hub')
     const [hubData, setHubData] = useState(null)
     const [hubLoadError, setHubLoadError] = useState(null)
     const [projectInfo, setProjectInfo] = useState(null)
@@ -105,7 +110,6 @@ export default function App() {
     const autoRedirectedRef = useRef(false)
     const projectMode = Boolean(currentProjectRoot)
     const effectivePage = projectMode ? page : 'workbench'
-    const navItems = projectMode ? NAV_ITEMS : [NAV_ITEMS[0]]
 
     useEffect(() => {
         syncDashboardQuery({ projectRoot: currentProjectRoot, page: effectivePage, bootstrapHint })
@@ -288,6 +292,21 @@ export default function App() {
         setBootstrapHint(nextHint)
     }
 
+    async function openWorkbenchProject(projectRoot, fallbackUrl = '') {
+        const response = await postJSON('/api/workbench/open-project', { project_root: projectRoot })
+        if (response?.opened) {
+            const nextUrl = response?.suggested_dashboard_url || fallbackUrl || `/?project_root=${encodeURIComponent(projectRoot)}`
+            applyDashboardUrl(nextUrl)
+            await reloadHub({ projectRoot })
+        }
+        return response
+    }
+
+    function openWorkbenchPanel(nextTab) {
+        setWorkbenchTab(nextTab)
+        setPage('workbench')
+    }
+
     function handleTaskCreated(task) {
         if (!task?.id) {
             scheduleCoreRefresh()
@@ -308,26 +327,83 @@ export default function App() {
     const selectedTask = useMemo(() => tasks.find((item) => item.id === selectedTaskId) || null, [tasks, selectedTaskId])
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
+    const currentWorkbenchProject = hubData?.current_project || null
+    const pinnedWorkbenchProjects = useMemo(
+        () => dedupeWorkbenchProjects(hubData?.pinned_projects || [], [currentWorkbenchProject?.project_root]),
+        [hubData, currentWorkbenchProject],
+    )
+    const recentWorkbenchProjects = useMemo(
+        () => dedupeWorkbenchProjects(
+            hubData?.recent_projects || hubData?.projects || [],
+            [currentWorkbenchProject?.project_root, ...pinnedWorkbenchProjects.map((item) => item.project_root)],
+        ),
+        [hubData, currentWorkbenchProject, pinnedWorkbenchProjects],
+    )
     const projectTitle = hubData?.current_project?.title || projectMeta?.project_name || projectMeta?.title || dashboardContext?.title || '未打开项目'
 
     return (
         <div className="shell">
             <aside className="sidebar">
-                <div>
+                <div className="sidebar-header">
                     <div className="brand">小说控制台</div>
                     <div className="project-title">{projectTitle}</div>
                 </div>
-                <nav className="nav">
-                    {navItems.map((item) => (
-                        <button
-                            key={item.id}
-                            className={`nav-button ${effectivePage === item.id ? 'active' : ''}`}
-                            onClick={() => setPage(item.id)}
-                        >
-                            {item.label}
-                        </button>
-                    ))}
-                </nav>
+                <div className="sidebar-scroll">
+                    <section className="sidebar-section">
+                        <div className="sidebar-section-label">工作台</div>
+                        <nav className="nav">
+                            {WORKBENCH_TABS.map((item) => (
+                                <button
+                                    key={item.id}
+                                    className={`nav-button ${effectivePage === 'workbench' && workbenchTab === item.id ? 'active' : ''}`}
+                                    onClick={() => openWorkbenchPanel(item.id)}
+                                >
+                                    {item.label}
+                                </button>
+                            ))}
+                        </nav>
+                    </section>
+                    {projectMode ? (
+                        <section className="sidebar-section">
+                            <div className="sidebar-section-label">项目页</div>
+                            <nav className="nav">
+                                {PROJECT_NAV_ITEMS.filter((item) => item.id !== 'workbench').map((item) => (
+                                    <button
+                                        key={item.id}
+                                        className={`nav-button ${effectivePage === item.id ? 'active' : ''}`}
+                                        onClick={() => setPage(item.id)}
+                                    >
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </nav>
+                        </section>
+                    ) : null}
+                    <section className="sidebar-section sidebar-project-section">
+                        <div className="sidebar-section-label">项目轨道</div>
+                        <div className="sidebar-project-groups">
+                            <SidebarProjectGroup
+                                title="当前项目"
+                                emptyText="还没有当前项目"
+                                projects={currentWorkbenchProject ? [currentWorkbenchProject] : []}
+                                markCurrent
+                                onOpenProject={openWorkbenchProject}
+                            />
+                            <SidebarProjectGroup
+                                title="固定项目"
+                                emptyText="还没有固定项目"
+                                projects={pinnedWorkbenchProjects}
+                                onOpenProject={openWorkbenchProject}
+                            />
+                            <SidebarProjectGroup
+                                title="最近项目"
+                                emptyText="打开已有项目后会出现在这里"
+                                projects={recentWorkbenchProjects}
+                                onOpenProject={openWorkbenchProject}
+                            />
+                        </div>
+                    </section>
+                </div>
                 <div className="status-stack">
                     {projectMode ? (
                         <>
@@ -348,10 +424,13 @@ export default function App() {
                 {effectivePage === 'workbench' && (
                     <WorkbenchPage
                         hubData={hubData}
+                        tab={workbenchTab}
                         currentProjectRoot={currentProjectRoot}
                         landingPreferenceKey={LANDING_PREFERENCE_KEY}
                         landingPreferences={LANDING_PREFERENCES}
+                        onTabChange={setWorkbenchTab}
                         onNavigate={applyDashboardUrl}
+                        onOpenProject={openWorkbenchProject}
                         onRefresh={reloadHub}
                     />
                 )}
@@ -421,6 +500,72 @@ export default function App() {
 
 function StatusPill({ tone, label }) {
     return <div className={`status-pill ${tone}`}>{label}</div>
+}
+
+function SidebarProjectGroup({ title, projects, emptyText, onOpenProject, markCurrent = false }) {
+    return (
+        <section className="sidebar-project-group">
+            <div className="sidebar-project-group-title">{title}</div>
+            {projects.length ? (
+                <div className="sidebar-project-list">
+                    {projects.map((project) => (
+                        <SidebarProjectCard key={project.project_root} project={project} current={markCurrent} onOpenProject={onOpenProject} />
+                    ))}
+                </div>
+            ) : (
+                <div className="sidebar-project-empty">{emptyText}</div>
+            )}
+        </section>
+    )
+}
+
+function SidebarProjectCard({ project, current = false, onOpenProject }) {
+    const summary = resolveSidebarProjectSummary(project)
+    const badges = []
+    if (current) badges.push('当前')
+    if (project?.pinned) badges.push('已固定')
+
+    return (
+        <button
+            type="button"
+            className={`sidebar-project-card ${current ? 'active' : ''}`}
+            onClick={() => onOpenProject?.(project.project_root, project.dashboard_url)}
+        >
+            <div className="sidebar-project-card-title">{project?.title || project?.project_root || '未命名项目'}</div>
+            <div className="sidebar-project-card-meta">{summary}</div>
+            {badges.length ? (
+                <div className="sidebar-project-card-badges">
+                    {badges.map((badge) => (
+                        <span key={badge} className="runtime-badge muted">
+                            {badge}
+                        </span>
+                    ))}
+                </div>
+            ) : null}
+        </button>
+    )
+}
+
+function resolveSidebarProjectSummary(project) {
+    if (!project) return '等待打开'
+    if (project.is_missing) return '路径失效'
+    if (project.is_corrupted) return '项目状态损坏'
+    if (!project.is_initialized) return '目录未初始化'
+    if (project.current_chapter) return `第 ${project.current_chapter} 章`
+    if (project.total_words) return `${formatNumber(project.total_words)} 字`
+    return project.genre || '可直接进入'
+}
+
+function dedupeWorkbenchProjects(items, blockedRoots = []) {
+    const blocked = new Set((blockedRoots || []).filter(Boolean))
+    const seen = new Set()
+    const source = Array.isArray(items) ? items : []
+    return source.filter((item) => {
+        const root = String(item?.project_root || '').trim()
+        if (!root || blocked.has(root) || seen.has(root)) return false
+        seen.add(root)
+        return true
+    })
 }
 
 function getWritingModelTone(llmStatus) {
@@ -511,7 +656,7 @@ function readDashboardPageFromQuery() {
     if (typeof window === 'undefined') return 'workbench'
     const params = new URLSearchParams(window.location.search || '')
     const value = String(params.get(DASHBOARD_PAGE_QUERY_KEY) || '').trim()
-    return NAV_ITEMS.some((item) => item.id === value) ? value : 'control'
+    return PROJECT_NAV_ITEMS.some((item) => item.id === value) ? value : 'control'
 }
 
 function readBootstrapHintFromQuery() {

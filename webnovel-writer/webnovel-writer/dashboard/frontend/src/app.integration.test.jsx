@@ -340,6 +340,17 @@ test('app shows workbench and skips project polling when no project root is sele
     expect(subscribeSSEMock).not.toHaveBeenCalled()
 })
 
+test('project mode sidebar omits duplicate workbench entry from project navigation', async () => {
+    render(<App />)
+
+    await screen.findByText('create-from-supervisor')
+
+    const navSections = document.querySelectorAll('.sidebar .nav')
+    expect(navSections).toHaveLength(2)
+    expect(navSections[0].querySelectorAll('.nav-button')).toHaveLength(2)
+    expect(navSections[1].querySelectorAll('.nav-button')).toHaveLength(7)
+})
+
 test('auto last preference redirects into the remembered project', async () => {
     window.localStorage.setItem('webnovel.dashboard.landing', 'auto_last')
     window.history.replaceState({}, '', '/')
@@ -453,7 +464,7 @@ test('opening a recent project card goes through the workbench open-project API'
     fetchJSONMock.mockImplementation((path) => {
         if (path === '/api/workbench/hub') {
             return Promise.resolve(buildHubPayload({
-                projects: [{
+                recent_projects: [{
                     project_root: 'D:/books/novel-a',
                     title: 'Novel A',
                     dashboard_url: '/?project_root=D%3A%2Fbooks%2Fnovel-a',
@@ -479,13 +490,26 @@ test('opening a recent project card goes through the workbench open-project API'
 
     render(<App />)
 
-    const card = (await screen.findByText('Novel A')).closest('.summary-card')
-    await user.click(card.querySelector('button.primary-button'))
+    await user.click(await screen.findByRole('button', { name: /Novel A/ }))
 
     await waitFor(() => {
         expect(postJSONMock).toHaveBeenCalledWith('/api/workbench/open-project', { project_root: 'D:/books/novel-a' })
         expect(window.location.search).toContain('project_root=D%3A%2Fbooks%2Fnovel-a')
     })
+})
+
+test('landing preference segmented toggle persists in localStorage', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+
+    render(<App />)
+
+    const autoLastButton = await screen.findByRole('button', { name: '自动进入上次项目' })
+    await user.click(autoLastButton)
+
+    expect(window.localStorage.getItem('webnovel.dashboard.landing')).toBe('auto_last')
+    expect(autoLastButton.getAttribute('aria-pressed')).toBe('true')
 })
 
 test('removing the current project refreshes hub without stale project_root context', async () => {
