@@ -1072,6 +1072,10 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     async def create_review_task(http_request: Request, request: TaskRequest):
         return _create_task('review', request, http_request)
 
+    @app.post('/api/tasks/repair')
+    async def create_repair_task(http_request: Request, request: TaskRequest):
+        return _create_task('repair', request, http_request)
+
     @app.post('/api/tasks/resume')
     async def create_resume_task(http_request: Request, request: TaskRequest):
         return _create_task('resume', request, http_request)

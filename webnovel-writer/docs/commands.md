@@ -61,6 +61,31 @@ webnovel review 1-5
 webnovel review 45
 ```
 
+说明：
+
+- review 汇总结果现在会结构化返回 `repair_candidates[]`。
+- 命中自动修稿白名单的问题可以直接发起 `repair` 任务；未命中白名单的问题仍需人工处理。
+
+## `webnovel repair [章号]`
+
+用途：针对单章已识别内容问题执行局部自动修稿，并在复审通过后写回正文。
+
+适用问题类型：
+
+- `AMBIGUOUS_WARNING_SOURCE`
+- `RULE_SCOPE_CONFUSION`
+- `TRANSITION_CLARITY`
+- `HOOK_BRIDGE_GAP`
+- `PLOT_THREAD_CONTINUITY`
+- `MEMORY_LOSS_OBJECTIVITY`
+
+说明：
+
+- `repair` 默认不走人工审批；如果请求显式传入 `require_manual_approval = true`，任务会在 `approval-gate` 停下，等待批准后再写回。
+- 完整流程为 `repair-plan -> repair-draft -> consistency-review -> continuity-review -> review-summary -> approval-gate -> repair-writeback`。
+- 只有复审通过后才会写回正文；若复审仍阻断，任务会以 `REPAIR_REVIEW_BLOCKED` 失败。
+- 成功写回时会同时生成章节备份与 repair report，目录分别位于 `.webnovel/repair-backups/` 和 `.webnovel/repair-reports/`。
+
 ## `webnovel query [关键词]`
 
 用途：查询角色、伏笔、节奏、状态等运行时信息。

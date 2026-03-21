@@ -114,3 +114,69 @@ Rules:
 - `plan` preflight merges inputs in this order: `.webnovel/planning-profile.json` -> `.webnovel/state.json` `planning.project_info` -> `大纲/总纲.md`.
 - If required planning inputs are still missing, `plan` must fail with `PLAN_INPUT_BLOCKED` and include `details.blocking_items`.
 - When `PLAN_INPUT_BLOCKED` is returned, do not expect `大纲/volume-01-plan.md` or `planning.volume_plans[1]` to be updated.
+
+## Invalid Step Output Recovery
+
+Dashboard mainline tasks now standardize `INVALID_STEP_OUTPUT` semantics instead of treating all parse failures as the same terminal error.
+
+Rules:
+
+- `INVALID_STEP_OUTPUT` must preserve the original error code and expose structured `details`.
+- `details` must include:
+  - `parse_stage`
+  - `raw_output_present`
+  - `missing_required_keys`
+  - `recoverability`
+  - `suggested_resume_step`
+- `recoverability` is constrained to:
+  - `auto_retried`: the orchestrator has already scheduled the one allowed automatic retry for this step.
+  - `retriable`: the step was not auto-retried, but the failure is still safe to retry manually.
+  - `terminal`: the step has exhausted automatic recovery for this failure class.
+- Automatic retry is enabled once for:
+  - `plan.plan`
+  - `repair.repair-draft`
+  - `repair.consistency-review`
+  - `repair.continuity-review`
+  - `write.context`
+  - `write.draft`
+  - `write.polish`
+  - `write.consistency-review`
+  - `write.continuity-review`
+  - `write.ooc-review`
+  - `review.consistency-review`
+  - `review.continuity-review`
+  - `review.ooc-review`
+- `data-sync` remains excluded from automatic retry in this phase; if it fails with `INVALID_STEP_OUTPUT`, it should surface as `retriable` with `suggested_resume_step = data-sync`.
+- Task Center / Overview should interpret:
+  - `PLAN_INPUT_BLOCKED` as input completion required
+  - `INVALID_STEP_OUTPUT` with `recoverability != terminal` as system fluctuation / retryable
+  - `INVALID_STEP_OUTPUT` with `recoverability = terminal` as a failed step that needs explicit operator retry
+
+## Repair Task
+
+Dashboard now supports a dedicated chapter-level `repair` task instead of folding automatic rewrite into `review`.
+
+Rules:
+
+- Launch path: `POST /api/tasks/repair`
+- Default behavior: direct writeback after task launch, unless the request explicitly sets `require_manual_approval = true`
+- Workflow: `repair-plan -> repair-draft -> consistency-review -> continuity-review -> review-summary -> approval-gate -> repair-writeback`
+- Automatic writeback is allowed only when:
+  - the issue type is in the repair whitelist
+  - repair review is not blocking
+  - the task has either passed `approval-gate` or does not require manual approval
+  - a chapter backup is written before overwrite
+- Repair whitelist for this phase:
+  - `AMBIGUOUS_WARNING_SOURCE`
+  - `RULE_SCOPE_CONFUSION`
+  - `TRANSITION_CLARITY`
+  - `HOOK_BRIDGE_GAP`
+  - `PLOT_THREAD_CONTINUITY`
+  - `MEMORY_LOSS_OBJECTIVITY`
+- Review summary payloads now expose `repair_candidates[]`, including `auto_rewrite_eligible`, rewrite goal, guardrails, and launch payload metadata.
+- Successful repair writes:
+  - chapter backup under `.webnovel/repair-backups/`
+  - repair report under `.webnovel/repair-reports/`
+  - updated chapter body and summary
+- If `require_manual_approval = true`, the task must pause at `approval-gate` with `status = awaiting_writeback_approval` before overwrite.
+- If repair review still blocks the chapter, the task must fail with `REPAIR_REVIEW_BLOCKED` and must not overwrite the chapter body.

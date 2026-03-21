@@ -264,3 +264,35 @@ test('plan blocked task renders dedicated stopped-for-input copy', () => {
     expect(screen.getByText('故事一句话')).not.toBeNull()
     expect(screen.getByText('第 1 卷核心冲突')).not.toBeNull()
 })
+
+test('recoverable invalid step output task renders system fluctuation guidance from runtime status', () => {
+    const task = {
+        id: 'task-review-retryable-1',
+        task_type: 'review',
+        status: 'failed',
+        current_step: 'continuity-review',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: {
+            phase_label: '连续性审查',
+            phase_detail: '系统波动导致步骤结构化输出无效，建议从连续性审查重试。 当前解析阶段：json_truncated。',
+            error_code: 'INVALID_STEP_OUTPUT',
+            retryable: true,
+            suggested_resume_step: 'continuity-review',
+        },
+        request: { chapter_range: '1-3' },
+        error: {
+            code: 'INVALID_STEP_OUTPUT',
+            message: '步骤输出中不包含有效 JSON 对象。',
+            details: {
+                parse_stage: 'json_truncated',
+                recoverability: 'retriable',
+                suggested_resume_step: 'continuity-review',
+            },
+        },
+    }
+
+    renderTaskCenter([task], task)
+
+    expect(screen.getAllByText(/系统波动导致步骤结构化输出无效/).length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: '重试' })).not.toBeNull()
+})

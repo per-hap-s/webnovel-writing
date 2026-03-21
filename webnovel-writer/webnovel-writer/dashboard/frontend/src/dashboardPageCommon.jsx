@@ -177,6 +177,15 @@ const UI_COPY = {
     unknownSystemEventWithDetail: '系统事件（请查看详情区）',
 }
 
+TASK_TYPE_LABELS.repair = '自动修稿'
+STEP_LABELS['repair-plan'] = '修稿规划'
+STEP_LABELS['repair-draft'] = '修稿改写'
+STEP_LABELS['repair-writeback'] = '修稿回写'
+EXACT_EVENT_MESSAGES['Repair plan prepared'] = '修稿规划已生成'
+EXACT_EVENT_MESSAGES['Repair plan blocked'] = '修稿启动前置输入不足'
+EXACT_EVENT_MESSAGES['Repair writeback blocked'] = '修稿回写被复审或输入阻断'
+EXACT_EVENT_MESSAGES['Repair writeback completed'] = '修稿回写已完成'
+
 export function MetricCard({ label, value }) {
     return (
         <div className="metric-card">
@@ -265,11 +274,12 @@ export function translateApprovalStatus(value) {
 
 export function resolveApprovalStatusLabel(task) {
     const approvalStatus = task?.approval_status || 'n/a'
-    if (task?.task_type !== 'write') return translateApprovalStatus(approvalStatus)
+    if (!['write', 'repair'].includes(task?.task_type)) return translateApprovalStatus(approvalStatus)
     if (!task?.request?.require_manual_approval) return UI_COPY.approvalNotRequired
+    const writebackStep = task?.task_type === 'repair' ? 'repair-writeback' : 'data-sync'
     if (approvalStatus === 'approved') {
         if (task?.status === 'completed') return UI_COPY.approvalApprovedCompleted
-        if (['queued', 'running'].includes(task?.status) && ['approval-gate', 'data-sync'].includes(task?.current_step)) {
+        if (['queued', 'running'].includes(task?.status) && ['approval-gate', writebackStep].includes(task?.current_step)) {
             return UI_COPY.approvalApprovedWritingBack
         }
         return UI_COPY.approvalApproved
@@ -287,6 +297,9 @@ export function resolveTaskTargetLabel(task) {
     }
     if (task?.task_type === 'write' && request.chapter) {
         return `第 ${request.chapter} 章`
+    }
+    if (task?.task_type === 'repair' && request.chapter) {
+        return `第 ${request.chapter} 章修稿`
     }
     if (task?.task_type === 'guarded-write' && request.chapter) {
         return `护栏推进第 ${request.chapter} 章`

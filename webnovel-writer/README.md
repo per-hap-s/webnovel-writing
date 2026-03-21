@@ -172,6 +172,7 @@ webnovel review 1-5
 接口保存位置都是项目根目录 `.env`，不会修改系统级环境变量文件。
 
 `plan` 相关任务如果因为规划资料缺失失败，会统一返回错误码 `PLAN_INPUT_BLOCKED`，并在 `details.blocking_items` 中列出缺失字段。
+`INVALID_STEP_OUTPUT` 现在会返回结构化 `details.parse_stage / raw_output_present / missing_required_keys / recoverability / suggested_resume_step`；其中 review 子步骤已纳入一次自动重试，`data-sync` 仍保持人工重试。
 
 ## Frontend 门禁与产物
 
@@ -200,6 +201,21 @@ webnovel review 1-5
 ## 开源协议
 
 本项目使用 `GPL v3` 协议，详见 [`LICENSE`](LICENSE)。
+
+## Repair Mainline
+
+- `review` 汇总结果现在会附带结构化 `repair_candidates[]`，用于区分可自动修稿与需人工处理的问题。
+- 新增 `POST /api/tasks/repair`，用于对单章执行 `repair-plan -> repair-draft -> consistency-review -> continuity-review -> review-summary -> approval-gate -> repair-writeback`。
+- 自动修稿默认直接写回，但如果请求显式传入 `require_manual_approval = true`，任务会先停在 `approval-gate`，等待人工批准后再落盘。
+- 若复审仍阻断，任务会以 `REPAIR_REVIEW_BLOCKED` 失败；命中结构化输出异常时，`repair-draft / consistency-review / continuity-review` 也会沿用一次性自动重试机制。
+- 当前自动修稿白名单仅覆盖：
+  - `AMBIGUOUS_WARNING_SOURCE`
+  - `RULE_SCOPE_CONFUSION`
+  - `TRANSITION_CLARITY`
+  - `HOOK_BRIDGE_GAP`
+  - `PLOT_THREAD_CONTINUITY`
+  - `MEMORY_LOSS_OBJECTIVITY`
+- 成功修稿会生成 `.webnovel/repair-backups/` 备份和 `.webnovel/repair-reports/` 报告。
 
 ## Star 历史
 

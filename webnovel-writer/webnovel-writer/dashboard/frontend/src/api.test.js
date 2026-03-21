@@ -14,3 +14,32 @@ test('normalizeError maps PLAN_INPUT_BLOCKED to the dedicated guidance copy', ()
     expect(normalized.displayMessage).toContain('规划输入待补齐')
     expect(normalized.details.blocking_items).toHaveLength(1)
 })
+
+test('normalizeError maps recoverable INVALID_STEP_OUTPUT to system fluctuation copy', () => {
+    const normalized = normalizeError({
+        code: 'INVALID_STEP_OUTPUT',
+        details: {
+            parse_stage: 'json_truncated',
+            recoverability: 'retriable',
+            suggested_resume_step: 'continuity-review',
+        },
+    })
+
+    expect(normalized.code).toBe('INVALID_STEP_OUTPUT')
+    expect(normalized.displayMessage).toContain('系统波动')
+    expect(normalized.displayMessage).toContain('json_truncated')
+})
+
+test('normalizeError keeps terminal INVALID_STEP_OUTPUT distinct from retriable copy', () => {
+    const normalized = normalizeError({
+        code: 'INVALID_STEP_OUTPUT',
+        details: {
+            parse_stage: 'json_invalid',
+            recoverability: 'terminal',
+        },
+    })
+
+    expect(normalized.code).toBe('INVALID_STEP_OUTPUT')
+    expect(normalized.displayMessage).not.toContain('系统波动')
+    expect(normalized.displayMessage).toContain('json_invalid')
+})

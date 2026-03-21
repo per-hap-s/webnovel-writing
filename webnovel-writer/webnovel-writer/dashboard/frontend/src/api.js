@@ -68,6 +68,10 @@ const STATUS_CODE_MAP = {
     504: 'REQUEST_TIMEOUT',
 }
 
+CODE_MESSAGE_MAP.REPAIR_NOT_ELIGIBLE = '当前问题类型不在自动修稿白名单内，需人工处理。'
+CODE_MESSAGE_MAP.REPAIR_REVIEW_BLOCKED = '修稿复审未通过，当前版本不会自动写回。'
+CODE_MESSAGE_MAP.REPAIR_INPUT_INVALID = '修稿任务输入不完整，请重新从审查候选入口发起。'
+
 class AppError extends Error {
     constructor({
         displayMessage,
@@ -113,6 +117,22 @@ function getDisplayMessage(code, statusCode) {
     return CODE_MESSAGE_MAP[code] || STATUS_MESSAGE_MAP[statusCode] || CODE_MESSAGE_MAP.REQUEST_FAILED
 }
 
+function buildInvalidStepOutputMessage(details) {
+    if (!details || typeof details !== 'object') return CODE_MESSAGE_MAP.INVALID_STEP_OUTPUT
+    const recoverability = String(details.recoverability || '').trim()
+    const parseStage = String(details.parse_stage || '').trim()
+    if (recoverability && recoverability !== 'terminal') {
+        if (parseStage) {
+            return `系统波动导致步骤输出结构无效，可重试。当前解析阶段：${parseStage}。`
+        }
+        return '系统波动导致步骤输出结构无效，可重试。'
+    }
+    if (parseStage) {
+        return `步骤输出格式无效，当前解析阶段：${parseStage}。`
+    }
+    return CODE_MESSAGE_MAP.INVALID_STEP_OUTPUT
+}
+
 function looksLikeEnglishMessage(text) {
     return Boolean(text) && /^[\x00-\x7F\s.,:;!?'"`()\[\]{}\-_/\\]+$/.test(text)
 }
@@ -154,9 +174,11 @@ function buildApiError(path, statusCode, payload, text) {
         : null
 
     return new AppError({
-        displayMessage: rawMessage && !looksLikeEnglishMessage(rawMessage)
-            ? rawMessage
-            : getDisplayMessage(code, statusCode),
+        displayMessage: code === 'INVALID_STEP_OUTPUT'
+            ? buildInvalidStepOutputMessage(details)
+            : (rawMessage && !looksLikeEnglishMessage(rawMessage)
+                ? rawMessage
+                : getDisplayMessage(code, statusCode)),
         code,
         rawMessage,
         details,
@@ -196,9 +218,11 @@ export function normalizeError(error) {
         return new AppError({
             displayMessage: typeof error.displayMessage === 'string' && error.displayMessage
                 ? error.displayMessage
-                : (rawMessage && !looksLikeEnglishMessage(rawMessage)
-                    ? rawMessage
-                    : getDisplayMessage(code, statusCode)),
+                : (code === 'INVALID_STEP_OUTPUT'
+                    ? buildInvalidStepOutputMessage(details)
+                    : (rawMessage && !looksLikeEnglishMessage(rawMessage)
+                        ? rawMessage
+                        : getDisplayMessage(code, statusCode))),
             code,
             rawMessage,
             details,

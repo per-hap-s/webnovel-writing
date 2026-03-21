@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from dashboard.orchestrator import (
     REVIEW_REPORT_DIR_NAME,
     SETTINGS_DIR_NAME,
 )
+from scripts.data_modules.index_manager import ChapterMeta
 from scripts.init_project import _build_master_outline, build_initial_planning_profile
 
 
@@ -182,11 +184,11 @@ def long_content(title: str = "Chapter") -> str:
     return f"# {title}\n" + ("Rain archive memory cost " * 50)
 
 
-def review_payload(score: float = 91.0) -> dict:
+def review_payload(score: float = 91.0, *, issues: list[dict] | None = None, passed: bool = True) -> dict:
     return {
         "overall_score": score,
-        "pass": True,
-        "issues": [],
+        "pass": passed,
+        "issues": issues or [],
         "metrics": {"consistency": score},
         "summary": "ok",
     }
@@ -877,6 +879,183 @@ def test_write_draft_auto_retries_once_after_invalid_json_output(tmp_path: Path)
     assert "step_auto_retried" in messages
 
 
+def test_review_continuity_auto_retries_once_after_invalid_output(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": [
+                step_result(
+                    "continuity-review",
+                    {},
+                    success=False,
+                    stdout='{"overall_score": 90',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "continuity-review",
+                    review_payload(),
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 150,
+                        "parse_stage": "strict_json",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+            "ooc-review": step_result("ooc-review", review_payload()),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("review", {"chapter_range": "1-3"})
+    messages = [event["message"] for event in service.get_events(task["id"])]
+
+    assert task["status"] == "completed"
+    assert runner.calls == ["consistency-review", "continuity-review", "continuity-review", "ooc-review"]
+    assert "step_auto_retried" in messages
+
+
+def test_review_invalid_output_terminal_after_second_failure_reports_recoverability(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": [
+                step_result(
+                    "continuity-review",
+                    {},
+                    success=False,
+                    stdout='{"overall_score": 90',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "continuity-review",
+                    {},
+                    success=False,
+                    stdout='{"overall_score": 90',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 2,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("review", {"chapter_range": "1-3"})
+    task_with_runtime = service.get_task(task["id"])
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "INVALID_STEP_OUTPUT"
+    assert task["error"]["details"]["recoverability"] == "terminal"
+    assert task["error"]["details"]["suggested_resume_step"] == "continuity-review"
+    assert task["error"]["details"]["parse_stage"] == "json_truncated"
+    assert task_with_runtime["runtime_status"]["recoverability"] == "terminal"
+    assert task_with_runtime["runtime_status"]["suggested_resume_step"] == "continuity-review"
+    assert "当前解析阶段" in task_with_runtime["runtime_status"]["phase_detail"]
+
+
+def test_write_data_sync_invalid_output_is_retriable_but_not_auto_retried(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Chapter 1")
+    chapter_file = f"{BODY_DIR_NAME}/ch0001.md"
+    runner = SequenceRunner(
+        {
+            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "draft": step_result("draft", {"chapter_file": chapter_file, "content": content, "word_count": len("".join(content.split()))}),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+            "ooc-review": step_result("ooc-review", review_payload()),
+            "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
+            "data-sync": step_result(
+                "data-sync",
+                {},
+                success=False,
+                stdout='{"files_written": [',
+                error={
+                    "code": "INVALID_STEP_OUTPUT",
+                    "message": "步骤输出中不包含有效 JSON 对象。",
+                    "attempt": 1,
+                    "retryable": False,
+                    "timeout_seconds": 240,
+                    "parse_stage": "json_invalid",
+                    "raw_output_present": True,
+                },
+                metadata={
+                    "attempt": 1,
+                    "retry_count": 0,
+                    "timeout_seconds": 240,
+                    "parse_stage": "json_invalid",
+                    "json_extraction_recovered": False,
+                    "missing_required_keys": [],
+                },
+            ),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task_with_runtime = service.get_task(task["id"])
+    messages = [event["message"] for event in service.get_events(task["id"])]
+
+    assert task["status"] == "failed"
+    assert runner.calls.count("data-sync") == 1
+    assert "step_auto_retried" not in messages
+    assert task["error"]["details"]["recoverability"] == "retriable"
+    assert task["error"]["details"]["suggested_resume_step"] == "data-sync"
+    assert task_with_runtime["runtime_status"]["recoverability"] == "retriable"
+    assert "建议从写回同步重试" in task_with_runtime["runtime_status"]["phase_detail"]
+
+
 def test_failed_write_does_not_persist_review_metrics_before_data_sync(tmp_path: Path):
     project_root = make_project(tmp_path)
     content = long_content("Failed pipeline")
@@ -1113,3 +1292,553 @@ def test_write_data_sync_rolls_back_partial_mutations_on_consistency_failure(tmp
     event_messages = [event["message"] for event in service.get_events(task["id"])]
     assert "writeback_rollback_started" in event_messages
     assert "writeback_rollback_finished" in event_messages
+
+
+def _seed_repair_target(service: OrchestrationService, project_root: Path, *, chapter: int = 1) -> tuple[str, str]:
+    chapter_file = service._default_chapter_file(chapter)
+    summary_file = service._default_summary_file(chapter)
+    chapter_path = project_root / chapter_file
+    summary_path = project_root / summary_file
+    chapter_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    original_content = long_content("Original Chapter")
+    chapter_path.write_text(original_content, encoding="utf-8")
+    summary_path.write_text(f"# 第{chapter:04d}章摘要\n\n旧摘要。\n", encoding="utf-8")
+
+    state_path = project_root / ".webnovel" / "state.json"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    state_data.setdefault("progress", {})
+    state_data["progress"]["current_chapter"] = chapter
+    state_data["chapter_meta"] = {
+        str(chapter): {"title": "Original Chapter", "location": "Archive", "characters": ["Shen Yan"]},
+    }
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    service.index_manager.add_chapter(
+        ChapterMeta(
+            chapter=chapter,
+            title="Original Chapter",
+            location="Archive",
+            word_count=len("".join(original_content.split())),
+            characters=["Shen Yan"],
+            summary="旧摘要",
+            file_path=chapter_file,
+        )
+    )
+    return chapter_file, summary_file
+
+
+def test_review_summary_exposes_repair_candidates_for_whitelist_issues(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = MappingRunner(
+        {
+            "consistency-review": review_payload(
+                issues=[
+                    {
+                        "chapter": 1,
+                        "type": "TRANSITION_CLARITY",
+                        "title": "B1 到封存柜 47 的过渡不清",
+                        "description": "补足从楼梯口到封存柜 47 的空间与动作过渡。",
+                    },
+                    {
+                        "chapter": 1,
+                        "type": "DIALOGUE_VOICE_DRIFT",
+                        "title": "角色语气漂移",
+                        "description": "角色说话风格偏离既有设定。",
+                    },
+                ]
+            ),
+            "continuity-review": review_payload(),
+            "ooc-review": review_payload(),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("review", {"chapter": 1})
+
+    assert task["status"] == "completed"
+    summary = task["artifacts"]["review_summary"]
+    assert summary["repairable_issue_count"] == 1
+    eligible = next(item for item in summary["repair_candidates"] if item["issue_type"] == "TRANSITION_CLARITY")
+    assert eligible["auto_rewrite_eligible"] is True
+    assert eligible["operator_action"]["task_type"] == "repair"
+    assert eligible["operator_action"]["payload"]["chapter"] == 1
+    manual = next(item for item in summary["repair_candidates"] if item["issue_type"] == "DIALOGUE_VOICE_DRIFT")
+    assert manual["auto_rewrite_eligible"] is False
+    assert "白名单" in manual["reason"]
+
+
+def test_repair_task_writes_backup_report_and_updated_chapter(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": long_content("Repaired Chapter"),
+                    "word_count": len("".join(long_content("Repaired Chapter").split())),
+                    "change_summary": ["补足空间转场", "明确预警来源"],
+                },
+            ),
+            "consistency-review": step_result("consistency-review", review_payload(score=95.0)),
+            "continuity-review": step_result("continuity-review", review_payload(score=94.0)),
+        }
+    )
+    service = make_service(project_root, runner)
+    chapter_file, summary_file = _seed_repair_target(service, project_root, chapter=1)
+
+    task = service.run_task_sync(
+        "repair",
+        {
+            "chapter": 1,
+            "mode": "standard",
+            "require_manual_approval": False,
+            "options": {
+                "source_task_id": "task-review-1",
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡，使读者可直接验证移动路径。",
+                "guardrails": ["仅修复当前章节局部连续性问题", "不要改写卷纲或跨章主线"],
+            },
+        },
+    )
+
+    assert task["status"] == "completed"
+    repair_artifact = task["artifacts"]["repair"]
+    assert repair_artifact["issue_type"] == "TRANSITION_CLARITY"
+    assert repair_artifact["report_file"].startswith(".webnovel/repair-reports/")
+    assert repair_artifact["backup_paths"]["chapter"].startswith(".webnovel/repair-backups/")
+    assert "Repaired Chapter" in (project_root / chapter_file).read_text(encoding="utf-8")
+    assert (project_root / summary_file).is_file()
+    assert (project_root / repair_artifact["report_file"]).is_file()
+    assert (project_root / repair_artifact["backup_paths"]["chapter"]).is_file()
+
+    state_data = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
+    chapter_meta = state_data["chapter_meta"]["1"]
+    assert chapter_meta["last_repair_task_id"] == task["id"]
+    assert "TRANSITION_CLARITY" in chapter_meta["last_repair_issue_types"]
+
+    metrics = service.index_manager.get_recent_review_metrics(limit=5)
+    assert any(item["report_file"] == repair_artifact["report_file"] for item in metrics)
+
+
+def test_repair_task_waits_for_manual_approval_before_writeback(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": long_content("Approved Repair Chapter"),
+                    "word_count": len("".join(long_content("Approved Repair Chapter").split())),
+                    "change_summary": ["补足空间转场"],
+                },
+            ),
+            "consistency-review": step_result("consistency-review", review_payload(score=95.0)),
+            "continuity-review": step_result("continuity-review", review_payload(score=94.0)),
+        }
+    )
+    service = make_service(project_root, runner)
+    chapter_file, _ = _seed_repair_target(service, project_root, chapter=1)
+    original_text = (project_root / chapter_file).read_text(encoding="utf-8")
+
+    task = service.run_task_sync(
+        "repair",
+        {
+            "chapter": 1,
+            "mode": "standard",
+            "require_manual_approval": True,
+            "options": {
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡。",
+            },
+        },
+    )
+
+    assert task["status"] == "awaiting_writeback_approval"
+    assert task["current_step"] == "approval-gate"
+    assert task["approval_status"] == "pending"
+    assert (project_root / chapter_file).read_text(encoding="utf-8") == original_text
+    assert not (project_root / ".webnovel" / "repair-reports").exists()
+
+
+def test_approved_repair_task_resumes_from_approval_gate_and_writes_back(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": long_content("Approved Repair Chapter"),
+                    "word_count": len("".join(long_content("Approved Repair Chapter").split())),
+                    "change_summary": ["补足空间转场"],
+                },
+            ),
+            "consistency-review": step_result("consistency-review", review_payload(score=95.0)),
+            "continuity-review": step_result("continuity-review", review_payload(score=94.0)),
+        }
+    )
+    service = make_service(project_root, runner)
+    chapter_file, summary_file = _seed_repair_target(service, project_root, chapter=1)
+
+    task = service.run_task_sync(
+        "repair",
+        {
+            "chapter": 1,
+            "mode": "standard",
+            "require_manual_approval": True,
+            "options": {
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡。",
+            },
+        },
+    )
+
+    assert task["status"] == "awaiting_writeback_approval"
+
+    approved = service.approve_writeback(task["id"], reason="manual approval")
+    asyncio.run(service._run_task(task["id"], resume_from_step=approved.get("current_step") or "approval-gate"))
+    completed = service.get_task(task["id"])
+
+    assert completed["status"] == "completed"
+    assert completed["approval_status"] == "approved"
+    assert "Approved Repair Chapter" in (project_root / chapter_file).read_text(encoding="utf-8")
+    assert (project_root / summary_file).is_file()
+    assert (project_root / completed["artifacts"]["repair"]["report_file"]).is_file()
+
+
+def test_rejected_repair_task_does_not_write_back_chapter(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": long_content("Rejected Repair Chapter"),
+                    "word_count": len("".join(long_content("Rejected Repair Chapter").split())),
+                    "change_summary": ["补足空间转场"],
+                },
+            ),
+            "consistency-review": step_result("consistency-review", review_payload(score=95.0)),
+            "continuity-review": step_result("continuity-review", review_payload(score=94.0)),
+        }
+    )
+    service = make_service(project_root, runner)
+    chapter_file, _ = _seed_repair_target(service, project_root, chapter=1)
+    original_text = (project_root / chapter_file).read_text(encoding="utf-8")
+
+    task = service.run_task_sync(
+        "repair",
+        {
+            "chapter": 1,
+            "mode": "standard",
+            "require_manual_approval": True,
+            "options": {
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡。",
+            },
+        },
+    )
+
+    rejected = service.reject_writeback(task["id"], reason="manual reject")
+
+    assert rejected["status"] == "rejected"
+    assert rejected["approval_status"] == "rejected"
+    assert (project_root / chapter_file).read_text(encoding="utf-8") == original_text
+    assert not (project_root / ".webnovel" / "repair-reports").exists()
+
+
+def test_retry_repair_task_preserves_approved_state_for_repair_writeback(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = MappingRunner({})
+    service = make_service(project_root, runner)
+    workflow = service._load_workflow("repair")
+    task = service.store.create_task(
+        "repair",
+        {"chapter": 1, "mode": "standard", "require_manual_approval": True},
+        workflow,
+    )
+    service.store.update_task(
+        task["id"],
+        status="failed",
+        approval_status="approved",
+        current_step=None,
+        artifacts={
+            "approval": {"status": "approved"},
+            "step_results": {
+                "repair-plan": {"success": True, "structured_output": {"chapter": 1}},
+                "review-summary": {"success": True, "structured_output": {"blocking": False}},
+            },
+        },
+        error={"code": "INVALID_STEP_OUTPUT", "message": "failed"},
+    )
+
+    retried = service.retry_task(task["id"])
+    events = service.get_events(task["id"])
+    retry_event = next(event for event in reversed(events) if event["message"] == "Retry requested")
+
+    assert retried["status"] == "queued"
+    assert retried["approval_status"] == "approved"
+    assert retry_event["payload"]["resume_from_step"] == "repair-writeback"
+    assert retry_event["payload"]["preserve_approval"] is True
+
+
+def test_repair_task_blocks_writeback_when_review_summary_stays_blocking(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": long_content("Blocked Repair Chapter"),
+                    "word_count": len("".join(long_content("Blocked Repair Chapter").split())),
+                    "change_summary": ["尝试补足转场"],
+                },
+            ),
+            "consistency-review": step_result(
+                "consistency-review",
+                review_payload(
+                    score=72.0,
+                    issues=[{"chapter": 1, "type": "TIMELINE_ISSUE", "severity": "critical", "title": "时间锚点仍然摇摆"}],
+                    passed=False,
+                ),
+            ),
+            "continuity-review": step_result("continuity-review", review_payload(score=80.0)),
+        }
+    )
+    service = make_service(project_root, runner)
+    chapter_file, _ = _seed_repair_target(service, project_root, chapter=1)
+    original_text = (project_root / chapter_file).read_text(encoding="utf-8")
+
+    task = service.run_task_sync(
+        "repair",
+        {
+            "chapter": 1,
+            "mode": "standard",
+            "require_manual_approval": False,
+            "options": {
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡。",
+            },
+        },
+    )
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "REPAIR_REVIEW_BLOCKED"
+    assert (project_root / chapter_file).read_text(encoding="utf-8") == original_text
+    assert not (project_root / ".webnovel" / "repair-reports").exists()
+
+
+def test_repair_draft_auto_retries_once_after_invalid_json_output(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Retried Repair Chapter")
+    runner = SequenceRunner(
+        {
+            "repair-draft": [
+                step_result(
+                    "repair-draft",
+                    {},
+                    success=False,
+                    stdout='{"chapter_file": "正文/第1卷/第0001章.md"',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 120,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 120,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "repair-draft",
+                    {
+                        "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                        "content": content,
+                        "word_count": len("".join(content.split())),
+                        "change_summary": ["补足空间转场"],
+                    },
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 120,
+                        "parse_stage": "strict_json",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+        }
+    )
+    service = make_service(project_root, runner)
+    _seed_repair_target(service, project_root, chapter=1)
+
+    task = service.run_task_sync("repair", {"chapter": 1, "require_manual_approval": False, "options": {"issue_type": "TRANSITION_CLARITY", "rewrite_goal": "补足空间与动作过渡。"}})
+    messages = [event["message"] for event in service.get_events(task["id"])]
+
+    assert task["status"] == "completed"
+    assert runner.calls[:2] == ["repair-draft", "repair-draft"]
+    assert "step_auto_retried" in messages
+
+
+def test_repair_continuity_review_auto_retries_once_after_invalid_output(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Retried Repair Review Chapter")
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": content,
+                    "word_count": len("".join(content.split())),
+                    "change_summary": ["补足空间转场"],
+                },
+            ),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": [
+                step_result(
+                    "continuity-review",
+                    {},
+                    success=False,
+                    stdout='{"overall_score": 91',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "continuity-review",
+                    review_payload(),
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 150,
+                        "parse_stage": "strict_json",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+        }
+    )
+    service = make_service(project_root, runner)
+    _seed_repair_target(service, project_root, chapter=1)
+
+    task = service.run_task_sync("repair", {"chapter": 1, "require_manual_approval": False, "options": {"issue_type": "TRANSITION_CLARITY", "rewrite_goal": "补足空间与动作过渡。"}})
+    messages = [event["message"] for event in service.get_events(task["id"])]
+
+    assert task["status"] == "completed"
+    assert runner.calls == ["repair-draft", "consistency-review", "continuity-review", "continuity-review"]
+    assert "step_auto_retried" in messages
+
+
+def test_repair_invalid_output_terminal_after_second_failure_reports_recoverability(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Failed Repair Review Chapter")
+    runner = SequenceRunner(
+        {
+            "repair-draft": step_result(
+                "repair-draft",
+                {
+                    "chapter_file": f"{BODY_DIR_NAME}/第1卷/第0001章.md",
+                    "content": content,
+                    "word_count": len("".join(content.split())),
+                    "change_summary": ["补足空间转场"],
+                },
+            ),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": [
+                step_result(
+                    "continuity-review",
+                    {},
+                    success=False,
+                    stdout='{"overall_score": 91',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 1,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+                step_result(
+                    "continuity-review",
+                    {},
+                    success=False,
+                    stdout='{"overall_score": 91',
+                    error={
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": "步骤输出中不包含有效 JSON 对象。",
+                        "attempt": 2,
+                        "retryable": False,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "raw_output_present": True,
+                    },
+                    metadata={
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "timeout_seconds": 150,
+                        "parse_stage": "json_truncated",
+                        "json_extraction_recovered": False,
+                        "missing_required_keys": [],
+                    },
+                ),
+            ],
+        }
+    )
+    service = make_service(project_root, runner)
+    _seed_repair_target(service, project_root, chapter=1)
+
+    task = service.run_task_sync("repair", {"chapter": 1, "require_manual_approval": False, "options": {"issue_type": "TRANSITION_CLARITY", "rewrite_goal": "补足空间与动作过渡。"}})
+    task_with_runtime = service.get_task(task["id"])
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "INVALID_STEP_OUTPUT"
+    assert task["error"]["details"]["recoverability"] == "terminal"
+    assert task["error"]["details"]["suggested_resume_step"] == "continuity-review"
+    assert task_with_runtime["runtime_status"]["recoverability"] == "terminal"
+    assert task_with_runtime["runtime_status"]["suggested_resume_step"] == "continuity-review"

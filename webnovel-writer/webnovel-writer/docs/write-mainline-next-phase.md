@@ -14,6 +14,28 @@ The current write stack already includes:
 - `operator_actions`
 - `resume_action`
 
+## Current Focus
+
+The next write-mainline stabilization layer is now partly in place:
+
+- `INVALID_STEP_OUTPUT` failures are no longer treated as an undifferentiated parse error.
+- Task/runtime surfaces now distinguish:
+  - `PLAN_INPUT_BLOCKED`
+  - `INVALID_STEP_OUTPUT` with retryable recovery semantics
+  - terminal `INVALID_STEP_OUTPUT`
+- Automatic retry now covers review substeps (`consistency-review`, `continuity-review`, `ooc-review`) in addition to the earlier `plan/context/draft/polish` path.
+- `data-sync` remains deliberately outside this auto-retry set for the current phase.
+
+The next major backend milestone after this stabilization work was the dedicated chapter `repair` task, rather than more UI surface expansion.
+
+That repair layer is now in place:
+
+- review summaries emit structured `repair_candidates[]`
+- the dashboard can launch `repair` directly from existing task detail flow
+- `repair` defaults to direct writeback after successful re-review
+- backups and repair reports are written under `.webnovel/repair-backups/` and `.webnovel/repair-reports/`
+- only whitelist issue types are eligible for automatic rewrite in this phase
+
 The dashboard now consumes the same action contract across task detail, guarded recovery, batch recovery, resume results, and Supervisor recommendations. Legacy `next_action`, `action`, and `secondaryAction` are still preserved for compatibility.
 
 ## This Round
@@ -90,6 +112,12 @@ In practice this means the operator can open a task and immediately see:
 - Make `write -> guarded-write -> guarded-batch-write` continuation language even more uniform.
 - Keep list and overview surfaces thin adapters over the shared derivation instead of adding per-page explanation branches.
 - Keep future task-center work inside the dedicated task-center files instead of re-expanding `appSections.jsx`.
+
+5. Real regression expansion
+
+- Move from the current repair-capable 1-5 chapter baseline toward the planned 1-10 chapter baseline.
+- Keep `repair` scoped to local continuity fixes until the 10-chapter mainline is stable.
+- Delay wider style / voice rewrite coverage until the longer regression path is consistently green.
 
 ## Validation
 

@@ -243,6 +243,47 @@ def test_create_resume_task_calls_orchestrator(client: TestClient, mock_orchestr
     )
 
 
+def test_create_repair_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):
+    mock_orchestrator.create_task.return_value = {"id": "task-repair-1", "status": "queued", "task_type": "repair"}
+
+    response = client.post(
+        "/api/tasks/repair",
+        json={
+            "chapter": 2,
+            "mode": "standard",
+            "require_manual_approval": False,
+            "options": {
+                "source_task_id": "task-review-1",
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡。",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_type"] == "repair"
+    mock_orchestrator.create_task.assert_called_once_with(
+        "repair",
+        {
+            "project_root": str(mock_project_root),
+            "chapter": 2,
+            "start_chapter": None,
+            "max_chapters": None,
+            "chapter_range": None,
+            "volume": None,
+            "mode": "standard",
+            "require_manual_approval": False,
+            "options": {
+                "source_task_id": "task-review-1",
+                "issue_type": "TRANSITION_CLARITY",
+                "issue_title": "B1 到封存柜 47 的过渡不清",
+                "rewrite_goal": "补足空间与动作过渡。",
+            },
+        },
+    )
+
+
 def test_create_guarded_write_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):
     mock_orchestrator.create_task.return_value = {"id": "task-guarded-1", "status": "queued", "task_type": "guarded-write"}
 

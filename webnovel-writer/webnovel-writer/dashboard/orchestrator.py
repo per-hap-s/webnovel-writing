@@ -51,6 +51,19 @@ SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION = 2
 SUMMARY_SECTION_PLOT = "## 剧情摘要"
 SUMMARY_SECTION_REVIEW = "## 审查结果"
 SUMMARY_SECTION_ISSUES = "## 主要问题"
+REPAIR_BACKUPS_DIR_NAME = ".webnovel/repair-backups"
+REPAIR_REPORTS_DIR_NAME = ".webnovel/repair-reports"
+REPAIR_NOT_ELIGIBLE_CODE = "REPAIR_NOT_ELIGIBLE"
+REPAIR_REVIEW_BLOCKED_CODE = "REPAIR_REVIEW_BLOCKED"
+REPAIR_INPUT_INVALID_CODE = "REPAIR_INPUT_INVALID"
+AUTO_REPAIR_ISSUE_TYPES = {
+    "AMBIGUOUS_WARNING_SOURCE",
+    "RULE_SCOPE_CONFUSION",
+    "TRANSITION_CLARITY",
+    "HOOK_BRIDGE_GAP",
+    "PLOT_THREAD_CONTINUITY",
+    "MEMORY_LOSS_OBJECTIVITY",
+}
 
 
 MIN_WRITEBACK_WORD_COUNT = 200
@@ -81,11 +94,14 @@ SETTING_DOC_PATHS = {
 RUNTIME_PHASE_LABELS = {
     "init": "初始化分析",
     "plan": "卷规划",
+    "repair": "自动修稿",
     "resume": "流程恢复",
     "guarded-chapter-runner": "护栏推进一章",
     "guarded-batch-runner": "护栏批量推进",
     "story-director": "多章叙事规划",
     "chapter-director": "单章导演决策",
+    "repair-plan": "修稿规划",
+    "repair-draft": "修稿改写",
     "context": "上下文准备",
     "draft": "草稿生成",
     "consistency-review": "一致性审查",
@@ -94,6 +110,7 @@ RUNTIME_PHASE_LABELS = {
     "review-summary": "审查汇总",
     "polish": "正文润色",
     "approval-gate": "回写审批",
+    "repair-writeback": "修稿回写",
     "data-sync": "写回同步",
 }
 
@@ -135,10 +152,41 @@ EXTERNAL_WORKFLOW_STEPS = {
     "polish",
     "data-sync",
 }
+INVALID_OUTPUT_AUTO_RETRY_STEPS = {
+    ("plan", "plan"),
+    ("review", "consistency-review"),
+    ("review", "continuity-review"),
+    ("review", "ooc-review"),
+    ("repair", "repair-draft"),
+    ("repair", "consistency-review"),
+    ("repair", "continuity-review"),
+    ("write", "context"),
+    ("write", "draft"),
+    ("write", "polish"),
+    ("write", "consistency-review"),
+    ("write", "continuity-review"),
+    ("write", "ooc-review"),
+}
+INVALID_OUTPUT_RECOVERABLE_PARSE_STAGES = {
+    "json_invalid",
+    "json_truncated",
+    "json_truncated_repaired",
+    "missing_required_keys",
+}
 
 
 class WritebackConsistencyError(ValueError):
     """Raised when writeback artifacts do not match the requested chapter target."""
+
+
+class RepairTaskError(ValueError):
+    """Raised when repair validation or repair review prevents progress."""
+
+    def __init__(self, code: str, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
 
 
 class OrchestrationService:
@@ -182,10 +230,20 @@ class OrchestrationService:
 
         items: List[Dict[str, Any]] = []
 
-        pending_approval = next((task for task in tasks if task.get("task_type") == "write" and task.get("status") == "awaiting_writeback_approval"), None)
+        pending_approval = next(
+            (
+                task
+                for task in tasks
+                if task.get("task_type") in {"write", "repair"} and task.get("status") == "awaiting_writeback_approval"
+            ),
+            None,
+        )
         if pending_approval is not None:
             chapter = int((pending_approval.get("request") or {}).get("chapter") or 0)
             action = {"type": "open-task", "taskId": pending_approval["id"]}
+            task_type = str(pending_approval.get("task_type") or "")
+            detail = "不先处理这个审批，护栏推进无法安全往后继续。" if task_type == "write" else "修稿结果还未获批准，不会自动覆盖当前正文。"
+            rationale = "人工审批是硬阻断，优先级高于继续创建任何新章节任务。" if task_type == "write" else "这是显式要求的人工确认步骤，处理后修稿任务才能继续落盘。"
             items.append(
                 self._build_supervisor_item(
                     stable_key=f"approval:{pending_approval['id']}",
@@ -195,9 +253,9 @@ class OrchestrationService:
                     tone="warning",
                     badge="先处理",
                     title=f"第 {chapter or '-'} 章待回写审批",
-                    summary="当前 write 子任务已经停在 approval-gate。",
-                    detail="不先处理这个审批，护栏推进无法安全往后继续。",
-                    rationale="人工审批是硬阻断，优先级高于继续创建任何新章节任务。",
+                    summary="当前任务已经停在 approval-gate。",
+                    detail=detail,
+                    rationale=rationale,
                     source_task=pending_approval,
                     action=action,
                     action_label="打开待审批任务",
@@ -2041,6 +2099,7 @@ class OrchestrationService:
             http_status=http_status,
             retryable=retryable,
         )
+        task_error_details = task.get("error", {}).get("details") if isinstance(task.get("error"), dict) else {}
         return {
             "phase_label": phase_label,
             "target_label": self._build_runtime_target_label(task),
@@ -2062,6 +2121,8 @@ class OrchestrationService:
             "waiting_since": self._format_runtime_datetime(waiting_since),
             "error_code": error_code,
             "http_status": http_status,
+            "recoverability": task_error_details.get("recoverability") if isinstance(task_error_details, dict) else None,
+            "suggested_resume_step": task_error_details.get("suggested_resume_step") if isinstance(task_error_details, dict) else None,
         }
 
     def _build_runtime_target_label(self, task: Dict[str, Any]) -> Optional[str]:
@@ -2076,6 +2137,12 @@ class OrchestrationService:
                 volume = self._resolve_volume_for_chapter(chapter)
                 return f"第 {volume} 卷 · 第 {chapter} 章"
             return "目标章节未指定"
+        if task_type == "repair":
+            chapter = int(request.get("chapter") or 0)
+            if chapter > 0:
+                volume = self._resolve_volume_for_chapter(chapter)
+                return f"第 {volume} 卷 · 第 {chapter} 章修稿"
+            return "目标修稿章节未指定"
         if task_type == "guarded-write":
             chapter = int(request.get("chapter") or 0)
             return f"护栏推进 · 第 {chapter} 章" if chapter > 0 else "护栏推进下一章"
@@ -2388,6 +2455,23 @@ class OrchestrationService:
             return "任务已被拒绝，不会继续执行回写。"
         if step_state == "failed":
             error_code = (task.get("error") or {}).get("code")
+            if error_code == PLAN_INPUT_BLOCKED_CODE:
+                return "当前规划信息不足，需要先回总览页补录后再运行 plan。"
+            if error_code == "INVALID_STEP_OUTPUT":
+                details = (task.get("error") or {}).get("details") or {}
+                recoverability = str(details.get("recoverability") or "").strip()
+                parse_stage = str(details.get("parse_stage") or "").strip()
+                resume_step = str(details.get("suggested_resume_step") or step_key or "").strip()
+                resume_label = RUNTIME_PHASE_LABELS.get(resume_step, resume_step)
+                if recoverability and recoverability != "terminal":
+                    base = "系统波动导致步骤结构化输出无效，可直接重试。"
+                    if resume_label:
+                        base = f"系统波动导致步骤结构化输出无效，建议从{resume_label}重试。"
+                    if parse_stage:
+                        return f"{base} 当前解析阶段：{parse_stage}。"
+                    return base
+                if parse_stage:
+                    return f"步骤结构化输出无效，当前解析阶段：{parse_stage}。"
             return f"当前步骤执行失败{f'：{error_code}' if error_code else ''}"
         if step_state == "completed":
             if step_key and step_key in RUNTIME_PHASE_LABELS:
@@ -2639,7 +2723,9 @@ class OrchestrationService:
         if current_task is None:
             raise KeyError(task_id)
         target_step = resume_from_step or self._determine_resume_from_step(current_task)
-        preserve_approval = bool(current_task.get("approval_status") == "approved" and target_step in {"approval-gate", "data-sync"})
+        preserve_approval = bool(
+            current_task.get("approval_status") == "approved" and target_step in {"approval-gate", "data-sync", "repair-writeback"}
+        )
         self.store.reset_for_retry(task_id, preserve_approval=preserve_approval)
         self.store.append_event(
             task_id,
@@ -2751,10 +2837,17 @@ class OrchestrationService:
                     return
 
                 if not result.success:
+                    failure_error = result.error or {"code": "STEP_FAILED", "message": "步骤执行失败。"}
+                    failure_error = self._normalize_invalid_output_error(
+                        task=current_task,
+                        step=step,
+                        error_info=failure_error,
+                        result=result,
+                    )
                     self.store.mark_failed(
                         task_id,
                         current_step_name,
-                        result.error or {"code": "STEP_FAILED", "message": "步骤执行失败。"},
+                        failure_error,
                     )
                     return
 
@@ -2772,7 +2865,13 @@ class OrchestrationService:
                     retried_result = await self._maybe_retry_invalid_output_step(task_id, current_task, step, validation_error, result=result)
                     if retried_result is not None:
                         if not retried_result.success:
-                            self.store.mark_failed(task_id, current_step_name, retried_result.error or validation_error)
+                            retry_failure = self._normalize_invalid_output_error(
+                                task=current_task,
+                                step=step,
+                                error_info=retried_result.error or validation_error,
+                                result=retried_result,
+                            )
+                            self.store.mark_failed(task_id, current_step_name, retry_failure)
                             return
                         result = retried_result
                         blocked_handled = self._maybe_complete_plan_as_blocked(
@@ -2785,13 +2884,19 @@ class OrchestrationService:
                             return
                         validation_error = self._validate_output(step, result.structured_output or {})
                 if validation_error:
-                    self.store.mark_failed(task_id, current_step_name, validation_error)
+                    normalized_validation_error = self._normalize_invalid_output_error(
+                        task=current_task,
+                        step=step,
+                        error_info=validation_error,
+                        result=result,
+                    )
+                    self.store.mark_failed(task_id, current_step_name, normalized_validation_error)
                     self.store.append_event(
                         task_id,
                         "error",
                         "Schema validation failed",
                         step_name=current_step_name,
-                        payload=validation_error,
+                        payload=normalized_validation_error,
                     )
                     return
 
@@ -3000,13 +3105,36 @@ class OrchestrationService:
             self.store.append_event(task_id, "info", "Chapter director prepared", step_name=step_name, payload={"chapter": brief.get("chapter")})
             return "ok"
 
+        if step_name == "repair-plan":
+            try:
+                repair_plan = self._build_repair_plan(task)
+            except RepairTaskError as exc:
+                error_info = {"code": exc.code, "message": exc.message, "details": exc.details}
+                self.store.save_step_result(task_id, step_name, {"success": False, "structured_output": {}, "error": error_info})
+                self.store.mark_failed(task_id, step_name, error_info)
+                self.store.append_event(task_id, "error", "Repair plan blocked", step_name=step_name, payload=error_info)
+                return "failed"
+            self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": repair_plan})
+            self.store.append_event(
+                task_id,
+                "info",
+                "Repair plan prepared",
+                step_name=step_name,
+                payload={
+                    "chapter": repair_plan.get("chapter"),
+                    "issue_type": repair_plan.get("issue_type"),
+                    "source_task_id": repair_plan.get("source_task_id"),
+                },
+            )
+            return "ok"
+
         if step_name == "review-summary":
             summary = self._aggregate_review(task)
             self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": summary})
             artifacts = dict(task.get("artifacts") or {})
             artifacts["review_summary"] = summary
             self.store.update_task(task_id, artifacts=artifacts)
-            if task.get("task_type") == "write":
+            if task.get("task_type") in {"write", "repair"}:
                 self.store.append_event(task_id, "info", "Review summary prepared", step_name=step_name, payload=summary)
             else:
                 self._persist_review_summary(task, summary)
@@ -3025,7 +3153,7 @@ class OrchestrationService:
             if task.get("approval_status") == "approved":
                 self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": {"approval_required": True, "approved": True}})
                 return "ok"
-            if task["task_type"] == "write" and require_manual_approval:
+            if task["task_type"] in {"write", "repair"} and require_manual_approval:
                 approval = {
                     "status": "pending",
                     "requested_at": task.get("updated_at"),
@@ -3048,6 +3176,25 @@ class OrchestrationService:
                 self.store.append_event(task_id, "warning", "Waiting for writeback approval", step_name=step_name)
                 return "paused"
             self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": {"approval_required": False}})
+            return "ok"
+
+        if step_name == "repair-writeback":
+            try:
+                result = self._apply_repair_writeback(task_id, task)
+            except RepairTaskError as exc:
+                error_info = {"code": exc.code, "message": exc.message, "details": exc.details}
+                self.store.save_step_result(task_id, step_name, {"success": False, "structured_output": {}, "error": error_info})
+                self.store.mark_failed(task_id, step_name, error_info)
+                self.store.append_event(task_id, "error", "Repair writeback blocked", step_name=step_name, payload=error_info)
+                return "failed"
+            self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": result})
+            self.store.append_event(
+                task_id,
+                "info",
+                "Repair writeback completed",
+                step_name=step_name,
+                payload=result,
+            )
             return "ok"
 
         self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": {"skipped": True}})
@@ -3668,10 +3815,16 @@ class OrchestrationService:
                 return retried_result
             result = retried_result
 
+        failure_error = self._normalize_invalid_output_error(
+            task=task,
+            step=step,
+            error_info=result.error or {"code": "STEP_FAILED", "message": "step execution failed"},
+            result=result,
+        )
         self.store.mark_failed(
             task_id,
             step_name,
-            result.error or {"code": "STEP_FAILED", "message": "step execution failed"},
+            failure_error,
         )
         return None
 
@@ -3990,6 +4143,8 @@ class OrchestrationService:
                     "attempt": result.error.get("attempt", metadata.get("attempt", 1)),
                     "parse_stage": result.error.get("parse_stage", metadata.get("parse_stage")),
                     "error_code": result.error.get("code"),
+                    "recoverability": ((result.error.get("details") or {}).get("recoverability")),
+                    "suggested_resume_step": ((result.error.get("details") or {}).get("suggested_resume_step")),
                 },
             )
 
@@ -4036,11 +4191,26 @@ class OrchestrationService:
             "timeout_seconds": metadata.get("timeout_seconds", error.get("timeout_seconds")),
             "error": result.error,
         }
-        for key in ("error_code", "retryable", "http_status", "retry_count", "parse_stage", "watchdog_timeout_seconds", "llm_config_signature"):
+        for key in (
+            "error_code",
+            "retryable",
+            "http_status",
+            "retry_count",
+            "parse_stage",
+            "raw_output_present",
+            "missing_required_keys",
+            "watchdog_timeout_seconds",
+            "llm_config_signature",
+        ):
             if key == "error_code":
                 value = error.get("code")
             else:
                 value = error.get(key, metadata.get(key))
+            if value is not None:
+                payload[key] = value
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        for key in ("recoverability", "suggested_resume_step"):
+            value = details.get(key)
             if value is not None:
                 payload[key] = value
         return payload
@@ -4118,6 +4288,13 @@ class OrchestrationService:
             return None
 
         attempt = int(((result.metadata or {}) if result else {}).get("attempt", 1))
+        normalized_error = self._normalize_invalid_output_error(
+            task=task,
+            step=step,
+            error_info=error_info,
+            result=result,
+            recoverability="auto_retried",
+        )
         self.store.append_event(
             task_id,
             "warning",
@@ -4127,9 +4304,12 @@ class OrchestrationService:
                 "attempt": attempt + 1,
                 "previous_attempt": attempt,
                 "retry_count": attempt,
-                "retryable": True,
-                "reason": error_info.get("message"),
-                "error_code": error_info.get("code"),
+                "retryable": normalized_error.get("retryable"),
+                "reason": normalized_error.get("message"),
+                "error_code": normalized_error.get("code"),
+                "parse_stage": normalized_error.get("parse_stage"),
+                "recoverability": (normalized_error.get("details") or {}).get("recoverability"),
+                "suggested_resume_step": (normalized_error.get("details") or {}).get("suggested_resume_step"),
             },
         )
         self.store.append_event(
@@ -4141,13 +4321,16 @@ class OrchestrationService:
                 "attempt": attempt + 1,
                 "previous_attempt": attempt,
                 "retry_count": attempt,
-                "retryable": True,
-                "reason": error_info.get("message"),
-                "error_code": error_info.get("code"),
+                "retryable": normalized_error.get("retryable"),
+                "reason": normalized_error.get("message"),
+                "error_code": normalized_error.get("code"),
+                "parse_stage": normalized_error.get("parse_stage"),
+                "recoverability": (normalized_error.get("details") or {}).get("recoverability"),
+                "suggested_resume_step": (normalized_error.get("details") or {}).get("suggested_resume_step"),
             },
         )
         refreshed_task = self.store.get_task(task_id) or task
-        retry_note = self._build_invalid_output_retry_note(task=refreshed_task, step=step, error_info=error_info, result=result)
+        retry_note = self._build_invalid_output_retry_note(task=refreshed_task, step=step, error_info=normalized_error, result=result)
         prompt_bundle = self._build_prompt_bundle(refreshed_task, step, retry_note=retry_note)
         self.store.append_event(
             task_id,
@@ -4157,7 +4340,7 @@ class OrchestrationService:
             payload={
                 "attempt": attempt + 1,
                 "retry_count": attempt,
-                "retryable": True,
+                "retryable": normalized_error.get("retryable"),
             },
         )
         retried_result = await self._execute_runner_step(task_id, step["name"], prompt_bundle, attempt=attempt + 1)
@@ -4173,21 +4356,14 @@ class OrchestrationService:
     ) -> bool:
         task_type = str(task.get("task_type") or "").strip().lower()
         step_name = str(step.get("name") or "").strip().lower()
-        if (task_type, step_name) not in {
-            ("plan", "plan"),
-            ("write", "context"),
-            ("write", "draft"),
-            ("write", "polish"),
-        }:
+        if (task_type, step_name) not in INVALID_OUTPUT_AUTO_RETRY_STEPS:
             return False
         if str(error_info.get("code") or "") != "INVALID_STEP_OUTPUT":
             return False
         attempt = int(((result.metadata or {}) if result else {}).get("attempt", error_info.get("attempt", 1)) or 1)
         if attempt >= 2:
             return False
-        if result is not None and result.stdout and str(result.stdout).strip():
-            return True
-        return bool(error_info.get("raw_output_present") or error_info.get("message"))
+        return self._supports_invalid_output_recovery(error_info, result=result)
 
     def _build_invalid_output_retry_note(
         self,
@@ -4213,6 +4389,109 @@ class OrchestrationService:
                 "Use escaped \\n inside the JSON string if line breaks are needed, and keep `draft_prompt` under 2400 characters."
             )
         return f"{common}\nFailure stage: {parse_stage or 'invalid_json'}."
+
+    def _supports_invalid_output_recovery(
+        self,
+        error_info: Dict[str, Any],
+        *,
+        result: Optional[StepResult] = None,
+    ) -> bool:
+        details = error_info.get("details") if isinstance(error_info.get("details"), dict) else {}
+        parse_stage = str(
+            error_info.get("parse_stage")
+            or details.get("parse_stage")
+            or ((result.metadata or {}) if result else {}).get("parse_stage")
+            or ""
+        ).strip()
+        missing_required_keys = list(
+            error_info.get("missing_required_keys")
+            or details.get("missing_required_keys")
+            or ((result.metadata or {}) if result else {}).get("missing_required_keys")
+            or []
+        )
+        if missing_required_keys:
+            return True
+        if parse_stage in INVALID_OUTPUT_RECOVERABLE_PARSE_STAGES:
+            return True
+        if result is not None and str(result.stdout or "").strip():
+            return True
+        return bool(error_info.get("raw_output_present") or details.get("raw_output_present"))
+
+    def _normalize_invalid_output_error(
+        self,
+        *,
+        task: Dict[str, Any],
+        step: Dict[str, Any],
+        error_info: Dict[str, Any],
+        result: Optional[StepResult] = None,
+        recoverability: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if str(error_info.get("code") or "") != "INVALID_STEP_OUTPUT":
+            return error_info
+        metadata = (result.metadata or {}) if result else {}
+        existing_details = error_info.get("details") if isinstance(error_info.get("details"), dict) else {}
+        parse_stage = str(
+            error_info.get("parse_stage")
+            or existing_details.get("parse_stage")
+            or metadata.get("parse_stage")
+            or ("missing_required_keys" if error_info.get("missing_required_keys") else "")
+        ).strip()
+        missing_required_keys = list(
+            error_info.get("missing_required_keys")
+            or existing_details.get("missing_required_keys")
+            or metadata.get("missing_required_keys")
+            or []
+        )
+        raw_output_present = bool(
+            error_info.get("raw_output_present")
+            if error_info.get("raw_output_present") is not None
+            else existing_details.get("raw_output_present")
+        )
+        if result is not None and not raw_output_present:
+            raw_output_present = bool(str(result.stdout or "").strip())
+        attempt = int(metadata.get("attempt", error_info.get("attempt", 1)) or 1)
+        retry_count = int(metadata.get("retry_count", max(0, attempt - 1)) or 0)
+        recoverable = self._supports_invalid_output_recovery(
+            {
+                **error_info,
+                "parse_stage": parse_stage,
+                "missing_required_keys": missing_required_keys,
+                "raw_output_present": raw_output_present,
+                "details": existing_details,
+            },
+            result=result,
+        )
+        if not recoverability:
+            if attempt >= 2:
+                recoverability = "terminal"
+            elif recoverable:
+                recoverability = "retriable"
+            else:
+                recoverability = "terminal"
+        suggested_resume_step = str(
+            existing_details.get("suggested_resume_step")
+            or error_info.get("suggested_resume_step")
+            or step.get("name")
+            or task.get("current_step")
+            or ""
+        ).strip()
+        normalized = dict(error_info)
+        normalized["attempt"] = attempt
+        normalized["retry_count"] = retry_count
+        normalized["parse_stage"] = parse_stage or None
+        normalized["raw_output_present"] = raw_output_present
+        normalized["missing_required_keys"] = missing_required_keys
+        normalized["retryable"] = recoverability != "terminal"
+        normalized["suggested_resume_step"] = suggested_resume_step or None
+        normalized["details"] = {
+            **existing_details,
+            "parse_stage": parse_stage or None,
+            "raw_output_present": raw_output_present,
+            "missing_required_keys": missing_required_keys,
+            "recoverability": recoverability,
+            "suggested_resume_step": suggested_resume_step or None,
+        }
+        return normalized
 
     def _build_prompt_bundle(self, task: Dict[str, Any], step: Dict[str, Any], *, retry_note: Optional[str] = None) -> Dict[str, Any]:
         reference_paths: List[Path] = []
@@ -4335,7 +4614,7 @@ class OrchestrationService:
             for current in range(start_chapter, end_chapter + 1):
                 self._append_chapter_context(project_docs, current, body_max_chars=None, summary_max_chars=4000)
         elif chapter > 0:
-            body_max_chars = None if task.get("task_type") == "review" else 8000
+            body_max_chars = None if task.get("task_type") in {"review", "repair"} else 8000
             self._append_chapter_context(project_docs, chapter, body_max_chars=body_max_chars, summary_max_chars=4000)
             if chapter > 1:
                 prev = f"{chapter - 1:04d}"
@@ -6216,6 +6495,9 @@ class OrchestrationService:
             return {
                 "code": "INVALID_STEP_OUTPUT",
                 "message": f"缺少必要字段：{', '.join(missing)}",
+                "parse_stage": "missing_required_keys",
+                "missing_required_keys": missing,
+                "raw_output_present": True,
             }
         if step["name"] == "polish" and payload.get("anti_ai_force_check") != "pass":
             return {"code": "ANTI_AI_GATE_FAILED", "message": "anti_ai_force_check 必须为 pass 才能执行回写。"}
@@ -6256,6 +6538,356 @@ class OrchestrationService:
             "code": "REVIEW_GATE_BLOCKED",
             "message": f"审查关卡阻止继续执行：[{severity}] {title}",
         }
+
+    def _resolve_issue_chapter(
+        self,
+        issue: Dict[str, Any],
+        *,
+        request: Dict[str, Any],
+    ) -> int:
+        for key in ("chapter", "chapter_number", "target_chapter"):
+            try:
+                chapter = int(issue.get(key) or 0)
+            except (TypeError, ValueError):
+                chapter = 0
+            if chapter > 0:
+                return chapter
+        try:
+            request_chapter = int(request.get("chapter") or 0)
+        except (TypeError, ValueError):
+            request_chapter = 0
+        if request_chapter > 0:
+            return request_chapter
+        chapter_range = self._parse_chapter_range(request.get("chapter_range"))
+        if chapter_range is not None and chapter_range[0] == chapter_range[1]:
+            return chapter_range[0]
+        return 0
+
+    def _default_repair_guardrails(self, issue_type: str) -> List[str]:
+        return [
+            "仅修复当前章节局部连续性问题",
+            "不要改写卷纲或跨章主线",
+            "不要重塑角色声音",
+            "不要引入与现有设定冲突的新规则",
+            f"优先解决 {issue_type or '当前问题'}，避免顺手重写无关段落",
+        ]
+
+    def _normalize_repair_guardrails(self, raw_value: Any, issue_type: str) -> List[str]:
+        items: List[str] = []
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                text = str(item or "").strip()
+                if text:
+                    items.append(text)
+        elif isinstance(raw_value, str):
+            text = raw_value.strip()
+            if text:
+                items.append(text)
+        if not items:
+            items = self._default_repair_guardrails(issue_type)
+        deduped: List[str] = []
+        seen = set()
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        return deduped
+
+    def _build_repair_candidates(self, task: Dict[str, Any], issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        request = task.get("request") or {}
+        project_root = str(request.get("project_root") or self.project_root)
+        mode = str(request.get("mode") or "standard")
+        candidates: List[Dict[str, Any]] = []
+        seen: set[tuple[int, str, str]] = set()
+
+        for index, issue in enumerate(issues):
+            issue_type = str(issue.get("type") or issue.get("issue_type") or "").strip().upper()
+            title = str(issue.get("title") or issue.get("summary") or issue.get("message") or issue_type or "未命名问题").strip()
+            chapter = self._resolve_issue_chapter(issue, request=request)
+            dedupe_key = (chapter, issue_type, title)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            rewrite_goal = str(issue.get("rewrite_goal") or issue.get("repair_goal") or issue.get("description") or issue.get("detail") or title).strip()
+            guardrails = self._normalize_repair_guardrails(issue.get("guardrails"), issue_type)
+            eligible = bool(issue_type in AUTO_REPAIR_ISSUE_TYPES and chapter > 0 and rewrite_goal)
+            reason = ""
+            if not eligible:
+                if issue_type not in AUTO_REPAIR_ISSUE_TYPES:
+                    reason = "当前问题类型不在自动修稿白名单内。"
+                elif chapter <= 0:
+                    reason = "当前问题缺少明确章节定位，无法直接发起自动修稿。"
+                else:
+                    reason = "当前问题缺少明确修稿目标，无法直接发起自动修稿。"
+
+            candidate = {
+                "chapter": chapter or None,
+                "issue_type": issue_type or "UNKNOWN",
+                "issue_title": title,
+                "source": str(issue.get("source") or ""),
+                "auto_rewrite_eligible": eligible,
+                "rewrite_goal": rewrite_goal,
+                "guardrails": guardrails,
+            }
+            if reason:
+                candidate["reason"] = reason
+            if eligible:
+                candidate["operator_action"] = self._build_operator_action(
+                    f"repair:{task.get('id')}:{chapter}:{issue_type}:{index}",
+                    "launch-task",
+                    "启动自动修稿",
+                    variant="primary",
+                    task_type="repair",
+                    payload={
+                        "project_root": project_root,
+                        "chapter": chapter,
+                        "mode": mode,
+                        "require_manual_approval": False,
+                        "options": {
+                            "source_task_id": str(task.get("id") or ""),
+                            "issue_type": issue_type,
+                            "issue_title": title,
+                            "rewrite_goal": rewrite_goal,
+                            "guardrails": guardrails,
+                        },
+                    },
+                )
+            candidates.append(candidate)
+
+        return candidates
+
+    def _resolve_repair_chapter_meta_key(self, state_data: Dict[str, Any], chapter: int) -> str:
+        chapter_meta = state_data.get("chapter_meta", {})
+        if isinstance(chapter_meta, dict):
+            for lookup_key in (f"{chapter:04d}", str(chapter)):
+                if lookup_key in chapter_meta:
+                    return lookup_key
+            for raw_key in chapter_meta:
+                try:
+                    if int(str(raw_key).strip()) == chapter:
+                        return str(raw_key)
+                except ValueError:
+                    continue
+        return str(chapter)
+
+    def _build_repair_plan(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        request = task.get("request") or {}
+        options = request.get("options") if isinstance(request.get("options"), dict) else {}
+        chapter = int(request.get("chapter") or 0)
+        if chapter <= 0:
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, "repair 缺少有效的 chapter。")
+        issue_type = str(options.get("issue_type") or "").strip().upper()
+        if not issue_type:
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, "repair 缺少 issue_type。")
+        if issue_type not in AUTO_REPAIR_ISSUE_TYPES:
+            raise RepairTaskError(REPAIR_NOT_ELIGIBLE_CODE, "当前问题类型不在自动修稿白名单内。", {"issue_type": issue_type})
+        issue_title = str(options.get("issue_title") or issue_type).strip()
+        rewrite_goal = str(options.get("rewrite_goal") or "").strip()
+        if not rewrite_goal:
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, "repair 缺少 rewrite_goal。")
+        chapter_file = self._default_chapter_file(chapter)
+        chapter_path = self._resolve_project_path(chapter_file)
+        if not chapter_path.is_file():
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, f"repair 目标章节不存在：{chapter_file}")
+        original_content = chapter_path.read_text(encoding="utf-8")
+        if not original_content.strip():
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, "repair 目标章节正文为空。")
+        summary_file = self._default_summary_file(chapter)
+        summary_path = self._resolve_project_path(summary_file)
+        summary_content = summary_path.read_text(encoding="utf-8") if summary_path.is_file() else ""
+        guardrails = self._normalize_repair_guardrails(options.get("guardrails"), issue_type)
+        return {
+            "chapter": chapter,
+            "chapter_file": chapter_file,
+            "summary_file": summary_file,
+            "source_task_id": str(options.get("source_task_id") or ""),
+            "issue_type": issue_type,
+            "issue_title": issue_title,
+            "rewrite_goal": rewrite_goal,
+            "guardrails": guardrails,
+            "original_word_count": self._canonical_word_count(original_content),
+            "existing_summary_excerpt": self._extract_summary_excerpt(summary_content) if summary_content else "",
+        }
+
+    def _repair_backups_dir(self) -> Path:
+        return self.project_root / REPAIR_BACKUPS_DIR_NAME
+
+    def _repair_reports_dir(self) -> Path:
+        return self.project_root / REPAIR_REPORTS_DIR_NAME
+
+    def _repair_backup_path(self, chapter: int, *, kind: str, suffix: str) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        filename = f"ch{chapter:04d}-{timestamp}-{kind}.{suffix}"
+        return self._repair_backups_dir() / filename
+
+    def _repair_report_path(self, chapter: int) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return self._repair_reports_dir() / f"repair-report-ch{chapter:04d}-{timestamp}.json"
+
+    def _save_review_metrics_record(
+        self,
+        *,
+        chapter: int,
+        summary: Dict[str, Any],
+        report_file: str,
+    ) -> None:
+        metrics = ReviewMetrics(
+            start_chapter=chapter,
+            end_chapter=chapter,
+            overall_score=float(summary.get("overall_score") or 0.0),
+            dimension_scores={
+                reviewer.get("step_name", ""): float(reviewer.get("score") or 0.0)
+                for reviewer in summary.get("reviewers", [])
+                if reviewer.get("step_name")
+            },
+            severity_counts=summary.get("severity_counts") or {},
+            critical_issues=[issue.get("title", issue.get("message", "")) for issue in summary.get("issues", []) if str(issue.get("severity", "")).lower() == "critical"],
+            report_file=report_file,
+            notes=json.dumps({**summary, "report_file": report_file}, ensure_ascii=False),
+        )
+        self.index_manager.save_review_metrics(metrics)
+
+    def _apply_repair_writeback(self, task_id: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        request = task.get("request") or {}
+        chapter = int(request.get("chapter") or 0)
+        if chapter <= 0:
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, "repair-writeback 缺少有效的 chapter")
+
+        artifacts = task.get("artifacts") or {}
+        step_results = artifacts.get("step_results") or {}
+        repair_plan = (step_results.get("repair-plan") or {}).get("structured_output") or {}
+        repair_output = (step_results.get("repair-draft") or {}).get("structured_output") or {}
+        review_summary = artifacts.get("review_summary") or {}
+        if bool(review_summary.get("blocking")):
+            raise RepairTaskError(
+                REPAIR_REVIEW_BLOCKED_CODE,
+                "修稿复审未通过，禁止写回正文。",
+                {
+                    "blocking_issues": review_summary.get("hard_blocking_issues") or review_summary.get("issues") or [],
+                    "review_summary": review_summary,
+                },
+            )
+
+        chapter_file = self._default_chapter_file(chapter)
+        summary_file = self._default_summary_file(chapter)
+        chapter_path = self._resolve_project_path(chapter_file)
+        summary_path = self._resolve_project_path(summary_file)
+        if not chapter_path.is_file():
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, f"repair 目标章节不存在：{chapter_file}")
+
+        original_content = chapter_path.read_text(encoding="utf-8")
+        original_summary = summary_path.read_text(encoding="utf-8") if summary_path.is_file() else ""
+        content = str(repair_output.get("content") or "").strip()
+        if not content:
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, "repair-draft 未生成可写回的正文内容。")
+        word_count = self._canonical_word_count(content)
+        reported_word_count = self._parse_reported_word_count(repair_output)
+        try:
+            self._validate_writeback_content(content, word_count, reported_word_count)
+        except ValueError as exc:
+            raise RepairTaskError(REPAIR_INPUT_INVALID_CODE, str(exc)) from exc
+        summary_content = self._build_summary_markdown(chapter, content, review_summary)
+
+        backup_body_path = self._repair_backup_path(chapter, kind="body", suffix="md.bak")
+        self._write_text_atomically(backup_body_path, original_content)
+        backup_summary_rel: Optional[str] = None
+        if original_summary:
+            backup_summary_path = self._repair_backup_path(chapter, kind="summary", suffix="md.bak")
+            self._write_text_atomically(backup_summary_path, original_summary)
+            backup_summary_rel = self._relative_project_path(backup_summary_path)
+
+        written_chapter_path = self._write_project_text(chapter_file, content)
+        written_summary_path = self._write_project_text(summary_file, summary_content)
+
+        state_data = self._read_state_data()
+        chapter_meta = self._get_state_chapter_meta(state_data, chapter)
+        chapter_meta_key = self._resolve_repair_chapter_meta_key(state_data, chapter)
+        repaired_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        issue_types = [str(issue_type).strip() for issue_type in chapter_meta.get("last_repair_issue_types", []) if str(issue_type).strip()]
+        current_issue_type = str(repair_plan.get("issue_type") or "").strip()
+        if current_issue_type and current_issue_type not in issue_types:
+            issue_types.append(current_issue_type)
+
+        def _mutate(state_payload: Dict[str, Any]) -> None:
+            chapter_meta_map = state_payload.setdefault("chapter_meta", {})
+            if not isinstance(chapter_meta_map, dict):
+                chapter_meta_map = {}
+                state_payload["chapter_meta"] = chapter_meta_map
+            merged_meta = dict(get_chapter_meta_entry(state_payload, chapter) or {})
+            merged_meta.update(chapter_meta)
+            merged_meta["last_repaired_at"] = repaired_at
+            merged_meta["last_repair_task_id"] = task_id
+            merged_meta["last_repair_issue_types"] = issue_types
+            chapter_meta_map[chapter_meta_key] = merged_meta
+
+        self._update_state_data(_mutate)
+
+        self.index_manager.add_chapter(
+            ChapterMeta(
+                chapter=chapter,
+                title=self._resolve_chapter_title(chapter, content, chapter_meta),
+                location=str(chapter_meta.get("location") or ""),
+                word_count=word_count,
+                characters=self._normalize_characters(chapter_meta.get("characters")),
+                summary=self._extract_summary_excerpt(summary_content),
+                file_path=self._relative_project_path(written_chapter_path),
+            )
+        )
+
+        report_path = self._repair_report_path(chapter)
+        report_payload = {
+            "chapter": chapter,
+            "generated_at": repaired_at,
+            "task_id": task_id,
+            "source_task_id": repair_plan.get("source_task_id"),
+            "issue_type": repair_plan.get("issue_type"),
+            "issue_title": repair_plan.get("issue_title"),
+            "rewrite_goal": repair_plan.get("rewrite_goal"),
+            "guardrails": repair_plan.get("guardrails") or [],
+            "chapter_file": self._relative_project_path(written_chapter_path),
+            "summary_file": self._relative_project_path(written_summary_path),
+            "backup_paths": {
+                "chapter": self._relative_project_path(backup_body_path),
+                "summary": backup_summary_rel,
+            },
+            "before_summary": self._extract_summary_excerpt(original_summary or original_content),
+            "after_summary": self._extract_summary_excerpt(summary_content),
+            "review_summary": review_summary,
+            "issue_mapping": [
+                {
+                    "issue_type": repair_plan.get("issue_type"),
+                    "issue_title": repair_plan.get("issue_title"),
+                    "rewrite_goal": repair_plan.get("rewrite_goal"),
+                }
+            ],
+        }
+        self._write_json_atomically(report_path, report_payload)
+        self._save_review_metrics_record(
+            chapter=chapter,
+            summary=review_summary,
+            report_file=self._relative_project_path(report_path),
+        )
+
+        latest_task = self.store.get_task(task_id) or task
+        latest_artifacts = dict(latest_task.get("artifacts") or {})
+        latest_artifacts["repair"] = {
+            "chapter": chapter,
+            "chapter_file": self._relative_project_path(written_chapter_path),
+            "summary_file": self._relative_project_path(written_summary_path),
+            "backup_paths": {
+                "chapter": self._relative_project_path(backup_body_path),
+                "summary": backup_summary_rel,
+            },
+            "report_file": self._relative_project_path(report_path),
+            "issue_type": repair_plan.get("issue_type"),
+            "issue_title": repair_plan.get("issue_title"),
+            "rewrite_goal": repair_plan.get("rewrite_goal"),
+            "word_count": word_count,
+            "review_summary": review_summary,
+        }
+        self.store.update_task(task_id, artifacts=latest_artifacts)
+        return latest_artifacts["repair"]
+
     def _aggregate_review(self, task: Dict[str, Any]) -> Dict[str, Any]:
         step_results = ((task.get("artifacts") or {}).get("step_results") or {})
         reviewers = []
@@ -6289,6 +6921,7 @@ class OrchestrationService:
         hard_blocking_issues = self._collect_hard_blocking_issues(issues)
         blocking = bool(hard_blocking_issues or severity_counts["critical"] > 0)
         overall_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+        repair_candidates = self._build_repair_candidates(task, issues)
         return {
             "overall_score": overall_score,
             "reviewers": reviewers,
@@ -6297,6 +6930,8 @@ class OrchestrationService:
             "hard_blocking_issues": hard_blocking_issues,
             "blocking": blocking,
             "can_proceed": not blocking,
+            "repair_candidates": repair_candidates,
+            "repairable_issue_count": sum(1 for item in repair_candidates if item.get("auto_rewrite_eligible")),
         }
 
     def _persist_review_summary(self, task: Dict[str, Any], summary: Dict[str, Any]) -> None:
@@ -6555,13 +7190,18 @@ class OrchestrationService:
         steps = [step["name"] for step in workflow.get("steps", [])]
         step_results = ((task.get("artifacts") or {}).get("step_results") or {})
         current_step = task.get("current_step")
-        if current_step in {"polish", "data-sync"}:
+        if current_step in {"polish", "data-sync", "repair-writeback"}:
             return current_step
         if task.get("task_type") == "write" and task.get("approval_status") == "approved":
             if current_step in {"approval-gate", "data-sync"}:
                 return current_step
             if "polish" in step_results and "data-sync" not in step_results:
                 return "data-sync"
+        if task.get("task_type") == "repair" and task.get("approval_status") == "approved":
+            if current_step in {"approval-gate", "repair-writeback"}:
+                return current_step
+            if "review-summary" in step_results and "repair-writeback" not in step_results:
+                return "repair-writeback"
         if current_step and current_step in steps:
             return current_step
         for step_name in steps:

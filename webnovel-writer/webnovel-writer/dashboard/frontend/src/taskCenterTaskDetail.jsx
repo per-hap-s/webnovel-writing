@@ -11,6 +11,7 @@ import {
 import { buildTaskContinuationSummary } from './writingContinuation.js'
 import { formatTimestampShort } from './dashboardPageCommon.jsx'
 import { renderOperatorActionButtons } from './operatorActionButtons.jsx'
+import { normalizeOperatorAction } from './operatorAction.js'
 import {
     buildEventPayloadTags,
     formatCountValue,
@@ -93,6 +94,8 @@ export function TaskCenterTaskDetail({
                     storyRefresh?.should_refresh
                     && !['queued', 'running', 'awaiting_writeback_approval'].includes(liveSelectedTask.status)
                 )
+                const reviewSummary = guardedRun?.review_summary || guardedBatchRun?.review_summary || liveSelectedTask.artifacts?.review_summary || null
+                const repairCandidates = Array.isArray(reviewSummary?.repair_candidates) ? reviewSummary.repair_candidates : []
 
                 return (
                     <>
@@ -175,9 +178,40 @@ export function TaskCenterTaskDetail({
                             MetricCard={MetricCard}
                         />
                         <ReviewSummarySection
-                            summary={guardedRun?.review_summary || guardedBatchRun?.review_summary}
+                            summary={reviewSummary}
                             MetricCard={MetricCard}
                         />
+                        {repairCandidates.length ? (
+                            <div className="subsection">
+                                <div className="subsection-title">自动修稿候选</div>
+                                <div className="summary-grid">
+                                    {repairCandidates.slice(0, 6).map((candidate, index) => {
+                                        const action = normalizeOperatorAction(candidate.operator_action || candidate.operatorAction || null)
+                                        return (
+                                            <div key={`${candidate.issue_type || 'repair'}-${candidate.issue_title || index}-${index}`} className="summary-card">
+                                                <div className="summary-card-title">{candidate.issue_title || candidate.issue_type || '修稿候选'}</div>
+                                                <div className="summary-card-meta">{`章节：${candidate.chapter || '-'} / 类型：${candidate.issue_type || '-'}`}</div>
+                                                <div className="tiny">{candidate.rewrite_goal || '未提供修稿目标。'}</div>
+                                                {Array.isArray(candidate.guardrails) && candidate.guardrails.length ? (
+                                                    <div className="planning-tags">
+                                                        {candidate.guardrails.slice(0, 3).map((item) => (
+                                                            <span key={`${candidate.issue_type || 'repair'}-${item}`} className="planning-tag">{item}</span>
+                                                        ))}
+                                                    </div>
+                                                ) : null}
+                                                {candidate.auto_rewrite_eligible && action ? (
+                                                    <div className="button-row">
+                                                        {renderOperatorActionButtons([action], onExecuteOperatorAction, followupSubmitting, '', '创建中...')}
+                                                    </div>
+                                                ) : (
+                                                    <div className="tiny">{candidate.reason || '当前问题需人工处理。'}</div>
+                                                )}
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            </div>
+                        ) : null}
                         <GuardedRunSection
                             guardedRun={guardedRun}
                             MetricCard={MetricCard}

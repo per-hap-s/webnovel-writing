@@ -1,0 +1,110 @@
+{
+  "name": "repair",
+  "version": 1,
+  "steps": [
+    {
+      "name": "repair-plan",
+      "type": "internal",
+      "required_output_keys": [
+        "chapter",
+        "chapter_file",
+        "summary_file",
+        "issue_type",
+        "issue_title",
+        "rewrite_goal",
+        "guardrails"
+      ],
+      "output_schema": {
+        "chapter": 1,
+        "chapter_file": "正文/第1卷/第0001章.md",
+        "summary_file": ".webnovel/summaries/ch0001.md",
+        "source_task_id": "string",
+        "issue_type": "TRANSITION_CLARITY",
+        "issue_title": "string",
+        "rewrite_goal": "string",
+        "guardrails": []
+      }
+    },
+    {
+      "name": "repair-draft",
+      "type": "codex",
+      "template": "repair-draft.md",
+      "references": [
+        "skills/webnovel-write/SKILL.md",
+        "references/shared/core-constraints.md"
+      ],
+      "required_output_keys": [
+        "chapter_file",
+        "content",
+        "word_count",
+        "change_summary"
+      ],
+      "output_schema": {
+        "chapter_file": "正文/第1卷/第0001章.md",
+        "content": "string",
+        "word_count": 0,
+        "change_summary": []
+      }
+    },
+    {
+      "name": "consistency-review",
+      "type": "codex",
+      "template": "review-consistency.md",
+      "references": [
+        "agents/consistency-checker.md"
+      ],
+      "required_output_keys": [
+        "overall_score",
+        "pass",
+        "issues",
+        "metrics",
+        "summary"
+      ],
+      "output_schema": {
+        "agent": "consistency-review",
+        "chapter": 1,
+        "overall_score": 0,
+        "pass": true,
+        "issues": [],
+        "metrics": {},
+        "summary": "string"
+      }
+    },
+    {
+      "name": "continuity-review",
+      "type": "codex",
+      "template": "review-continuity.md",
+      "references": [
+        "agents/continuity-checker.md"
+      ],
+      "required_output_keys": [
+        "overall_score",
+        "pass",
+        "issues",
+        "metrics",
+        "summary"
+      ],
+      "output_schema": {
+        "agent": "continuity-review",
+        "chapter": 1,
+        "overall_score": 0,
+        "pass": true,
+        "issues": [],
+        "metrics": {},
+        "summary": "string"
+      }
+    },
+    {
+      "name": "review-summary",
+      "type": "internal"
+    },
+    {
+      "name": "approval-gate",
+      "type": "internal"
+    },
+    {
+      "name": "repair-writeback",
+      "type": "internal"
+    }
+  ]
+}

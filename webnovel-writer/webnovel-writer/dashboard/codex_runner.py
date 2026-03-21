@@ -2,13 +2,13 @@
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from .llm_runner import StepResult, extract_json_payload_details
 
 STEP_ERROR_MESSAGES = {
     "CODEX_CLI_NOT_FOUND": "未找到 Codex CLI 可执行文件。",
@@ -18,64 +18,6 @@ STEP_ERROR_MESSAGES = {
     "CODEX_AUTH_REQUIRED": "Codex CLI 尚未登录。",
     "CODEX_STEP_FAILED": "Codex 步骤执行失败。",
 }
-
-
-def _extract_json_payload(raw: str) -> Optional[Dict[str, Any]]:
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    fence = re.search(r"```json\s*(\{.*?\})\s*```", raw, flags=re.DOTALL)
-    if fence:
-        try:
-            parsed = json.loads(fence.group(1))
-            return parsed if isinstance(parsed, dict) else None
-        except json.JSONDecodeError:
-            pass
-
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            parsed = json.loads(raw[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-@dataclass
-class StepResult:
-    step_name: str
-    success: bool
-    return_code: int
-    timing_ms: int
-    stdout: str
-    stderr: str
-    structured_output: Optional[Dict[str, Any]]
-    prompt_file: str
-    output_file: str
-    error: Optional[Dict[str, str]] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "step_name": self.step_name,
-            "success": self.success,
-            "return_code": self.return_code,
-            "timing_ms": self.timing_ms,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
-            "structured_output": self.structured_output,
-            "prompt_file": self.prompt_file,
-            "output_file": self.output_file,
-            "error": self.error,
-        }
 
 
 class CodexRunner:
@@ -175,7 +117,15 @@ class CodexRunner:
         stderr = completed.stderr or ""
         output_file.write_text(stdout + ("\n" if stdout and stderr else "") + stderr, encoding="utf-8")
 
-        structured_output = _extract_json_payload(stdout)
+        extraction = extract_json_payload_details(stdout, required_keys=step_spec.get("required_output_keys"))
+        metadata = {
+            "attempt": 1,
+            "retry_count": 0,
+            "parse_stage": extraction.stage,
+            "json_extraction_recovered": extraction.recovered,
+            "missing_required_keys": list(extraction.missing_required_keys),
+        }
+        structured_output = extraction.payload
         error = None
         success = completed.returncode == 0
         if not success:
@@ -184,7 +134,17 @@ class CodexRunner:
             success = False
             error = {
                 "code": "INVALID_STEP_OUTPUT",
-                "message": "Codex 输出中不包含有效 JSON 对象",
+                "message": STEP_ERROR_MESSAGES["INVALID_STEP_OUTPUT"],
+                "attempt": 1,
+                "retryable": False,
+                "parse_stage": extraction.stage,
+                "raw_output_present": bool(stdout.strip()),
+                "missing_required_keys": list(extraction.missing_required_keys),
+                "details": {
+                    "parse_stage": extraction.stage,
+                    "raw_output_present": bool(stdout.strip()),
+                    "missing_required_keys": list(extraction.missing_required_keys),
+                },
             }
 
         return StepResult(
@@ -198,6 +158,7 @@ class CodexRunner:
             prompt_file=str(prompt_file),
             output_file=str(output_file),
             error=self._normalize_error(error),
+            metadata=metadata,
         )
 
     def _build_prompt(self, step_spec: Dict[str, Any], prompt_bundle: Dict[str, Any]) -> str:
