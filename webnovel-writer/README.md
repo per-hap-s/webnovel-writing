@@ -77,6 +77,7 @@ python -m pip install -e ".[dev,dashboard]"
 有两种方式：
 
 1. 在 Dashboard 工作台首页点击“新建项目”，先选目录，再填写标题和题材。
+   新建完成后，Planning Profile 默认保持空白待填，不会再自动灌入整套示例人物与卷设定。
 2. 或先在命令行运行：
 
 ```powershell

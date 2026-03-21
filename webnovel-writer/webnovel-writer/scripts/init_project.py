@@ -438,6 +438,10 @@ def build_initial_planning_profile(
     return normalize_planning_profile(initial, title=title, genre=genre)
 
 
+def build_bootstrap_planning_profile(*, title: str, genre: str) -> Dict[str, str]:
+    return normalize_planning_profile({}, title=title, genre=genre)
+
+
 def build_planning_fill_template() -> Dict[str, Any]:
     template = {spec["name"]: "" for spec in PLANNING_PROFILE_FIELD_SPECS}
     template["major_characters_text"] = "姓名 | 定位 | 与主角关系 | 卷1作用"
@@ -864,20 +868,7 @@ def init_project(
     if not state["protagonist_state"]["golden_finger"].get("name"):
         state["protagonist_state"]["golden_finger"]["name"] = "未命名金手指"
 
-    planning_profile = build_initial_planning_profile(
-        title=title,
-        genre=genre,
-        protagonist_name=protagonist_name,
-        golden_finger_name=golden_finger_name,
-        core_selling_points=core_selling_points,
-        protagonist_desire=protagonist_desire,
-        protagonist_flaw=protagonist_flaw,
-        protagonist_archetype=protagonist_archetype,
-        protagonist_structure=protagonist_structure,
-        factions=factions,
-        power_system_type=power_system_type,
-        gf_irreversible_cost=gf_irreversible_cost,
-    )
+    planning_profile = build_bootstrap_planning_profile(title=title, genre=genre)
     state["planning"]["profile"] = planning_profile
     state["planning"]["project_info"] = {
         "title": title,

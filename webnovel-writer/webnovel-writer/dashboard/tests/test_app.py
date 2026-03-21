@@ -507,36 +507,14 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
         webnovel_dir.mkdir(parents=True, exist_ok=True)
         (target_root / "大纲").mkdir(parents=True, exist_ok=True)
         (target_root / "大纲" / "总纲.md").write_text("# 总纲\n\n## 故事前提\n- 书名：Test Book\n", encoding="utf-8")
-        (webnovel_dir / "planning-profile.json").write_text(
-            json.dumps(
-                {
-                    "story_logline": "Bootstrap seed",
-                    "protagonist_name": "Ari",
-                    "protagonist_identity": "Courier",
-                    "protagonist_initial_state": "Alone in the rain",
-                    "protagonist_desire": "Stay alive and find the clue",
-                    "protagonist_flaw": "Hides too much",
-                    "core_setting": "Short rewind under pressure",
-                    "ability_cost": "Each rewind erases memory",
-                    "volume_1_title": "Rain Loop",
-                    "volume_1_conflict": "Break the anomaly chain",
-                    "volume_1_climax": "Trade memory for evidence",
-                    "major_characters_text": "Ari | lead | self | enters the mainline",
-                    "factions_text": "Bureau | official | unstable ally",
-                    "rules_outline": "Warnings leak ten minutes early",
-                    "foreshadowing_text": "Warning source | 1 | 5 | A",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+        (webnovel_dir / "planning-profile.json").write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
         (webnovel_dir / "state.json").write_text(
             json.dumps(
                 {
                     "project_info": {"title": "Test Book", "genre": "Urban Fantasy"},
                     "planning": {
                         "project_info": {"title": "Test Book", "genre": "Urban Fantasy", "outline_file": "大纲/总纲.md"},
-                        "profile": {"story_logline": "Bootstrap seed"},
+                        "profile": {},
                     },
                 },
                 ensure_ascii=False,
@@ -566,7 +544,8 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     assert (target_root / ".webnovel" / "planning-profile.json").is_file()
     assert data["planning_profile"]["outline_file"] == "大纲/总纲.md"
     assert data["planning_profile"]["project_info"]["title"] == "Test Book"
-    assert data["planning_profile"]["profile"]["protagonist_name"] == "Ari"
+    assert data["planning_profile"]["profile"]["protagonist_name"] == ""
+    assert data["planning_profile"]["readiness"]["ok"] is False
     assert data["next_recommended_action"]
     assert (mock_project_root.parent / ".webnovel" / "current-project").read_text(encoding="utf-8").strip() == str(target_root)
 

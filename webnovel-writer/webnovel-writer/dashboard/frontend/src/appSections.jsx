@@ -85,7 +85,7 @@ export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIO
     }
 
     return (
-        <div className="launcher-card">
+        <div className="launcher-card task-launcher-card">
             <div className="launcher-title">{template.title}</div>
             <div className="field-stack">
                 {template.fields.includes('project_root') && (
@@ -149,7 +149,9 @@ export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIO
                 )}
             </div>
             <ErrorNotice error={error} />
-            <button className="primary-button" onClick={submit} disabled={submitting}>{submitting ? '提交中...' : (template.submitLabel || '创建任务')}</button>
+            <div className="launcher-card-footer">
+                <button className="primary-button" onClick={submit} disabled={submitting}>{submitting ? '提交中...' : (template.submitLabel || '创建任务')}</button>
+            </div>
         </div>
     )
 }
@@ -290,7 +292,7 @@ export function PlanningProfileSection({ onSaved }) {
     const missingItems = readiness?.blocking_items || readiness?.missing_items || []
 
     return (
-        <div className="planning-profile">
+        <div className="planning-profile planning-profile-form">
             <div className="planning-status-row">
                 <div className={`planning-pill ${readiness?.ok ? 'ready' : 'blocked'}`}>
                     {readiness?.ok ? '已满足规划条件' : '待补信息'}

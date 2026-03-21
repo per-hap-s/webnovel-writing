@@ -245,9 +245,23 @@ pre {
     border: 1px solid var(--line);
     display: grid;
     gap: 12px;
+    min-height: 100%;
 }
 .launcher-title {
     font-weight: 700;
+}
+.task-launcher-card {
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    align-content: start;
+}
+.launcher-card-footer {
+    margin-top: auto;
+}
+.launcher-card-footer .primary-button,
+.launcher-card-footer .secondary-button,
+.launcher-card-footer .danger-button,
+.launcher-card-footer .ghost-button {
+    width: 100%;
 }
 .field-stack {
     display: grid;
@@ -703,8 +717,15 @@ th, td {
 }
 .planning-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    align-items: start;
+}
+.planning-profile-form .field {
+    align-content: start;
+}
+.planning-profile-form textarea {
+    min-height: 112px;
 }
 .planning-status-row {
     display: flex;
