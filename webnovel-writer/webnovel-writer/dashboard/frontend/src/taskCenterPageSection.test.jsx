@@ -91,6 +91,126 @@ test('task detail fetch includes explicit project_root in shell mode', async () 
     })
 })
 
+test('task detail re-fetches when the selected summary state changes for the same task id', async () => {
+    const task = {
+        id: 'task-refresh-1',
+        task_type: 'write',
+        status: 'running',
+        current_step: 'draft',
+        approval_status: 'not_required',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: { step_state: 'running', last_event_message: 'request_dispatched' },
+        request: { chapter: 1 },
+    }
+
+    fetchJSONMock
+        .mockResolvedValueOnce({ task, events: [] })
+        .mockResolvedValueOnce({
+            task: {
+                ...task,
+                status: 'awaiting_writeback_approval',
+                current_step: 'approval-gate',
+                runtime_status: { step_state: 'waiting_approval', last_event_message: 'step_waiting_approval' },
+            },
+            events: [{ id: 'event-2', message: 'step_waiting_approval' }],
+        })
+
+    const view = renderTaskCenter([task], task)
+
+    await waitFor(() => {
+        expect(fetchJSONMock).toHaveBeenCalledTimes(1)
+    })
+
+    view.rerender(
+        <TaskCenterPageSection
+            tasks={[{
+                ...task,
+                status: 'awaiting_writeback_approval',
+                current_step: 'approval-gate',
+                runtime_status: { step_state: 'waiting_approval', last_event_message: 'step_waiting_approval' },
+            }]}
+            selectedTask={{
+                ...task,
+                status: 'awaiting_writeback_approval',
+                current_step: 'approval-gate',
+                runtime_status: { step_state: 'waiting_approval', last_event_message: 'step_waiting_approval' },
+            }}
+            selectedTaskId={task.id}
+            currentProjectRoot=""
+            onSelectTask={vi.fn()}
+            onMutated={vi.fn()}
+            onNavigateOverview={vi.fn()}
+            MetricCard={MetricCard}
+            translateTaskType={translateTaskType}
+            translateTaskStatus={translateTaskStatus}
+            translateStepName={translateStepName}
+            translateEventLevel={translateEventLevel}
+            translateEventMessage={translateEventMessage}
+            resolveTaskStatusLabel={resolveTaskStatusLabel}
+            resolveCurrentStepLabel={resolveCurrentStepLabel}
+            resolveApprovalStatusLabel={resolveApprovalStatusLabel}
+            resolveTargetLabel={resolveTaskTargetLabel}
+        />,
+    )
+
+    await waitFor(() => {
+        expect(fetchJSONMock).toHaveBeenCalledTimes(2)
+        expect(fetchJSONMock).toHaveBeenLastCalledWith('/api/tasks/task-refresh-1/detail', {})
+    })
+})
+
+test('task detail does not re-fetch when only runtime heartbeat metadata changes', async () => {
+    const task = {
+        id: 'task-heartbeat-1',
+        task_type: 'write',
+        status: 'running',
+        current_step: 'draft',
+        approval_status: 'not_required',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: { step_state: 'running', last_event_message: 'request_dispatched', last_event_at: '2026-03-21T10:05:00Z' },
+        request: { chapter: 1 },
+    }
+
+    fetchJSONMock.mockResolvedValueOnce({ task, events: [] })
+
+    const view = renderTaskCenter([task], task)
+
+    await waitFor(() => {
+        expect(fetchJSONMock).toHaveBeenCalledTimes(1)
+    })
+
+    view.rerender(
+        <TaskCenterPageSection
+            tasks={[{
+                ...task,
+                runtime_status: { step_state: 'running', last_event_message: 'step_heartbeat', last_event_at: '2026-03-21T10:05:03Z' },
+            }]}
+            selectedTask={{
+                ...task,
+                runtime_status: { step_state: 'running', last_event_message: 'step_heartbeat', last_event_at: '2026-03-21T10:05:03Z' },
+            }}
+            selectedTaskId={task.id}
+            currentProjectRoot=""
+            onSelectTask={vi.fn()}
+            onMutated={vi.fn()}
+            onNavigateOverview={vi.fn()}
+            MetricCard={MetricCard}
+            translateTaskType={translateTaskType}
+            translateTaskStatus={translateTaskStatus}
+            translateStepName={translateStepName}
+            translateEventLevel={translateEventLevel}
+            translateEventMessage={translateEventMessage}
+            resolveTaskStatusLabel={resolveTaskStatusLabel}
+            resolveCurrentStepLabel={resolveCurrentStepLabel}
+            resolveApprovalStatusLabel={resolveApprovalStatusLabel}
+            resolveTargetLabel={resolveTaskTargetLabel}
+        />,
+    )
+
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    expect(fetchJSONMock).toHaveBeenCalledTimes(1)
+})
+
 test('approval action includes explicit project_root in shell mode', async () => {
     const user = userEvent.setup()
     const onMutated = vi.fn()

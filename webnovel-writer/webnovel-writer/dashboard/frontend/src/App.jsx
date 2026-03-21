@@ -502,7 +502,7 @@ export default function App() {
                         onTasksMutated={scheduleCoreRefresh}
                         onPlanningProfileSaved={() => {
                             setBootstrapHint('')
-                            scheduleCoreRefresh()
+                            void flushCoreRefresh()
                         }}
                     />
                 )}

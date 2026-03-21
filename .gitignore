@@ -27,6 +27,9 @@ smoke-last-message.json
 .trae/
 .claude/
 .codex/
+.playwright-cli/
+.webnovel/
+webnovel-writer/webnovel-writer/output/playwright/
 
 # Backup for nested repository metadata
 .git-backups/

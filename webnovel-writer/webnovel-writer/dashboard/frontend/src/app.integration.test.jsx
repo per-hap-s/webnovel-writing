@@ -445,6 +445,68 @@ test('bootstrap success from workbench opens the new project and keeps planning 
     })
 })
 
+test('planning profile save flushes project and task summaries immediately', async () => {
+    const user = userEvent.setup()
+    let projectInfoCalls = 0
+    let taskSummaryCalls = 0
+
+    setProjectModeUrl('control')
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') {
+            projectInfoCalls += 1
+            return Promise.resolve({
+                project_info: { title: 'Night Rain Archive', genre: '都市异能' },
+                dashboard_context: { project_initialized: true, project_root: 'C:/novel' },
+                progress: { current_chapter: 1, total_words: 1200 },
+            })
+        }
+        if (path === '/api/tasks/summary') {
+            taskSummaryCalls += 1
+            return Promise.resolve([])
+        }
+        if (path === '/api/project/planning-profile') {
+            return Promise.resolve({
+                profile: { story_logline: '旧概括' },
+                field_specs: [
+                    { name: 'story_logline', label: '故事一句话', multiline: false, required: true },
+                ],
+                readiness: { ok: false, completed_fields: 0, total_required_fields: 1, blocking_items: [] },
+                last_blocked: null,
+            })
+        }
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        return Promise.resolve({})
+    })
+    postJSONMock.mockImplementation((path, payload) => {
+        if (path === '/api/project/planning-profile') {
+            return Promise.resolve({
+                profile: payload,
+                field_specs: [
+                    { name: 'story_logline', label: '故事一句话', multiline: false, required: true },
+                ],
+                readiness: { ok: true, completed_fields: 1, total_required_fields: 1, blocking_items: [] },
+                last_blocked: null,
+            })
+        }
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    const input = await screen.findByDisplayValue('旧概括')
+    await user.clear(input)
+    await user.type(input, '新的概括')
+    await user.click(screen.getByRole('button', { name: '保存规划信息' }))
+
+    await waitFor(() => {
+        expect(postJSONMock).toHaveBeenCalledWith('/api/project/planning-profile', { story_logline: '新的概括' })
+        expect(projectInfoCalls).toBeGreaterThanOrEqual(2)
+        expect(taskSummaryCalls).toBeGreaterThanOrEqual(2)
+    })
+})
+
 test('opening an uninitialized folder from workbench pre-fills the create form', async () => {
     const user = userEvent.setup()
 

@@ -1148,6 +1148,119 @@ def test_service_startup_auto_completes_stale_write_task_when_writeback_is_alrea
     assert any(event["message"] == "服务重启后检测到写回已完成，任务已自动收口" for event in events)
 
 
+def test_task_reads_self_heal_running_write_after_data_sync_landed(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = make_service(project_root, MappingRunner({}))
+    chapter = 2
+    chapter_file = service._default_chapter_file(chapter)
+    summary_file = service._default_summary_file(chapter)
+    chapter_path = project_root / chapter_file
+    summary_path = project_root / summary_file
+    chapter_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    chapter_path.write_text("绗?2 绔犳鏂?\\n", encoding="utf-8")
+    summary_path.write_text("# 绗?2 绔犳憳瑕?\\n", encoding="utf-8")
+
+    state_path = project_root / ".webnovel" / "state.json"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    state_data["progress"]["current_chapter"] = chapter
+    state_data.setdefault("chapter_meta", {})["0002"] = {"title": "绗?2 绔?"}
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with service.index_manager._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO chapters (chapter, title, location, word_count, characters, summary, file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (chapter, "绗?2 绔?", "鑰佸煄鍖?", 3200, json.dumps(["娌堣█"], ensure_ascii=False), "鎽樿", chapter_file),
+        )
+        cursor.execute(
+            """
+            INSERT INTO review_metrics
+            (start_chapter, end_chapter, overall_score, dimension_scores, severity_counts, critical_issues, report_file, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (chapter, chapter, 90, json.dumps({"plot": 90}, ensure_ascii=False), json.dumps({}, ensure_ascii=False), json.dumps([], ensure_ascii=False), "review.md", "ok"),
+        )
+        conn.commit()
+
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "data-sync", "type": "internal"}]}
+    task = service.store.create_task("write", {"chapter": chapter}, workflow)
+    service.store.update_task(
+        task["id"],
+        workflow_spec=workflow,
+        status="running",
+        current_step="data-sync",
+        approval_status="approved",
+        artifacts={
+            "step_results": {
+                "data-sync": {"success": True, "structured_output": {"index_updated": True}},
+            },
+            "writeback": {
+                "chapter_file": chapter_file,
+                "summary_file": summary_file,
+                "state_file": ".webnovel/state.json",
+                "index_updated": True,
+            },
+        },
+    )
+
+    detail = service.get_task(task["id"])
+    summary = service.list_task_summaries(limit=10)[0]
+
+    assert detail["status"] == "completed"
+    assert detail["current_step"] is None
+    assert detail["finished_at"]
+    assert summary["status"] == "completed"
+    persisted = service.store.get_task(task["id"])
+    assert persisted["status"] == "completed"
+
+
+def test_write_task_finishes_completed_after_manual_approval_and_data_sync(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    content = long_content("Approved Chapter 1")
+    actual_word_count = len("".join(content.split()))
+    chapter_file = f"{BODY_DIR_NAME}/ch0001.md"
+    runner = SequenceRunner(
+        {
+            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "draft": step_result("draft", {"chapter_file": chapter_file, "content": content, "word_count": actual_word_count}),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+            "ooc-review": step_result("ooc-review", review_payload()),
+            "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
+            "data-sync": step_result(
+                "data-sync",
+                {
+                    "files_written": [chapter_file],
+                    "summary_file": ".webnovel/summaries/ch0001.md",
+                    "state_updated": True,
+                    "index_updated": True,
+                    "chapter_meta": {"title": "Approved Chapter 1", "location": "Night Rain City", "characters": ["Shen Yan"]},
+                },
+            ),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    waiting = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": True})
+
+    assert waiting["status"] == "awaiting_writeback_approval"
+
+    approved = service.approve_writeback(waiting["id"], reason="manual approval")
+    asyncio.run(service._run_task(waiting["id"], resume_from_step=approved.get("current_step") or "approval-gate"))
+    completed = service.get_task(waiting["id"])
+
+    assert completed["status"] == "completed"
+    assert completed["current_step"] is None
+    assert completed["finished_at"]
+    assert completed["approval_status"] == "approved"
+    assert (project_root / service._default_chapter_file(1)).is_file()
+    assert (project_root / service._default_summary_file(1)).is_file()
+
+
 def test_service_startup_migrates_legacy_chapter_into_inferred_volume_without_using_current_volume(tmp_path: Path):
     project_root = make_project(tmp_path)
     state_path = project_root / ".webnovel" / "state.json"

@@ -46,6 +46,17 @@ export function TaskCenterPageSection({
         [currentProjectRoot],
     )
     const requestOptions = currentProjectRoot ? { params: requestParams } : undefined
+    const selectedTaskSnapshotKey = selectedTask ? [
+        selectedTask.id || '',
+        selectedTask.status || '',
+        selectedTask.current_step || '',
+        selectedTask.approval_status || '',
+        selectedTask.list_priority || '',
+        selectedTask.runtime_status?.step_state || '',
+        selectedTask.runtime_status?.phase_label || '',
+        selectedTask.runtime_status?.error_code || '',
+        selectedTask.runtime_status?.suggested_resume_step || '',
+    ].join('|') : ''
     const canRetryTask = ['failed', 'interrupted'].includes(liveSelectedTask?.status) && liveSelectedTask?.runtime_status?.retryable !== false
     const canCancelTask = ['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask?.status)
 
@@ -82,7 +93,7 @@ export function TaskCenterPageSection({
         return () => {
             cancelled = true
         }
-    }, [requestParams, selectedTaskId, selectedTask?.updated_at])
+    }, [requestParams, selectedTaskId, selectedTaskSnapshotKey])
 
     const taskActionState = useMemo(() => ({ pendingActionKey }), [pendingActionKey])
 

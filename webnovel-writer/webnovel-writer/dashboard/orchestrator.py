@@ -2050,17 +2050,64 @@ class OrchestrationService:
         return actions
 
     def _with_runtime_status(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        task_copy = dict(task)
+        task_copy = dict(self._maybe_self_heal_completed_task(task))
         events = self.store.get_events(task["id"], limit=80)
         task_copy["runtime_status"] = self._build_runtime_status(task_copy, events)
         task_copy["list_priority"] = self._build_task_list_priority(task_copy)
         return task_copy
 
     def _with_runtime_status_summary(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        task_copy = dict(task)
+        task_copy = dict(self._maybe_self_heal_completed_task(task))
         task_copy["runtime_status"] = self._build_runtime_status_summary(task_copy)
         task_copy["list_priority"] = self._build_task_list_priority(task_copy)
         return task_copy
+
+    def _maybe_self_heal_completed_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        status = str(task.get("status") or "")
+        if status not in {"running", "resuming_writeback"}:
+            return task
+        if task.get("error"):
+            return task
+
+        task_type = str(task.get("task_type") or "")
+        should_complete = False
+        try:
+            if task_type == "write":
+                should_complete = self._write_task_terminal_state_missing(task)
+            elif task_type == "plan":
+                should_complete = self._plan_task_terminal_state_missing(task)
+        except Exception:
+            logger.warning("Failed to self-heal terminal task state for %s", task.get("id"), exc_info=True)
+            return task
+
+        if not should_complete:
+            return task
+        return self.store.mark_completed(task["id"])
+
+    def _write_task_terminal_state_missing(self, task: Dict[str, Any]) -> bool:
+        step_results = ((task.get("artifacts") or {}).get("step_results") or {})
+        if "data-sync" not in step_results:
+            return False
+        writeback = ((task.get("artifacts") or {}).get("writeback") or {})
+        if not str(writeback.get("chapter_file") or "").strip():
+            return False
+        if not str(writeback.get("state_file") or "").strip():
+            return False
+        return self._writeback_is_complete(task)
+
+    def _plan_task_terminal_state_missing(self, task: Dict[str, Any]) -> bool:
+        if str(task.get("current_step") or "") != "plan":
+            return False
+        step_results = ((task.get("artifacts") or {}).get("step_results") or {})
+        if "plan" not in step_results:
+            return False
+        writeback = ((task.get("artifacts") or {}).get("writeback") or {})
+        if not str(writeback.get("outline_file") or "").strip():
+            return False
+        if not str(writeback.get("state_file") or "").strip():
+            return False
+        events = self.store.get_events(task.get("id"), limit=50)
+        return any(str(event.get("message") or "") == "Plan writeback completed" for event in events)
 
     def _build_runtime_status(self, task: Dict[str, Any], events: List[Dict[str, Any]]) -> Dict[str, Any]:
         step_key = self._resolve_runtime_step_key(task, events)
