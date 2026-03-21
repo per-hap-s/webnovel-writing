@@ -39,6 +39,14 @@ class BootstrapProjectRequest(BaseModel):
     genre: str = "\u7384\u5e7b"
 
 
+class WorkbenchProjectRequest(BaseModel):
+    project_root: str = Field(min_length=1)
+
+
+class WorkbenchToolRequest(BaseModel):
+    project_root: Optional[str] = None
+
+
 class PlanningProfileRequest(BaseModel):
     story_logline: str = ""
     protagonist_name: str = ""

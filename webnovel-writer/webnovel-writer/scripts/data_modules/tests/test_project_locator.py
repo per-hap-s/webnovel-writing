@@ -126,6 +126,67 @@ def test_registry_uses_webnovel_home(tmp_path, monkeypatch):
     assert 'current_project_root' in registry.read_text(encoding='utf-8')
 
 
+def test_update_global_registry_current_project_preserves_workspace_lists(tmp_path, monkeypatch):
+    _ensure_scripts_on_path()
+
+    import json
+
+    from project_locator import (
+        get_workspace_registry_state,
+        pin_workspace_project,
+        register_workspace_project,
+        update_global_registry_current_project,
+    )
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    project_root = workspace / 'novel'
+    (project_root / '.webnovel').mkdir(parents=True, exist_ok=True)
+    (project_root / '.webnovel' / 'state.json').write_text('{}', encoding='utf-8')
+    old_project_root = workspace / 'old-novel'
+    (old_project_root / '.webnovel').mkdir(parents=True, exist_ok=True)
+    (old_project_root / '.webnovel' / 'state.json').write_text('{}', encoding='utf-8')
+
+    app_home = tmp_path / 'app-home'
+    monkeypatch.setenv('WEBNOVEL_HOME', str(app_home))
+
+    register_workspace_project(workspace_root=workspace, project_root=old_project_root, make_current=False)
+    pin_workspace_project(workspace_root=workspace, project_root=str(old_project_root))
+
+    update_global_registry_current_project(workspace_root=workspace, project_root=project_root)
+    state = get_workspace_registry_state(workspace_root=workspace)
+
+    assert state['entry']['current_project_root'] == str(project_root)
+    assert state['entry']['pinned_project_roots'] == [str(old_project_root)]
+    assert state['entry']['recent_projects'][0]['project_root'] == str(project_root)
+    assert any(item['project_root'] == str(old_project_root) for item in state['entry']['recent_projects'])
+    registry_payload = json.loads((app_home / 'workspaces.json').read_text(encoding='utf-8'))
+    assert registry_payload['last_used_project_root'] == str(project_root)
+
+
+def test_remove_workspace_project_clears_last_used_project_root(tmp_path, monkeypatch):
+    _ensure_scripts_on_path()
+
+    import json
+
+    from project_locator import register_workspace_project, remove_workspace_project
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    project_root = workspace / 'novel'
+    (project_root / '.webnovel').mkdir(parents=True, exist_ok=True)
+    (project_root / '.webnovel' / 'state.json').write_text('{}', encoding='utf-8')
+
+    app_home = tmp_path / 'app-home'
+    monkeypatch.setenv('WEBNOVEL_HOME', str(app_home))
+
+    register_workspace_project(workspace_root=workspace, project_root=project_root, make_current=True)
+    remove_workspace_project(workspace_root=workspace, project_root=str(project_root))
+    registry = json.loads((app_home / 'workspaces.json').read_text(encoding='utf-8'))
+
+    assert registry['last_used_project_root'] == ''
+
+
 def test_resolve_project_root_uses_webnovel_project_root_env(tmp_path, monkeypatch):
     _ensure_scripts_on_path()
 

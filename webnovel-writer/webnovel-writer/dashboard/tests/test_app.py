@@ -77,6 +77,31 @@ def client(mock_project_root: Path, mock_orchestrator: MagicMock) -> TestClient:
             yield test_client
 
 
+def _create_workbench_client(workspace_root: Path, mock_orchestrator: MagicMock, app_home: Path) -> TestClient:
+    env_patch = patch.dict("os.environ", {"WEBNOVEL_HOME": str(app_home)}, clear=False)
+    env_patch.start()
+    try:
+        with patch("dashboard.app.OrchestrationService", return_value=mock_orchestrator):
+            app = create_app(workspace_root=workspace_root)
+            app.state.orchestrator = mock_orchestrator
+            client = TestClient(app)
+            client.__enter__()
+            client._webnovel_env_patch = env_patch
+            return client
+    except Exception:
+        env_patch.stop()
+        raise
+
+
+def _close_workbench_client(test_client: TestClient) -> None:
+    env_patch = getattr(test_client, "_webnovel_env_patch", None)
+    try:
+        test_client.__exit__(None, None, None)
+    finally:
+        if env_patch is not None:
+            env_patch.stop()
+
+
 def _seed_narrative_tables(project_root: Path) -> None:
     conn = sqlite3.connect(str(project_root / ".webnovel" / "index.db"))
     conn.execute(
@@ -333,6 +358,105 @@ def test_create_guarded_batch_write_task_calls_orchestrator(client: TestClient, 
     )
 
 
+def test_workbench_shell_mode_hub_starts_without_project(mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    try:
+        response = client.get("/api/workbench/hub")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["workspace_root"] == str(tmp_path)
+        assert payload["current_project"] is None
+        assert payload["projects"] == []
+
+        project_response = client.get("/api/project/info")
+        assert project_response.status_code == 409
+        assert project_response.json()["code"] == "PROJECT_NOT_SELECTED"
+    finally:
+        _close_workbench_client(client)
+
+
+def test_workbench_open_project_sets_current_and_returns_dashboard_url(mock_project_root: Path, mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    try:
+        response = client.post("/api/workbench/open-project", json={"project_root": str(mock_project_root)})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["opened"] is True
+        assert payload["project_initialized"] is True
+        assert payload["suggested_dashboard_url"].startswith("/?project_root=")
+
+        hub_response = client.get("/api/workbench/hub")
+        hub_payload = hub_response.json()
+        assert hub_payload["current_project"]["project_root"] == str(mock_project_root)
+        assert hub_payload["recent_projects"][0]["project_root"] == str(mock_project_root)
+        assert (tmp_path / ".webnovel" / "current-project").read_text(encoding="utf-8").strip() == str(mock_project_root)
+    finally:
+        _close_workbench_client(client)
+
+
+def test_workbench_open_project_returns_create_hint_for_uninitialized_folder(mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    project_root = tmp_path / "draft-folder"
+    project_root.mkdir(parents=True)
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    try:
+        response = client.post("/api/workbench/open-project", json={"project_root": str(project_root)})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["opened"] is False
+        assert payload["project_initialized"] is False
+        assert payload["next_recommended_action"]
+    finally:
+        _close_workbench_client(client)
+
+
+def test_workbench_pin_and_remove_only_update_registry(mock_project_root: Path, mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    try:
+        open_response = client.post("/api/workbench/open-project", json={"project_root": str(mock_project_root)})
+        assert open_response.status_code == 200
+
+        pin_response = client.post("/api/workbench/pin-project", json={"project_root": str(mock_project_root)})
+        assert pin_response.status_code == 200
+        assert str(mock_project_root) in pin_response.json()["entry"]["pinned_project_roots"]
+
+        remove_response = client.post("/api/workbench/remove-project", json={"project_root": str(mock_project_root)})
+        assert remove_response.status_code == 200
+        assert str(mock_project_root) not in [item["project_root"] for item in remove_response.json()["entry"]["recent_projects"]]
+        assert (mock_project_root / ".webnovel" / "state.json").is_file()
+    finally:
+        _close_workbench_client(client)
+
+
+def test_workbench_tools_forward_to_launcher_script(mock_project_root: Path, mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    try:
+        with patch("dashboard.app.run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run_mock:
+            response = client.post("/api/workbench/tools/open-shell", json={"project_root": str(mock_project_root)})
+
+        assert response.status_code == 200
+        assert response.json()["launched"] is True
+        command = run_mock.call_args.args[0]
+        assert str(command[0]).endswith("powershell.exe")
+        assert command[4] == "-File"
+        assert "Start-Webnovel-Writer.ps1" in str(command[5])
+        assert command[6:] == ["shell", "-ProjectRoot", str(mock_project_root)]
+    finally:
+        _close_workbench_client(client)
+
+
 def test_supervisor_recommendations_endpoint_returns_backend_payload(client: TestClient, mock_orchestrator: MagicMock):
     mock_orchestrator.list_supervisor_recommendations.return_value = [
         {
@@ -444,6 +568,7 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     assert data["planning_profile"]["project_info"]["title"] == "Test Book"
     assert data["planning_profile"]["profile"]["protagonist_name"] == "Ari"
     assert data["next_recommended_action"]
+    assert (mock_project_root.parent / ".webnovel" / "current-project").read_text(encoding="utf-8").strip() == str(target_root)
 
 
 def test_bootstrap_project_conflict_for_existing_project(client: TestClient, mock_project_root: Path):

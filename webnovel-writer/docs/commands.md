@@ -1,4 +1,19 @@
-﻿# 命令说明
+# 命令说明
+
+## Dashboard 启动入口
+
+Windows 默认入口现在是“先进入 Web 工作台，再选/建项目”：
+
+```text
+Start-Webnovel-Writer.bat
+```
+
+说明：
+
+- 双击后直接启动 Dashboard 工作台，不再弹启动前菜单。
+- `.\Launch-Webnovel-Dashboard.ps1` 不传 `-ProjectRoot` 时，会启动全局工作台。
+- 只有显式传入一个已初始化项目目录时，脚本才会直接进入单项目视图。
+- 旧菜单仍可通过 `tools\Start-Webnovel-Writer.bat menu` 进入，但它已经不是默认主路径。
 
 ## `webnovel init`
 

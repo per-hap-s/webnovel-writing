@@ -1,4 +1,4 @@
-﻿# 项目结构与运维
+# 项目结构与运维
 
 ## 目录层级
 
@@ -14,7 +14,7 @@
 ```text
 workspace-root/
 ├── .webnovel/
-│   ├── current_project
+│   ├── current-project
 │   └── settings.json
 ├── 小说A/
 ├── 小说B/
@@ -30,6 +30,23 @@ project-root/
 ├── 大纲/
 └── 设定集/
 ```
+
+## Dashboard 工作台启动语义
+
+当前默认入口已经是“全局壳模式”：
+
+- 启动脚本默认不再要求 `PROJECT_ROOT`。
+- 双击 `Start-Webnovel-Writer.bat` 会直接启动 Web 工作台。
+- 工作台接口负责项目选择、项目注册、最近项目/固定项目、工具动作。
+- 项目页继续使用 `project_root` 查询参数作为当前活动项目的权威来源。
+- 无活动项目时，项目型 API 应返回 `PROJECT_NOT_SELECTED`，而不是在应用启动阶段崩溃。
+
+工作区注册需要维护：
+
+- `.webnovel/current-project`
+- 工作区注册表中的 `current_project_root`
+- `recent_projects[]`
+- `pinned_project_roots[]`
 
 ## 常用环境变量
 
@@ -147,10 +164,6 @@ Rules:
   - `review.continuity-review`
   - `review.ooc-review`
 - `data-sync` remains excluded from automatic retry in this phase; if it fails with `INVALID_STEP_OUTPUT`, it should surface as `retriable` with `suggested_resume_step = data-sync`.
-- Task Center / Overview should interpret:
-  - `PLAN_INPUT_BLOCKED` as input completion required
-  - `INVALID_STEP_OUTPUT` with `recoverability != terminal` as system fluctuation / retryable
-  - `INVALID_STEP_OUTPUT` with `recoverability = terminal` as a failed step that needs explicit operator retry
 
 ## Repair Task
 
@@ -166,17 +179,5 @@ Rules:
   - repair review is not blocking
   - the task has either passed `approval-gate` or does not require manual approval
   - a chapter backup is written before overwrite
-- Repair whitelist for this phase:
-  - `AMBIGUOUS_WARNING_SOURCE`
-  - `RULE_SCOPE_CONFUSION`
-  - `TRANSITION_CLARITY`
-  - `HOOK_BRIDGE_GAP`
-  - `PLOT_THREAD_CONTINUITY`
-  - `MEMORY_LOSS_OBJECTIVITY`
-- Review summary payloads now expose `repair_candidates[]`, including `auto_rewrite_eligible`, rewrite goal, guardrails, and launch payload metadata.
-- Successful repair writes:
-  - chapter backup under `.webnovel/repair-backups/`
-  - repair report under `.webnovel/repair-reports/`
-  - updated chapter body and summary
 - If `require_manual_approval = true`, the task must pause at `approval-gate` with `status = awaiting_writeback_approval` before overwrite.
 - If repair review still blocks the chapter, the task must fail with `REPAIR_REVIEW_BLOCKED` and must not overwrite the chapter body.

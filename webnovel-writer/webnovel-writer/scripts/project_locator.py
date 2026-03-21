@@ -79,6 +79,86 @@ def _default_registry() -> dict:
     }
 
 
+def _normalize_recent_projects(value: object) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    raw_items = value if isinstance(value, list) else []
+    seen: set[str] = set()
+    for raw in raw_items:
+        if isinstance(raw, str):
+            project_root = raw.strip()
+            last_opened_at = ""
+        elif isinstance(raw, dict):
+            project_root = str(raw.get("project_root") or "").strip()
+            last_opened_at = str(raw.get("last_opened_at") or "").strip()
+        else:
+            continue
+        if not project_root:
+            continue
+        dedupe_key = os.path.normcase(project_root)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        items.append(
+            {
+                "project_root": project_root,
+                "last_opened_at": last_opened_at,
+            }
+        )
+    return items
+
+
+def _normalize_pinned_project_roots(value: object) -> list[str]:
+    raw_items = value if isinstance(value, list) else []
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        dedupe_key = os.path.normcase(text)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        items.append(text)
+    return items
+
+
+def _normalize_workspace_entry(workspace_root: Path, entry: object) -> dict:
+    if not isinstance(entry, dict):
+        entry = {}
+    current_project_root = str(entry.get("current_project_root") or "").strip()
+    normalized = dict(entry)
+    normalized["workspace_root"] = str(workspace_root)
+    normalized["current_project_root"] = current_project_root
+    normalized["recent_projects"] = _normalize_recent_projects(entry.get("recent_projects"))
+    normalized["pinned_project_roots"] = _normalize_pinned_project_roots(entry.get("pinned_project_roots"))
+    normalized["updated_at"] = str(entry.get("updated_at") or "").strip()
+    return normalized
+
+
+def _workspace_key(workspace_root: Path) -> str:
+    return _normcase_path_key(workspace_root)
+
+
+def _resolve_workspace_root(explicit_workspace_root: Optional[str] = None, *, cwd: Optional[Path] = None) -> Path:
+    if explicit_workspace_root:
+        return normalize_windows_path(explicit_workspace_root).expanduser().resolve()
+
+    env_ws = os.environ.get(ENV_WEBNOVEL_WORKSPACE_ROOT) or os.environ.get(ENV_CLAUDE_PROJECT_DIR)
+    if env_ws:
+        return normalize_windows_path(env_ws).expanduser().resolve()
+
+    base = (cwd or Path.cwd()).resolve()
+    found = _find_workspace_root(base)
+    if found is not None:
+        return found.resolve()
+
+    git_root = _find_git_root(base)
+    if git_root is not None:
+        return git_root.resolve()
+    return base
+
+
 def _load_global_registry() -> dict:
     for path in _registry_candidates():
         if not path.is_file():
@@ -231,20 +311,7 @@ def update_global_registry_current_project(*, workspace_root: Optional[Path], pr
         ws = ws.expanduser().resolve()
     except Exception:
         ws = ws.expanduser()
-
-    reg = _load_global_registry()
-    workspaces = reg.get("workspaces")
-    if not isinstance(workspaces, dict):
-        workspaces = {}
-        reg["workspaces"] = workspaces
-
-    workspaces[_normcase_path_key(ws)] = {
-        "workspace_root": str(ws),
-        "current_project_root": str(root),
-        "updated_at": _now_iso(),
-    }
-    reg["last_used_project_root"] = str(root)
-    _save_global_registry(reg)
+    register_workspace_project(workspace_root=ws, project_root=root, make_current=True)
     return _primary_registry_path()
 
 
@@ -275,6 +342,193 @@ def write_current_project_pointer(project_root: Path, *, workspace_root: Optiona
         pass
 
     return pointer_file
+
+
+def clear_current_project_pointer(*, workspace_root: Optional[Path] = None) -> Optional[Path]:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    pointer_file = ws_root / CURRENT_PROJECT_POINTER_REL
+    if pointer_file.is_file():
+        pointer_file.unlink()
+        return pointer_file
+    return None
+
+
+def get_workspace_root(explicit_workspace_root: Optional[str] = None, *, cwd: Optional[Path] = None) -> Path:
+    return _resolve_workspace_root(explicit_workspace_root, cwd=cwd)
+
+
+def get_workspace_registry_state(*, workspace_root: Optional[Path] = None) -> dict:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    reg = _load_global_registry()
+    workspaces = reg.get("workspaces")
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+        reg["workspaces"] = workspaces
+    entry = _normalize_workspace_entry(ws_root, workspaces.get(_workspace_key(ws_root)))
+    current_root = resolve_workspace_current_project(workspace_root=ws_root)
+    if current_root is not None:
+        entry["current_project_root"] = str(current_root)
+    reg["workspaces"][_workspace_key(ws_root)] = entry
+    return {
+        "registry_path": str(_primary_registry_path()),
+        "workspace_root": str(ws_root),
+        "entry": entry,
+        "last_used_project_root": str(reg.get("last_used_project_root") or "").strip(),
+    }
+
+
+def resolve_workspace_current_project(*, workspace_root: Optional[Path] = None) -> Optional[Path]:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    pointer_file = ws_root / CURRENT_PROJECT_POINTER_REL
+    if pointer_file.is_file():
+        raw = pointer_file.read_text(encoding="utf-8").strip()
+        if raw:
+            target = normalize_windows_path(raw).expanduser()
+            if not target.is_absolute():
+                target = (pointer_file.parent / target).resolve()
+            if _is_project_root(target):
+                return target.resolve()
+
+    reg = _load_global_registry()
+    workspaces = reg.get("workspaces") if isinstance(reg.get("workspaces"), dict) else {}
+    entry = _normalize_workspace_entry(ws_root, workspaces.get(_workspace_key(ws_root)))
+    current_project_root = str(entry.get("current_project_root") or "").strip()
+    if current_project_root:
+        target = normalize_windows_path(current_project_root).expanduser()
+        if target.is_absolute() and _is_project_root(target):
+            return target.resolve()
+    return None
+
+
+def register_workspace_project(
+    *,
+    workspace_root: Optional[Path],
+    project_root: Path,
+    make_current: bool = True,
+) -> dict:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    root = normalize_windows_path(project_root).expanduser().resolve()
+    if not _is_project_root(root):
+        raise FileNotFoundError(f"Not a webnovel project root (missing .webnovel/state.json): {root}")
+
+    reg = _load_global_registry()
+    workspaces = reg.get("workspaces")
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+        reg["workspaces"] = workspaces
+
+    key = _workspace_key(ws_root)
+    entry = _normalize_workspace_entry(ws_root, workspaces.get(key))
+    now = _now_iso()
+    root_text = str(root)
+    root_key = os.path.normcase(root_text)
+
+    recent_projects = [
+        item
+        for item in entry["recent_projects"]
+        if os.path.normcase(str(item.get("project_root") or "")) != root_key
+    ]
+    recent_projects.insert(
+        0,
+        {
+            "project_root": root_text,
+            "last_opened_at": now,
+        },
+    )
+    entry["recent_projects"] = recent_projects[:20]
+    entry["updated_at"] = now
+    if make_current:
+        entry["current_project_root"] = root_text
+        pointer_file = ws_root / CURRENT_PROJECT_POINTER_REL
+        pointer_file.parent.mkdir(parents=True, exist_ok=True)
+        pointer_file.write_text(root_text, encoding="utf-8")
+    workspaces[key] = entry
+    reg["last_used_project_root"] = root_text
+    _save_global_registry(reg)
+    return entry
+
+
+def pin_workspace_project(*, workspace_root: Optional[Path], project_root: str) -> dict:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    project_text = str(project_root or "").strip()
+    if not project_text:
+        raise ValueError("project_root is required")
+
+    reg = _load_global_registry()
+    workspaces = reg.get("workspaces")
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+        reg["workspaces"] = workspaces
+    key = _workspace_key(ws_root)
+    entry = _normalize_workspace_entry(ws_root, workspaces.get(key))
+    pinned = [
+        item
+        for item in entry["pinned_project_roots"]
+        if os.path.normcase(item) != os.path.normcase(project_text)
+    ]
+    pinned.insert(0, project_text)
+    entry["pinned_project_roots"] = pinned
+    entry["updated_at"] = _now_iso()
+    workspaces[key] = entry
+    _save_global_registry(reg)
+    return entry
+
+
+def unpin_workspace_project(*, workspace_root: Optional[Path], project_root: str) -> dict:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    project_text = str(project_root or "").strip()
+    if not project_text:
+        raise ValueError("project_root is required")
+
+    reg = _load_global_registry()
+    workspaces = reg.get("workspaces")
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+        reg["workspaces"] = workspaces
+    key = _workspace_key(ws_root)
+    entry = _normalize_workspace_entry(ws_root, workspaces.get(key))
+    entry["pinned_project_roots"] = [
+        item
+        for item in entry["pinned_project_roots"]
+        if os.path.normcase(item) != os.path.normcase(project_text)
+    ]
+    entry["updated_at"] = _now_iso()
+    workspaces[key] = entry
+    _save_global_registry(reg)
+    return entry
+
+
+def remove_workspace_project(*, workspace_root: Optional[Path], project_root: str) -> dict:
+    ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
+    project_text = str(project_root or "").strip()
+    if not project_text:
+        raise ValueError("project_root is required")
+
+    reg = _load_global_registry()
+    workspaces = reg.get("workspaces")
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+        reg["workspaces"] = workspaces
+    key = _workspace_key(ws_root)
+    entry = _normalize_workspace_entry(ws_root, workspaces.get(key))
+    project_key = os.path.normcase(project_text)
+    entry["recent_projects"] = [
+        item
+        for item in entry["recent_projects"]
+        if os.path.normcase(str(item.get("project_root") or "")) != project_key
+    ]
+    entry["pinned_project_roots"] = [
+        item for item in entry["pinned_project_roots"] if os.path.normcase(item) != project_key
+    ]
+    if os.path.normcase(str(entry.get("current_project_root") or "")) == project_key:
+        entry["current_project_root"] = ""
+        clear_current_project_pointer(workspace_root=ws_root)
+    entry["updated_at"] = _now_iso()
+    workspaces[key] = entry
+    if os.path.normcase(str(reg.get("last_used_project_root") or "")) == project_key:
+        reg["last_used_project_root"] = ""
+    _save_global_registry(reg)
+    return entry
 
 
 def resolve_project_root(explicit_project_root: Optional[str] = None, *, cwd: Optional[Path] = None) -> Path:

@@ -2,83 +2,87 @@
 
 [![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![Claude Code](https://img.shields.io/badge/Claude%20Code-Compatible-purple.svg)](https://claude.ai/claude-code)
 
-## 项目简介
-
-`Webnovel Writer` 是一个面向长篇网文项目的写作工作台，包含：
-
-- 命令行工作流：`webnovel init / plan / write / review / resume / dashboard`
-- Windows 启动器：双击即可打开面板、登录 Codex CLI、查看快速说明
-- Web Dashboard：项目概览、任务监控、数据查询、文件浏览、质量面板
-- 面板内 API 配置：可直接修改写作模型和 RAG 配置，并写回项目根目录 `.env`
+`Webnovel Writer` 是面向长篇网文项目的写作工作台，包含 CLI、任务编排、Web Dashboard、RAG 检索和项目管理能力。
 
 详细文档见 [`docs/README.md`](docs/README.md)。
 
-## 推荐启动方式
+## 默认启动方式
 
-### Windows 用户
-
-推荐直接双击以下文件：
+Windows 下直接双击：
 
 ```text
 Start-Webnovel-Writer.bat
 ```
 
-启动器菜单包含：
+默认行为已经改成“先进入 Web 工作台，再选/建项目”：
 
-1. 启动本机 Dashboard
-2. 启动局域网 Dashboard
-3. 登录 Codex CLI
-4. 打开项目终端
-5. 打开中文快速说明
+1. 双击后直接启动 Dashboard，不再弹启动前菜单。
+2. 不再在启动前要求先选目录或先初始化项目。
+3. 在 Web 工作台首页完成打开已有项目、新建项目、切换项目、清理失效记录。
+4. 在工作台工具页执行登录 Codex CLI、打开终端、打开说明、开启局域网访问。
 
-如果你选择的目录还没有初始化为小说项目，启动器会先询问小说标题和题材，并自动创建 `.webnovel/state.json`。
-
-### 命令行用户
-
-也可以直接运行：
+兼容入口仍然保留：
 
 ```powershell
-webnovel dashboard
+tools\Start-Webnovel-Writer.bat menu
+tools\Start-Webnovel-Writer.bat dashboard-lan
+tools\Start-Webnovel-Writer.bat login
+tools\Start-Webnovel-Writer.bat shell
 ```
 
-或使用 PowerShell 脚本：
+如果直接运行脚本：
 
 ```powershell
 .\Launch-Webnovel-Dashboard.ps1
 ```
 
-以下命令示例默认都以 PowerShell 为准。
+不传 `-ProjectRoot` 时会启动全局工作台；只有显式传入一个已初始化项目目录时，才会直接进入单项目视图。
 
-## 快速上手
+## 工作台能力
 
-### 1. 安装插件
+工作台首页提供：
+
+- 当前项目、最近项目、固定项目
+- 打开已有项目
+- 新建项目
+- 清理失效记录
+- 默认落地偏好：`先到项目主页` / `自动进入上次项目`
+- 工具页入口
+
+工具页提供直接执行按钮：
+
+- 登录 Codex CLI
+- 打开当前项目终端
+- 打开快速说明
+- 开启局域网分享
+
+## 快速开始
+
+### 1. 安装依赖
 
 ```powershell
-claude plugin marketplace add lingfengQAQ/webnovel-writer --scope user
-claude plugin install webnovel-writer@webnovel-writer-marketplace --scope user
+python -m pip install -r requirements.txt
 ```
 
-如果只想在当前项目生效，把 `--scope user` 改成 `--scope project`。
-
-### 2. 安装 Python 依赖
+如需开发依赖：
 
 ```powershell
-python -m pip install -r https://raw.githubusercontent.com/lingfengQAQ/webnovel-writer/HEAD/requirements.txt
+python -m pip install -e ".[dev,dashboard]"
 ```
 
-这会同时安装写作链路和 Dashboard 依赖。
+### 2. 首次创建项目
 
-### 3. 初始化项目
+有两种方式：
 
-在目标工作区执行：
+1. 在 Dashboard 工作台首页点击“新建项目”，先选目录，再填写标题和题材。
+2. 或先在命令行运行：
 
 ```powershell
 webnovel init
 ```
 
-初始化完成后，项目根目录下会生成：
+初始化后项目目录会包含：
 
 ```text
 .webnovel/
@@ -87,48 +91,16 @@ webnovel init
 设定集/
 ```
 
-初始化完成后，系统会同时写入一份可直接编辑的 `.webnovel/planning-profile.json`，并生成更完整的 `大纲/总纲.md` 最小骨架。默认推荐流程是：
+### 3. 配置写作模型和 RAG
 
-1. 打开 Dashboard 的 `Planning Profile`
-2. 确认并保存规划信息
-3. 再运行 `webnovel plan 1`
+推荐在 Dashboard 的 `总览 -> API 接入设置` 中填写：
 
-### 4. 配置写作模型和 RAG
+- 写作模型：`Provider`、`Base URL`、`模型名`、`API Key`
+- RAG：`Base URL`、`Embedding 模型`、`Rerank 模型`、`API Key`
 
-推荐优先使用 Dashboard 的 `总览 -> API 接入设置`：
+保存后会写入项目根目录 `.env`。
 
-- 写作模型 API：`Provider`、`Base URL`、`模型名称`、`API Key`
-- RAG API：`Base URL`、`Embedding 模型`、`Rerank 模型`、`API Key`
-
-保存后会：
-
-1. 写入项目根目录 `.env`
-2. 立即刷新面板状态
-3. 后续任务直接使用新配置
-
-如果 API Key 输入框留空，则会保留当前已保存的 Key。
-
-也可以手动编辑项目根目录 `.env`。当前面板写入的核心变量如下：
-
-```powershell
-$env:WEBNOVEL_LLM_PROVIDER = "openai-compatible"
-$env:WEBNOVEL_LLM_BASE_URL = "https://api.openai.com/v1"
-$env:WEBNOVEL_LLM_MODEL = "gpt-4.1-mini"
-$env:WEBNOVEL_LLM_API_KEY = "your_llm_api_key"
-
-$env:WEBNOVEL_RAG_BASE_URL = "https://api.siliconflow.cn/v1"
-$env:WEBNOVEL_RAG_EMBED_MODEL = "BAAI/bge-m3"
-$env:WEBNOVEL_RAG_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
-$env:WEBNOVEL_RAG_API_KEY = "your_rag_api_key"
-```
-
-补充说明：
-
-- 如果你准备用 `Codex CLI` 作为写作执行器，可以先在启动器里选择“登录 Codex CLI”。
-- 当未配置写作模型 API、但本机可用 `Codex CLI` 时，Dashboard 会优先回退到 CLI 模式。
-- 面板仍兼容读取 `OPENAI_BASE_URL`、`OPENAI_MODEL`、`OPENAI_API_KEY`，但新配置建议统一使用 `WEBNOVEL_LLM_*`。
-
-### 5. 开始使用
+### 4. 开始使用
 
 ```powershell
 webnovel plan 1
@@ -136,103 +108,53 @@ webnovel write 1
 webnovel review 1-5
 ```
 
-如果首轮 `plan` 仍因输入不足被阻断，任务会返回 `PLAN_INPUT_BLOCKED`，并在错误详情里附带结构化 `blocking_items`。这表示需要补齐规划输入，而不是模型超时或系统异常；此时不会生成或覆盖空壳 `volume-01-plan.md`。
+## Dashboard 说明
 
-## Dashboard 当前能力
+项目页仍然以 `project_root` 作为当前活动项目的权威来源。没有活动项目时：
 
-当前 Dashboard 不再是“纯只读页面”。它包含两类能力：
+- 工作台接口可正常工作
+- 项目型接口会返回 `PROJECT_NOT_SELECTED`
+- 不会在应用启动阶段直接崩掉
 
-- 可视化查看：项目状态、实体、关系、章节、文件、质量数据
-- 控制与配置：创建任务、重试任务、审批回写、确认失效事实、保存 API 配置
+项目页继续复用现有模块：
 
-与启动说明直接相关的几个入口如下：
-
-- `总览 -> 项目创建`
-- `总览 / 控制页 -> Planning Profile`
-- `总览 -> 任务入口`
-- `总览 -> API 接入设置`
-- `任务 -> 任务监控 / 批准回写 / 拒绝回写`
-
-其中“文件”页面仍然是受限只读，只允许读取项目根目录下的 `正文`、`大纲`、`设定集`。
-
-## 面板 API 修改说明
-
-如果你不是通过界面，而是要从脚本或外部面板接入，当前后端提供：
-
-- `POST /api/project/bootstrap`
-- `POST /api/settings/llm`
-- `POST /api/settings/rag`
-
-对应保存行为：
-
-- `POST /api/project/bootstrap` 会初始化项目目录、写入最小 `planning-profile` 与总纲骨架，并返回下一步建议到 `Planning Profile`
-- `POST /api/settings/llm` 会更新 `WEBNOVEL_LLM_PROVIDER`、`WEBNOVEL_LLM_BASE_URL`、`WEBNOVEL_LLM_MODEL`、`WEBNOVEL_LLM_API_KEY`
-- `POST /api/settings/rag` 会更新 `WEBNOVEL_RAG_BASE_URL`、`WEBNOVEL_RAG_EMBED_MODEL`、`WEBNOVEL_RAG_RERANK_MODEL`、`WEBNOVEL_RAG_API_KEY`
-
-接口保存位置都是项目根目录 `.env`，不会修改系统级环境变量文件。
-
-`plan` 相关任务如果因为规划资料缺失失败，会统一返回错误码 `PLAN_INPUT_BLOCKED`，并在 `details.blocking_items` 中列出缺失字段。
-`INVALID_STEP_OUTPUT` 现在会返回结构化 `details.parse_stage / raw_output_present / missing_required_keys / recoverability / suggested_resume_step`；其中 review 子步骤已纳入一次自动重试，`data-sync` 仍保持人工重试。
-
-## Frontend 门禁与产物
-
-- `dashboard/frontend/dist/` 是 Dashboard 运行时直接服务的静态产物目录，当前保持入库。
-- 如果修改了 `dashboard/frontend/src/`，同一次变更中需要运行 `npm run build` 并提交对应的 `dist/` 更新。
-- 前端默认自检门禁包括 `npm run lint`、`npm run typecheck`、`npm run test:state`、`npm run test:ui` 和 `npm run build`。
-
-## 文档导航
-
-- 架构与模块：[`docs/architecture.md`](docs/architecture.md)
-- 命令详解：[`docs/commands.md`](docs/commands.md)
-- RAG 与配置：[`docs/rag-and-config.md`](docs/rag-and-config.md)
-- 题材模板：[`docs/genres.md`](docs/genres.md)
-- 运维与恢复：[`docs/operations.md`](docs/operations.md)
-- 文档索引：[`docs/README.md`](docs/README.md)
-
-## 更新简介
-
-| 版本 | 说明 |
-|------|------|
-| **v5.5.0 (当前)** | 提供 Dashboard、任务编排、API 接入设置与实时刷新能力 |
-| **v5.4.4** | 引入官方 Plugin Marketplace 安装流程 |
-| **v5.4.3** | 增强 RAG 检索与回退策略 |
-| **v5.3** | 引入追读力与质量跟踪体系 |
-
-## 开源协议
-
-本项目使用 `GPL v3` 协议，详见 [`LICENSE`](LICENSE)。
+- `control`
+- `tasks`
+- `data`
+- `files`
+- `quality`
+- `supervisor`
+- `supervisor-audit`
 
 ## Repair Mainline
 
-- `review` 汇总结果现在会附带结构化 `repair_candidates[]`，用于区分可自动修稿与需人工处理的问题。
-- 新增 `POST /api/tasks/repair`，用于对单章执行 `repair-plan -> repair-draft -> consistency-review -> continuity-review -> review-summary -> approval-gate -> repair-writeback`。
-- 自动修稿默认直接写回，但如果请求显式传入 `require_manual_approval = true`，任务会先停在 `approval-gate`，等待人工批准后再落盘。
-- 若复审仍阻断，任务会以 `REPAIR_REVIEW_BLOCKED` 失败；命中结构化输出异常时，`repair-draft / consistency-review / continuity-review` 也会沿用一次性自动重试机制。
-- 当前自动修稿白名单仅覆盖：
-  - `AMBIGUOUS_WARNING_SOURCE`
-  - `RULE_SCOPE_CONFUSION`
-  - `TRANSITION_CLARITY`
-  - `HOOK_BRIDGE_GAP`
-  - `PLOT_THREAD_CONTINUITY`
-  - `MEMORY_LOSS_OBJECTIVITY`
-- 成功修稿会生成 `.webnovel/repair-backups/` 备份和 `.webnovel/repair-reports/` 报告。
+当前支持单章 `repair` 任务：
 
-## Star 历史
+- 启动入口：`POST /api/tasks/repair`
+- 工作流：`repair-plan -> repair-draft -> consistency-review -> continuity-review -> review-summary -> approval-gate -> repair-writeback`
+- 默认自动回写
+- 如果显式传入 `require_manual_approval = true`，任务会停在 `approval-gate`
+- `repair-draft / consistency-review / continuity-review` 已接入一次性 `INVALID_STEP_OUTPUT` 自动重试
 
-[![Star History Chart](https://api.star-history.com/svg?repos=lingfengQAQ/webnovel-writer&type=Date)](https://star-history.com/#lingfengQAQ/webnovel-writer&Date)
+成功修稿会生成：
 
-## 致谢
+- `.webnovel/repair-backups/`
+- `.webnovel/repair-reports/`
 
-本项目使用 **Claude Code + Gemini CLI + Codex** 协同开发。
+## 前端产物
 
-灵感来源：[Linux.do 帖子](https://linux.do/t/topic/1397944/49)
-
-## 贡献
-
-欢迎提交 Issue 和 PR：
+`dashboard/frontend/dist/` 是 Dashboard 运行时直接服务的静态目录。修改 `dashboard/frontend/src/` 后，需要在同一次变更里执行并提交：
 
 ```powershell
-git checkout -b feature/your-feature
-git commit -m "feat: add your feature"
-git push origin feature/your-feature
+Set-Location .\webnovel-writer\dashboard\frontend
+npm run build
 ```
+
+## 文档导航
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/commands.md`](docs/commands.md)
+- [`docs/rag-and-config.md`](docs/rag-and-config.md)
+- [`docs/genres.md`](docs/genres.md)
+- [`docs/operations.md`](docs/operations.md)
+- [`docs/README.md`](docs/README.md)

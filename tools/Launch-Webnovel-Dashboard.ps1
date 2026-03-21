@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ProjectRoot,
     [string]$ListenHost = '127.0.0.1',
     [int]$Port = 8765,
@@ -19,25 +19,10 @@ if (-not $env:WEBNOVEL_CODEX_BIN) {
     $env:WEBNOVEL_CODEX_BIN = 'codex.cmd'
 }
 $env:PYTHONPATH = $appRoot + ';' + (Join-Path $appRoot 'scripts')
+$env:WEBNOVEL_WORKSPACE_ROOT = $workspaceRoot
 
 if ($Lan -and -not $PSBoundParameters.ContainsKey('ListenHost')) {
     $ListenHost = '0.0.0.0'
-}
-
-function Select-ProjectRoot {
-    Add-Type -AssemblyName System.Windows.Forms
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = '请选择小说项目所在文件夹，或要新建小说项目的目标文件夹。'
-    $dlg.ShowNewFolderButton = $true
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        return $dlg.SelectedPath
-    }
-    return $null
-}
-
-function Prompt-Text([string]$Title, [string]$Prompt, [string]$DefaultValue) {
-    Add-Type -AssemblyName Microsoft.VisualBasic
-    return [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, $DefaultValue)
 }
 
 function Get-LocalIPv4 {
@@ -61,64 +46,47 @@ if (-not (Test-Path $pythonExe)) {
     throw "未找到 Python 虚拟环境：$pythonExe"
 }
 
-if (-not $ProjectRoot) {
-    $ProjectRoot = Select-ProjectRoot
+$resolvedProjectRoot = $null
+if ($ProjectRoot) {
+    if (-not (Test-Path $ProjectRoot)) {
+        Write-Warning "指定的项目目录不存在，将改为仅启动工作台：$ProjectRoot"
+    } else {
+        $resolvedProjectRoot = (Resolve-Path $ProjectRoot).Path
+        $stateFile = Join-Path $resolvedProjectRoot '.webnovel\state.json'
+        if (-not (Test-Path $stateFile)) {
+            Write-Warning "指定目录尚未初始化为小说项目，将改为仅启动工作台：$resolvedProjectRoot"
+            $resolvedProjectRoot = $null
+        }
+    }
 }
 
-if (-not $ProjectRoot) {
-    throw '未选择任何文件夹。'
+Write-Host ('工作区目录：' + $workspaceRoot)
+if ($resolvedProjectRoot) {
+    Write-Host ('当前项目：' + $resolvedProjectRoot)
+    $env:WEBNOVEL_PROJECT_ROOT = $resolvedProjectRoot
+} else {
+    Write-Host '当前模式：全局工作台（先进入 Web，再选/建项目）'
+    Remove-Item Env:WEBNOVEL_PROJECT_ROOT -ErrorAction SilentlyContinue
 }
-
-$ProjectRoot = (Resolve-Path $ProjectRoot).Path
-$stateFile = Join-Path $ProjectRoot '.webnovel\state.json'
-
-if (-not (Test-Path $stateFile)) {
-    $defaultTitle = Split-Path $ProjectRoot -Leaf
-    if (-not $defaultTitle) {
-        $defaultTitle = '我的小说'
-    }
-
-    $title = Prompt-Text '创建小说项目' '请输入小说标题：' $defaultTitle
-    if ([string]::IsNullOrWhiteSpace($title)) {
-        $title = $defaultTitle
-    }
-
-    $genre = Prompt-Text '创建小说项目' '请输入题材（例如：玄幻 / 都市 / 悬疑）：' '玄幻'
-    if ([string]::IsNullOrWhiteSpace($genre)) {
-        $genre = '玄幻'
-    }
-
-    Write-Host ('正在初始化小说项目：' + $ProjectRoot)
-    Set-Location $appRoot
-    & $pythonExe (Join-Path $appRoot 'scripts\init_project.py') $ProjectRoot $title $genre
-    if ($LASTEXITCODE -ne 0) {
-        throw ('项目初始化失败，退出码：' + $LASTEXITCODE)
-    }
-
-    if (-not (Test-Path $stateFile)) {
-        throw '项目初始化后没有生成 .webnovel\state.json。'
-    }
-
-    Write-Host '请在 Dashboard 总览页补齐规划必填信息后再运行 plan。'
-}
-
-Write-Host ('项目目录：' + $ProjectRoot)
 Write-Host '正在启动 Dashboard...'
 Write-Host '使用 Dashboard 期间请保持此窗口开启。'
 Write-Host ('本机访问地址：http://127.0.0.1:' + $Port)
 if ($ListenHost -eq '0.0.0.0') {
     $lanIp = Get-LocalIPv4
     if ($lanIp) {
-        Write-Host ('手机访问地址：http://' + $lanIp + ':' + $Port)
+        Write-Host ('局域网访问地址：http://' + $lanIp + ':' + $Port)
     } else {
-        Write-Host ('手机访问地址：请使用本机局域网 IP，端口 ' + $Port)
+        Write-Host ('局域网访问地址：请使用本机局域网 IP，端口 ' + $Port)
     }
     Write-Host '手机和电脑需要处于同一局域网，且 Windows 防火墙需要放行该端口。'
 }
 Write-Host
 
 Set-Location $appRoot
-$args = @('-m', 'dashboard.server', '--project-root', $ProjectRoot, '--host', $ListenHost, '--port', $Port)
+$args = @('-m', 'dashboard.server', '--workspace-root', $workspaceRoot, '--host', $ListenHost, '--port', $Port)
+if ($resolvedProjectRoot) {
+    $args += @('--project-root', $resolvedProjectRoot)
+}
 if ($NoBrowser) {
     $args += '--no-browser'
 }
@@ -128,4 +96,3 @@ $exitCode = $LASTEXITCODE
 Write-Host
 Write-Host ('Dashboard 已停止，退出码：' + $exitCode)
 exit $exitCode
-

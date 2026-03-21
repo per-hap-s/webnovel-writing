@@ -30,9 +30,11 @@ import {
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
 import { SupervisorPage } from './supervisorPage.jsx'
 import { SupervisorAuditPage } from './supervisorAuditPage.jsx'
+import { WorkbenchPage, readLandingPreference, syncDashboardQuery } from './workbenchPage.jsx'
 import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
 
 const NAV_ITEMS = [
+    { id: 'workbench', label: '项目工作台' },
     { id: 'control', label: '总览' },
     { id: 'supervisor', label: '督办' },
     { id: 'supervisor-audit', label: '督办审计' },
@@ -60,10 +62,15 @@ const TASK_TEMPLATES = [
 
 const DASHBOARD_PAGE_QUERY_KEY = 'page'
 const BOOTSTRAP_HINT_QUERY_KEY = 'bootstrap_hint'
+const LANDING_PREFERENCE_KEY = 'webnovel.dashboard.landing'
+const LANDING_PREFERENCES = [
+    { value: 'hub', label: '先到项目主页' },
+    { value: 'auto_last', label: '自动进入上次项目' },
+]
 
 const UI_COPY = {
     overviewPlanningTitle: '规划必填信息',
-    projectCreateHint: '仅用于新空目录创建项目；如果你是从桌面启动器进入，通常不用再点“创建项目”。',
+    projectCreateHint: '双击启动后会先进入工作台，在这里打开已有项目或新建项目。',
     taskEntryHint: '主链建议按“规划卷 -> 撰写章节 -> 执行审查 / 恢复任务”使用；“补种项目骨架（旧入口）”只用于兼容旧项目。',
     planningHint: '先把这里的规划信息补齐，再运行“规划卷”。如果信息不足，系统会提示你回到这里继续补资料。',
     writingEngine: '写作引擎',
@@ -75,8 +82,11 @@ const UI_COPY = {
 }
 
 export default function App() {
+    const [currentProjectRoot, setCurrentProjectRoot] = useState(() => readProjectRootFromQuery())
     const [page, setPage] = useState(() => readDashboardPageFromQuery())
     const [bootstrapHint, setBootstrapHint] = useState(() => readBootstrapHintFromQuery())
+    const [hubData, setHubData] = useState(null)
+    const [hubLoadError, setHubLoadError] = useState(null)
     const [projectInfo, setProjectInfo] = useState(null)
     const [llmStatus, setLlmStatus] = useState(null)
     const [ragStatus, setRagStatus] = useState(null)
@@ -92,20 +102,48 @@ export default function App() {
     const coreRefreshSeqRef = useRef(0)
     const statusRefreshSeqRef = useRef(0)
     const optimisticTasksRef = useRef(new Map())
+    const autoRedirectedRef = useRef(false)
+    const projectMode = Boolean(currentProjectRoot)
+    const effectivePage = projectMode ? page : 'workbench'
+    const navItems = projectMode ? NAV_ITEMS : [NAV_ITEMS[0]]
 
     useEffect(() => {
+        syncDashboardQuery({ projectRoot: currentProjectRoot, page: effectivePage, bootstrapHint })
+    }, [currentProjectRoot, effectivePage, bootstrapHint])
+
+    useEffect(() => {
+        void reloadHub()
+    }, [currentProjectRoot])
+
+    useEffect(() => {
+        if (currentProjectRoot || !hubData || autoRedirectedRef.current) return
+        if (readLandingPreference() !== 'auto_last') return
+        const targetUrl = hubData?.current_project?.dashboard_url
+        if (!targetUrl) return
+        autoRedirectedRef.current = true
+        applyDashboardUrl(targetUrl)
+    }, [hubData, currentProjectRoot])
+
+    useEffect(() => {
+        if (!projectMode) {
+            coreRefreshSeqRef.current += 1
+            statusRefreshSeqRef.current += 1
+            optimisticTasksRef.current.clear()
+            setProjectInfo(null)
+            setLlmStatus(null)
+            setRagStatus(null)
+            setTasks([])
+            setSelectedTaskId(null)
+            setCoreLoadError(null)
+            setStatusLoadError(null)
+            setConnected(false)
+            return
+        }
         void flushCoreRefresh()
-    }, [])
+    }, [projectMode, currentProjectRoot])
 
     useEffect(() => {
-        writeDashboardPageToQuery(page)
-    }, [page])
-
-    useEffect(() => {
-        writeBootstrapHintToQuery(bootstrapHint)
-    }, [bootstrapHint])
-
-    useEffect(() => {
+        if (!projectMode) return () => {}
         void reloadServiceStatus()
         const dispose = subscribeSSE(
             () => {
@@ -136,9 +174,10 @@ export default function App() {
             statusRefreshSeqRef.current += 1
             setConnected(false)
         }
-    }, [])
+    }, [projectMode, currentProjectRoot])
 
     function scheduleCoreRefresh() {
+        if (!projectMode) return
         if (coreRefreshTimerRef.current) {
             window.clearTimeout(coreRefreshTimerRef.current)
         }
@@ -149,6 +188,7 @@ export default function App() {
     }
 
     async function flushCoreRefresh() {
+        if (!projectMode) return
         if (coreRefreshInFlightRef.current) {
             coreRefreshPendingRef.current = true
             return
@@ -170,9 +210,10 @@ export default function App() {
     }
 
     async function reloadCore(refreshId) {
+        const params = { project_root: currentProjectRoot }
         const [projectResult, tasksResult] = await Promise.allSettled([
-            fetchJSON('/api/project/info'),
-            fetchJSON('/api/tasks'),
+            fetchJSON('/api/project/info', params),
+            fetchJSON('/api/tasks', params),
         ])
         if (refreshId !== coreRefreshSeqRef.current) return
 
@@ -199,10 +240,11 @@ export default function App() {
     }
 
     async function reloadServiceStatus() {
+        const params = { project_root: currentProjectRoot }
         const refreshId = ++statusRefreshSeqRef.current
         const [llmResult, ragResult] = await Promise.allSettled([
-            fetchJSON('/api/llm/status'),
-            fetchJSON('/api/rag/status'),
+            fetchJSON('/api/llm/status', params),
+            fetchJSON('/api/rag/status', params),
         ])
         if (refreshId !== statusRefreshSeqRef.current) return
 
@@ -220,6 +262,30 @@ export default function App() {
         }
 
         setStatusLoadError(errors[0] || null)
+    }
+
+    async function reloadHub(options = {}) {
+        try {
+            const explicitProjectRoot = Object.prototype.hasOwnProperty.call(options, 'projectRoot')
+                ? options.projectRoot
+                : currentProjectRoot
+            const params = explicitProjectRoot ? { project_root: explicitProjectRoot } : {}
+            const payload = await fetchJSON('/api/workbench/hub', params)
+            setHubData(payload)
+            setHubLoadError(null)
+        } catch (error) {
+            setHubLoadError(normalizeError(error))
+        }
+    }
+
+    function applyDashboardUrl(nextUrl) {
+        const parsed = new URL(nextUrl, window.location.origin)
+        const nextProjectRoot = String(parsed.searchParams.get('project_root') || '').trim()
+        const nextPage = String(parsed.searchParams.get(DASHBOARD_PAGE_QUERY_KEY) || (nextProjectRoot ? 'control' : 'workbench')).trim()
+        const nextHint = String(parsed.searchParams.get(BOOTSTRAP_HINT_QUERY_KEY) || '').trim()
+        setCurrentProjectRoot(nextProjectRoot)
+        setPage(nextProjectRoot ? nextPage || 'control' : 'workbench')
+        setBootstrapHint(nextHint)
     }
 
     function handleTaskCreated(task) {
@@ -242,7 +308,7 @@ export default function App() {
     const selectedTask = useMemo(() => tasks.find((item) => item.id === selectedTaskId) || null, [tasks, selectedTaskId])
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
-    const projectTitle = projectMeta?.project_name || projectMeta?.title || dashboardContext?.title || '未加载项目'
+    const projectTitle = hubData?.current_project?.title || projectMeta?.project_name || projectMeta?.title || dashboardContext?.title || '未打开项目'
 
     return (
         <div className="shell">
@@ -252,10 +318,10 @@ export default function App() {
                     <div className="project-title">{projectTitle}</div>
                 </div>
                 <nav className="nav">
-                    {NAV_ITEMS.map((item) => (
+                    {navItems.map((item) => (
                         <button
                             key={item.id}
-                            className={`nav-button ${page === item.id ? 'active' : ''}`}
+                            className={`nav-button ${effectivePage === item.id ? 'active' : ''}`}
                             onClick={() => setPage(item.id)}
                         >
                             {item.label}
@@ -263,16 +329,33 @@ export default function App() {
                     ))}
                 </nav>
                 <div className="status-stack">
-                    <StatusPill tone={connected ? 'good' : 'danger'} label={connected ? '实时同步已连接' : '实时同步已断开'} />
-                    <StatusPill tone={getWritingModelTone(llmStatus)} label={formatWritingModelPill(llmStatus)} />
-                    <StatusPill tone={getRagTone(ragStatus)} label={formatRagStatusLabel(ragStatus)} />
+                    {projectMode ? (
+                        <>
+                            <StatusPill tone={connected ? 'good' : 'danger'} label={connected ? '实时同步已连接' : '实时同步已断开'} />
+                            <StatusPill tone={getWritingModelTone(llmStatus)} label={formatWritingModelPill(llmStatus)} />
+                            <StatusPill tone={getRagTone(ragStatus)} label={formatRagStatusLabel(ragStatus)} />
+                        </>
+                    ) : (
+                        <StatusPill tone="warning" label="工作台模式：尚未打开项目" />
+                    )}
                 </div>
             </aside>
 
             <main className="content">
-                <ErrorNotice error={coreLoadError} title="核心数据刷新失败" />
-                <ErrorNotice error={statusLoadError} title="模型状态刷新失败" />
-                {page === 'control' && (
+                <ErrorNotice error={hubLoadError} title="工作台刷新失败" />
+                {projectMode ? <ErrorNotice error={coreLoadError} title="核心数据刷新失败" /> : null}
+                {projectMode ? <ErrorNotice error={statusLoadError} title="模型状态刷新失败" /> : null}
+                {effectivePage === 'workbench' && (
+                    <WorkbenchPage
+                        hubData={hubData}
+                        currentProjectRoot={currentProjectRoot}
+                        landingPreferenceKey={LANDING_PREFERENCE_KEY}
+                        landingPreferences={LANDING_PREFERENCES}
+                        onNavigate={applyDashboardUrl}
+                        onRefresh={reloadHub}
+                    />
+                )}
+                {effectivePage === 'control' && projectMode && (
                     <ControlPage
                         projectInfo={projectInfo}
                         llmStatus={llmStatus}
@@ -281,13 +364,16 @@ export default function App() {
                         bootstrapHint={bootstrapHint}
                         onTaskCreated={handleTaskCreated}
                         onProjectBootstrapped={(response) => {
-                            if (response?.project_switch_required && response?.project_root) {
-                                const nextUrl = response.suggested_dashboard_url || `/?project_root=${encodeURIComponent(response.project_root)}&page=control&bootstrap_hint=planning`
-                                window.location.assign(nextUrl)
-                                return
+                            if (response?.suggested_dashboard_url || response?.project_root) {
+                                const nextUrl = response?.suggested_dashboard_url || `/?project_root=${encodeURIComponent(response.project_root)}&bootstrap_hint=planning`
+                                applyDashboardUrl(nextUrl)
                             }
-                            setBootstrapHint('planning')
-                            setPage('control')
+                            void reloadHub()
+                            scheduleCoreRefresh()
+                        }}
+                        onApiSettingsSaved={() => {
+                            void reloadHub()
+                            void reloadServiceStatus()
                             scheduleCoreRefresh()
                         }}
                         onOpenTask={handleOpenTask}
@@ -298,7 +384,7 @@ export default function App() {
                         }}
                     />
                 )}
-                {page === 'supervisor' && (
+                {effectivePage === 'supervisor' && projectMode && (
                     <SupervisorPage
                         projectInfo={projectInfo}
                         tasks={tasks}
@@ -307,7 +393,7 @@ export default function App() {
                         onTasksMutated={scheduleCoreRefresh}
                     />
                 )}
-                {page === 'supervisor-audit' && (
+                {effectivePage === 'supervisor-audit' && projectMode && (
                     <SupervisorAuditPage
                         projectInfo={projectInfo}
                         tasks={tasks}
@@ -316,7 +402,7 @@ export default function App() {
                         onTasksMutated={scheduleCoreRefresh}
                     />
                 )}
-                {page === 'tasks' && (
+                {effectivePage === 'tasks' && projectMode && (
                     <TaskCenterPage
                         tasks={tasks}
                         selectedTask={selectedTask}
@@ -325,9 +411,9 @@ export default function App() {
                         onNavigateOverview={() => setPage('control')}
                     />
                 )}
-                {page === 'data' && <DataPage refreshToken={coreRefreshVersion} />}
-                {page === 'files' && <FilesPage refreshToken={coreRefreshVersion} />}
-                {page === 'quality' && <QualityPage refreshToken={coreRefreshVersion} onMutated={scheduleCoreRefresh} />}
+                {effectivePage === 'data' && projectMode && <DataPage refreshToken={coreRefreshVersion} />}
+                {effectivePage === 'files' && projectMode && <FilesPage refreshToken={coreRefreshVersion} />}
+                {effectivePage === 'quality' && projectMode && <QualityPage refreshToken={coreRefreshVersion} onMutated={scheduleCoreRefresh} />}
             </main>
         </div>
     )
@@ -422,7 +508,7 @@ function formatRagErrorSummary(error) {
 }
 
 function readDashboardPageFromQuery() {
-    if (typeof window === 'undefined') return 'control'
+    if (typeof window === 'undefined') return 'workbench'
     const params = new URLSearchParams(window.location.search || '')
     const value = String(params.get(DASHBOARD_PAGE_QUERY_KEY) || '').trim()
     return NAV_ITEMS.some((item) => item.id === value) ? value : 'control'
@@ -434,32 +520,10 @@ function readBootstrapHintFromQuery() {
     return String(params.get(BOOTSTRAP_HINT_QUERY_KEY) || '').trim()
 }
 
-function writeDashboardPageToQuery(page) {
-    if (typeof window === 'undefined') return
+function readProjectRootFromQuery() {
+    if (typeof window === 'undefined') return ''
     const params = new URLSearchParams(window.location.search || '')
-    const value = String(page || 'control').trim()
-    if (!value || value === 'control') {
-        params.delete(DASHBOARD_PAGE_QUERY_KEY)
-    } else {
-        params.set(DASHBOARD_PAGE_QUERY_KEY, value)
-    }
-    const query = params.toString()
-    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`
-    window.history.replaceState({}, '', nextUrl)
-}
-
-function writeBootstrapHintToQuery(hint) {
-    if (typeof window === 'undefined') return
-    const params = new URLSearchParams(window.location.search || '')
-    const value = String(hint || '').trim()
-    if (!value) {
-        params.delete(BOOTSTRAP_HINT_QUERY_KEY)
-    } else {
-        params.set(BOOTSTRAP_HINT_QUERY_KEY, value)
-    }
-    const query = params.toString()
-    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`
-    window.history.replaceState({}, '', nextUrl)
+    return String(params.get('project_root') || '').trim()
 }
 
 function compareTaskFreshness(left, right) {
@@ -493,7 +557,7 @@ function mapContinuationToneToBadgeTone(tone) {
     return 'muted'
 }
 
-function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
+function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onApiSettingsSaved, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
     const [submittingActionKey, setSubmittingActionKey] = useState('')
@@ -619,7 +683,7 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, bootstrapHint, 
             <section className="panel full-span">
                 <div className="panel-title">API 接入设置</div>
                 <div className="empty-state">在这里填写写作模型和 RAG 接口配置，保存后会写入项目根目录 `.env` 并立即刷新当前面板状态。</div>
-                <ApiSettingsSection llmStatus={llmStatus} ragStatus={ragStatus} onSaved={() => onProjectBootstrapped()} />
+                <ApiSettingsSection llmStatus={llmStatus} ragStatus={ragStatus} onSaved={() => onApiSettingsSaved?.()} />
             </section>
         </div>
     )

@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 from subprocess import run
+import subprocess
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -41,6 +42,16 @@ from scripts.data_modules.state_file import (
     read_project_state,
     update_project_state,
 )
+from scripts.project_locator import (
+    clear_current_project_pointer,
+    get_workspace_registry_state,
+    get_workspace_root as resolve_workspace_root,
+    pin_workspace_project,
+    register_workspace_project,
+    remove_workspace_project,
+    resolve_workspace_current_project,
+    unpin_workspace_project,
+)
 
 from .orchestrator import OrchestrationService
 from .path_guard import safe_resolve
@@ -60,6 +71,8 @@ from .task_models import (
     ReviewDecisionRequest,
     SupervisorDismissRequest,
     TaskRequest,
+    WorkbenchProjectRequest,
+    WorkbenchToolRequest,
 )
 from .watcher import FileWatcher
 
@@ -112,6 +125,7 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
 
 
 _project_root: Path | None = None
+_workspace_root: Path | None = None
 _watcher = FileWatcher()
 STATIC_DIR = Path(__file__).parent / 'frontend' / 'dist'
 FILE_TREE_FOLDERS = ('正文', '大纲', '设定集')
@@ -155,6 +169,7 @@ HTTP_STATUS_MESSAGES = {
 HTTP_DETAIL_MESSAGE_MAP = {
     'Project already initialized.': '项目已初始化，不能重复创建。',
     'Project already initialized': '项目已初始化，不能重复创建。',
+    'Project not selected.': '当前还没有打开任何项目。',
     'state.json not found.': '未找到 state.json。',
     'Task not found.': '未找到任务。',
     'Project bootstrap failed': '项目初始化失败。',
@@ -194,10 +209,26 @@ def _get_cors_origins() -> list[str]:
     return origins
 
 
+def _get_workspace_root() -> Path:
+    if _workspace_root is not None:
+        return _workspace_root
+    if _project_root is not None:
+        return _project_root.parent
+    return resolve_workspace_root(cwd=Path.cwd())
+
+
 def _get_project_root() -> Path:
     if _project_root is None:
-        raise HTTPException(status_code=500, detail='未配置项目根目录。')
+        raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
     return _project_root
+
+
+def _try_get_project_root() -> Path | None:
+    return _project_root
+
+
+def _resolve_project_root_input(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve()
 
 
 def _webnovel_dir(project_root: Path | None = None) -> Path:
@@ -211,20 +242,28 @@ def _state_path(project_root: Path | None = None) -> Path:
     return _webnovel_dir(project_root) / 'state.json'
 
 
-def create_app(project_root: str | Path | None = None) -> FastAPI:
-    global _project_root
+def create_app(project_root: str | Path | None = None, workspace_root: str | Path | None = None) -> FastAPI:
+    global _project_root, _workspace_root
 
-    if project_root:
-        _project_root = Path(project_root).resolve()
+    _project_root = Path(project_root).resolve() if project_root else None
+    if workspace_root:
+        _workspace_root = Path(workspace_root).resolve()
+    elif _project_root is not None:
+        _workspace_root = _project_root.parent
+    else:
+        _workspace_root = resolve_workspace_root(cwd=Path.cwd())
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         app.state.dashboard_loop = asyncio.get_running_loop()
         app.state.orchestrators = {}
-        webnovel = _webnovel_dir()
-        if webnovel.is_dir():
-            _watcher.start(webnovel, app.state.dashboard_loop)
-        app.state.orchestrator = _get_orchestrator_for_root(_get_project_root(), refresh=True)
+        app.state.workspace_root = _get_workspace_root()
+        app.state.orchestrator = None
+        if _try_get_project_root() is not None:
+            webnovel = _webnovel_dir(_get_project_root())
+            if webnovel.is_dir():
+                _watcher.start(webnovel, app.state.dashboard_loop)
+            app.state.orchestrator = _get_orchestrator_for_root(_get_project_root(), refresh=True)
         try:
             yield
         finally:
@@ -242,8 +281,14 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
     def _resolve_request_project_root(http_request: Request | None = None, *, explicit_root: Optional[str] = None) -> Path:
         candidate = explicit_root or (http_request.query_params.get('project_root') if http_request else None)
         if candidate:
-            return Path(candidate).resolve()
+            return _resolve_project_root_input(candidate)
         return _get_project_root()
+
+    def _try_resolve_request_project_root(http_request: Request | None = None, *, explicit_root: Optional[str] = None) -> Path | None:
+        candidate = explicit_root or (http_request.query_params.get('project_root') if http_request else None)
+        if candidate:
+            return _resolve_project_root_input(candidate)
+        return _try_get_project_root()
 
     def _ensure_project_watch(project_root_value: Path) -> None:
         loop = getattr(app.state, 'dashboard_loop', None)
@@ -260,13 +305,143 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             orchestrator = OrchestrationService(project_root_value)
             registry[root_key] = orchestrator
         _ensure_project_watch(project_root_value)
-        if root_key == str(_get_project_root()):
+        current_root = _try_get_project_root()
+        if current_root is not None and root_key == str(current_root):
             app.state.orchestrator = orchestrator
         return orchestrator
 
     def _get_request_orchestrator(http_request: Request | None = None, *, explicit_root: Optional[str] = None, refresh: bool = False) -> OrchestrationService:
         project_root_value = _resolve_request_project_root(http_request, explicit_root=explicit_root)
         return _get_orchestrator_for_root(project_root_value, refresh=refresh)
+
+    def _workspace_state() -> dict[str, Any]:
+        return get_workspace_registry_state(workspace_root=_get_workspace_root())
+
+    def _load_project_snapshot(project_root_value: Path) -> dict[str, Any]:
+        project_state = {
+            'project_root': str(project_root_value),
+            'exists': project_root_value.exists(),
+            'is_initialized': False,
+            'is_missing': False,
+            'is_corrupted': False,
+            'title': '',
+            'genre': '',
+            'current_chapter': 0,
+            'total_words': 0,
+            'last_opened_at': '',
+            'pinned': False,
+            'current': False,
+        }
+        if not project_root_value.exists():
+            project_state['is_missing'] = True
+            return project_state
+
+        state_path_value = project_root_value / '.webnovel' / 'state.json'
+        if not state_path_value.is_file():
+            return project_state
+
+        try:
+            payload = read_project_state(project_root_value, strict=True)
+        except ProjectStateCorruptedError:
+            project_state['is_corrupted'] = True
+            return project_state
+        except ProjectStateNotFoundError:
+            return project_state
+
+        project_info_payload = payload.get('project_info') or {}
+        progress_payload = payload.get('progress') or {}
+        project_state.update(
+            {
+                'is_initialized': True,
+                'title': str(project_info_payload.get('title') or payload.get('project_name') or '').strip(),
+                'genre': str(project_info_payload.get('genre') or '').strip(),
+                'current_chapter': int(progress_payload.get('current_chapter') or 0),
+                'total_words': int(progress_payload.get('total_words') or 0),
+            }
+        )
+        return project_state
+
+    def _build_project_dashboard_url(project_root_value: Path, *, page: str = 'control', bootstrap_hint: str = '') -> str:
+        params = [f"project_root={quote(str(project_root_value))}"]
+        if page and page != 'control':
+            params.append(f"page={quote(page)}")
+        if bootstrap_hint:
+            params.append(f"bootstrap_hint={quote(bootstrap_hint)}")
+        query = '&'.join(params)
+        return f"/?{query}" if query else '/'
+
+    def _build_workbench_hub_payload(http_request: Request | None = None) -> dict[str, Any]:
+        workspace_state = _workspace_state()
+        entry = dict(workspace_state['entry'])
+        current_root_value = _try_resolve_request_project_root(http_request)
+        if current_root_value is None:
+            current_root_value = resolve_workspace_current_project(workspace_root=_get_workspace_root())
+        recent_index = {
+            str(item.get('project_root') or '').strip(): str(item.get('last_opened_at') or '').strip()
+            for item in entry.get('recent_projects') or []
+            if str(item.get('project_root') or '').strip()
+        }
+        pinned_paths = [str(item).strip() for item in entry.get('pinned_project_roots') or [] if str(item).strip()]
+        candidate_paths: list[str] = []
+        if current_root_value is not None:
+            candidate_paths.append(str(current_root_value))
+        for raw in pinned_paths:
+            if raw not in candidate_paths:
+                candidate_paths.append(raw)
+        for raw in recent_index.keys():
+            if raw not in candidate_paths:
+                candidate_paths.append(raw)
+
+        project_items: list[dict[str, Any]] = []
+        missing_items: list[dict[str, Any]] = []
+        for raw_path in candidate_paths:
+            snapshot = _load_project_snapshot(_resolve_project_root_input(raw_path))
+            snapshot['last_opened_at'] = recent_index.get(raw_path, '')
+            snapshot['pinned'] = raw_path in pinned_paths
+            snapshot['current'] = current_root_value is not None and str(current_root_value) == raw_path
+            snapshot['dashboard_url'] = _build_project_dashboard_url(Path(raw_path))
+            if snapshot['is_missing'] or snapshot['is_corrupted'] or (snapshot['exists'] and not snapshot['is_initialized']):
+                missing_items.append(snapshot)
+            else:
+                project_items.append(snapshot)
+
+        current_project = next((item for item in project_items if item.get('current')), None)
+        recommendations: list[dict[str, Any]] = []
+        if current_project is None:
+            recommendations.append(
+                {
+                    'kind': 'pick-or-create',
+                    'label': '先打开一个项目，或新建一个小说项目。',
+                }
+            )
+        else:
+            recommendations.append(
+                {
+                    'kind': 'open-current-project',
+                    'label': f"继续项目：{current_project.get('title') or current_project.get('project_root')}",
+                    'dashboard_url': current_project.get('dashboard_url'),
+                }
+            )
+            if not current_project.get('title') or not current_project.get('genre'):
+                recommendations.append({'kind': 'planning-profile', 'label': '先完善 Planning Profile。'})
+
+        return {
+            'workspace_root': workspace_state['workspace_root'],
+            'registry_path': workspace_state['registry_path'],
+            'landing_preferences': ['hub', 'auto_last'],
+            'current_project': current_project,
+            'projects': project_items,
+            'recent_projects': [item for item in project_items if item.get('last_opened_at')],
+            'pinned_projects': [item for item in project_items if item.get('pinned')],
+            'missing_projects': missing_items,
+            'recommendations': recommendations,
+            'tools': {
+                'login-codex': {'enabled': True},
+                'open-guide': {'enabled': True},
+                'open-shell': {'enabled': current_project is not None},
+                'start-lan-dashboard': {'enabled': current_project is not None},
+            },
+        }
 
     def _looks_like_english_message(text: str) -> bool:
         return bool(text) and text.isascii()
@@ -867,6 +1042,138 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             normalized.append(item)
         return normalized
 
+    def _pick_folder_via_powershell() -> str:
+        command = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$dlg.Description = '请选择小说项目文件夹'; "
+            "$dlg.ShowNewFolderButton = $true; "
+            "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+            "  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "  Write-Output $dlg.SelectedPath"
+            "}"
+        )
+        completed = run(
+            ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=False,
+        )
+        if completed.returncode not in (0, 1):
+            raise APIError(
+                500,
+                'FOLDER_PICKER_FAILED',
+                '系统文件夹选择器启动失败。',
+                {'stdout': completed.stdout, 'stderr': completed.stderr},
+            )
+        return str(completed.stdout or '').strip()
+
+    def _launch_workbench_tool(action: str, project_root_value: Path | None = None) -> dict[str, Any]:
+        tools_root = Path(__file__).resolve().parents[3] / 'tools'
+        launcher_path = tools_root / 'Start-Webnovel-Writer.ps1'
+        if not launcher_path.is_file():
+            raise APIError(500, 'WORKBENCH_TOOL_UNAVAILABLE', '未找到启动器脚本。')
+
+        if action == 'login-codex':
+            arg_list = ['login']
+        elif action == 'open-guide':
+            arg_list = ['readme']
+        elif action == 'start-lan-dashboard':
+            if project_root_value is None:
+                raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
+            arg_list = ['dashboard-lan', '-ProjectRoot', str(project_root_value)]
+        elif action == 'open-shell':
+            if project_root_value is None:
+                raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
+            arg_list = ['shell', '-ProjectRoot', str(project_root_value)]
+        else:
+            raise APIError(404, 'WORKBENCH_TOOL_NOT_FOUND', '未找到对应的工具动作。')
+
+        completed = run(
+            ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(launcher_path), *arg_list],
+            cwd=str(tools_root.parent),
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise APIError(
+                500,
+                'WORKBENCH_TOOL_FAILED',
+                '工具动作执行失败。',
+                {'stdout': completed.stdout, 'stderr': completed.stderr, 'action': action},
+            )
+        return {'launched': True, 'action': action}
+
+    @app.get('/api/workbench/hub')
+    def workbench_hub(request: Request):
+        return _build_workbench_hub_payload(request)
+
+    @app.post('/api/workbench/pick-folder')
+    async def pick_workbench_folder():
+        selected_path = await asyncio.to_thread(_pick_folder_via_powershell)
+        return {
+            'selected': bool(selected_path),
+            'project_root': selected_path,
+        }
+
+    @app.post('/api/workbench/open-project')
+    async def open_workbench_project(request: WorkbenchProjectRequest):
+        target_root = _resolve_project_root_input(request.project_root)
+        if not target_root.exists():
+            raise APIError(404, 'NOT_FOUND', '未找到指定的项目目录。')
+        if not target_root.is_dir():
+            raise APIError(409, 'BAD_REQUEST', '目标路径不是目录。')
+
+        state_path_value = target_root / '.webnovel' / 'state.json'
+        if not state_path_value.is_file():
+            return {
+                'opened': False,
+                'project_root': str(target_root),
+                'project_initialized': False,
+                'project_exists': True,
+                'suggested_dashboard_url': '',
+                'next_recommended_action': '该目录还没有初始化，可以直接改为新建项目。',
+            }
+
+        try:
+            read_project_state(target_root, strict=True)
+        except ProjectStateCorruptedError as exc:
+            raise APIError(409, 'STATE_FILE_CORRUPTED', '项目状态文件损坏，无法打开。', {'error': str(exc)})
+
+        register_workspace_project(workspace_root=_get_workspace_root(), project_root=target_root, make_current=True)
+        return {
+            'opened': True,
+            'project_root': str(target_root),
+            'project_initialized': True,
+            'suggested_dashboard_url': _build_project_dashboard_url(target_root),
+            'next_recommended_action': '已切换到该项目。',
+        }
+
+    @app.post('/api/workbench/pin-project')
+    async def pin_workbench_project(request: WorkbenchProjectRequest):
+        entry = pin_workspace_project(workspace_root=_get_workspace_root(), project_root=request.project_root)
+        return {'saved': True, 'entry': entry}
+
+    @app.post('/api/workbench/unpin-project')
+    async def unpin_workbench_project(request: WorkbenchProjectRequest):
+        entry = unpin_workspace_project(workspace_root=_get_workspace_root(), project_root=request.project_root)
+        return {'saved': True, 'entry': entry}
+
+    @app.post('/api/workbench/remove-project')
+    async def remove_workbench_project(request: WorkbenchProjectRequest):
+        entry = remove_workspace_project(workspace_root=_get_workspace_root(), project_root=request.project_root)
+        return {'saved': True, 'entry': entry}
+
+    @app.post('/api/workbench/tools/{action}')
+    async def run_workbench_tool(action: str, request: WorkbenchToolRequest):
+        project_root_value = _try_resolve_request_project_root(explicit_root=request.project_root)
+        return await asyncio.to_thread(_launch_workbench_tool, action, project_root_value)
+
     @app.get('/api/project/info')
     def project_info(request: Request):
         project_root_value = _resolve_request_project_root(request)
@@ -944,7 +1251,8 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
                 'original_message': 'Project bootstrap did not create state.json',
             })
         _ensure_project_watch(target_root)
-        current_root = _resolve_request_project_root(http_request)
+        register_workspace_project(workspace_root=_get_workspace_root(), project_root=target_root, make_current=True)
+        current_root = _try_resolve_request_project_root(http_request)
         planning_payload = _planning_profile_payload(_read_state_data(target_root), target_root)
         return {
             'created': True,
@@ -952,8 +1260,8 @@ def create_app(project_root: str | Path | None = None) -> FastAPI:
             'title': title,
             'genre': genre,
             'state_file': str(state_path),
-            'project_switch_required': str(target_root) != str(current_root),
-            'suggested_dashboard_url': f"/?project_root={quote(str(target_root))}&page=control&bootstrap_hint=planning",
+            'project_switch_required': current_root is None or str(target_root) != str(current_root),
+            'suggested_dashboard_url': _build_project_dashboard_url(target_root, bootstrap_hint='planning'),
             'planning_profile': planning_payload,
             'next_recommended_action': '项目已初始化。下一步请先确认规划信息，再运行 plan。',
         }
