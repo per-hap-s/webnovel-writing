@@ -205,10 +205,10 @@ export function AlignmentResultsSection({ storyAlignment, directorAlignment }) {
             <div className="subsection-title">执行对齐结果</div>
             <div className="summary-grid">
                 {hasAlignment(storyAlignment) ? (
-                    <AlignmentCard title="Story Alignment" alignment={storyAlignment} />
+                    <AlignmentCard title="剧情对齐" alignment={storyAlignment} />
                 ) : null}
                 {hasAlignment(directorAlignment) ? (
-                    <AlignmentCard title="Director Alignment" alignment={directorAlignment} />
+                    <AlignmentCard title="章节目标对齐" alignment={directorAlignment} />
                 ) : null}
             </div>
         </div>
@@ -238,7 +238,7 @@ export function StoryRefreshSection({ storyRefresh, canRefreshStoryPlan, onRetry
                 {canRefreshStoryPlan ? (
                     <div className="button-row">
                         <button className="primary-button" onClick={onRetryStory}>
-                            从 Story Director 重新规划
+                            刷新后续章节规划并重跑本章
                         </button>
                     </div>
                 ) : null}
@@ -250,10 +250,17 @@ export function StoryRefreshSection({ storyRefresh, canRefreshStoryPlan, onRetry
 export function ReviewSummarySection({ summary, MetricCard }) {
     if (!hasReviewSummary(summary)) return null
     const issues = Array.isArray(summary.issues) ? summary.issues : []
-    const reviewers = Array.isArray(summary.reviewers) ? summary.reviewers : []
+    const reviewers = (Array.isArray(summary.reviewers) ? summary.reviewers : [])
+        .map((item) => {
+            if (!item) return ''
+            if (typeof item === 'string') return item
+            if (typeof item === 'object') return item.label || item.name || item.id || item.reviewer || ''
+            return String(item)
+        })
+        .filter(Boolean)
     return (
         <div className="subsection">
-            <div className="subsection-title">审查摘要</div>
+            <div className="subsection-title">问题汇总</div>
             <div className="planning-warning subtle">
                 <div className="detail-grid">
                     <MetricCard label="总评分" value={String(summary.overall_score ?? '-')} />

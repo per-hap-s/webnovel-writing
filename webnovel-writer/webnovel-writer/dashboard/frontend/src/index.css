@@ -462,6 +462,17 @@ pre {
     padding: 0 14px 12px;
     display: flex;
     justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.detail-action-bar {
+    position: sticky;
+    top: 12px;
+    z-index: 2;
+    margin-top: 18px;
+}
+.detail-action-bar .subsection-title {
+    margin-bottom: 10px;
 }
 .runtime-badge {
     display: inline-flex;

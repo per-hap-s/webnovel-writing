@@ -138,7 +138,7 @@ RUNTIME_EVENT_LABELS = {
     "writeback_rollback_finished": "失败写回已回滚",
 }
 
-ACTIVE_RUNTIME_STATES = {"running", "retrying"}
+ACTIVE_RUNTIME_STATES = {"running", "retrying", "resuming_writeback"}
 LLM_STATUS_SUCCESS_FRESH_SECONDS = int(os.environ.get("WEBNOVEL_LLM_STATUS_SUCCESS_FRESH_SECONDS", "1800"))
 EXTERNAL_WORKFLOW_STEPS = {
     "init",
@@ -207,11 +207,32 @@ class OrchestrationService:
     def list_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [self._with_runtime_status(task) for task in self.store.list_tasks(limit=limit)]
 
+    def list_task_summaries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        tasks = [self._with_runtime_status_summary(task) for task in self.store.list_tasks(limit=limit)]
+        tasks.sort(
+            key=lambda item: (
+                int(item.get("list_priority") or 99),
+                -(
+                    (self._parse_iso_datetime(item.get("updated_at") or item.get("created_at")) or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp()
+                ),
+            ),
+        )
+        return tasks
+
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         task = self.store.get_task(task_id)
         if task is None:
             return None
         return self._with_runtime_status(task)
+
+    def get_task_detail(self, task_id: str, *, event_limit: int = 200) -> Optional[Dict[str, Any]]:
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        return {
+            "task": task,
+            "events": self.get_events(task_id, limit=event_limit),
+        }
 
     def get_events(self, task_id: str, limit: int = 200) -> List[Dict[str, Any]]:
         return self.store.get_events(task_id, limit=limit)
@@ -2032,6 +2053,13 @@ class OrchestrationService:
         task_copy = dict(task)
         events = self.store.get_events(task["id"], limit=80)
         task_copy["runtime_status"] = self._build_runtime_status(task_copy, events)
+        task_copy["list_priority"] = self._build_task_list_priority(task_copy)
+        return task_copy
+
+    def _with_runtime_status_summary(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task_copy = dict(task)
+        task_copy["runtime_status"] = self._build_runtime_status_summary(task_copy)
+        task_copy["list_priority"] = self._build_task_list_priority(task_copy)
         return task_copy
 
     def _build_runtime_status(self, task: Dict[str, Any], events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2125,6 +2153,135 @@ class OrchestrationService:
             "suggested_resume_step": task_error_details.get("suggested_resume_step") if isinstance(task_error_details, dict) else None,
         }
 
+    def _build_runtime_status_summary(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        runtime_meta = task.get("runtime_meta") or {}
+        last_event = runtime_meta.get("last_event") if isinstance(runtime_meta, dict) else None
+        last_non_heartbeat_event = runtime_meta.get("last_non_heartbeat_event") if isinstance(runtime_meta, dict) else None
+        step_key = self._resolve_runtime_step_key(task, [event for event in (last_non_heartbeat_event, last_event) if isinstance(event, dict)])
+        step_result = ((task.get("artifacts") or {}).get("step_results") or {}).get(step_key or "", {})
+        payload = (last_event or {}).get("payload") or {}
+        attempt = payload.get("attempt") or ((step_result.get("metadata") or {}).get("attempt") or (step_result.get("error") or {}).get("attempt") or 1)
+        try:
+            retry_count = int(payload.get("retry_count") if payload.get("retry_count") is not None else max(0, int(attempt or 1) - 1))
+        except (TypeError, ValueError):
+            retry_count = 0
+        timeout_seconds = payload.get("timeout_seconds")
+        if timeout_seconds is None and step_key:
+            timeout_seconds = self._runner_timeout_seconds(step_key)
+        retryable = payload.get("retryable")
+        if retryable is None:
+            retryable = (task.get("error") or {}).get("retryable", (step_result.get("error") or {}).get("retryable"))
+        error_code = payload.get("error_code") or (task.get("error") or {}).get("code") or (step_result.get("error") or {}).get("code")
+        http_status = payload.get("http_status") or (task.get("error") or {}).get("http_status")
+        step_state = self._resolve_runtime_step_state(task, last_event if isinstance(last_event, dict) else None, attempt=attempt)
+        step_started_at = self._resolve_summary_step_started_at(task, step_key, last_event if isinstance(last_event, dict) else None)
+        waiting_since = self._resolve_summary_waiting_since(task, step_state, last_event if isinstance(last_event, dict) else None)
+        last_activity_at = self._resolve_last_activity_at(
+            task,
+            last_event if isinstance(last_event, dict) else None,
+            str((last_non_heartbeat_event or {}).get("timestamp") or "") or None,
+        )
+        running_seconds = self._resolve_summary_runtime_seconds(task, step_state, step_started_at)
+        waiting_seconds = self._resolve_summary_waiting_seconds(task, step_state, waiting_since)
+        phase_label = self._resolve_phase_label(task, step_key)
+        last_event_label = self._translate_runtime_event(last_event if isinstance(last_event, dict) else None)
+        error_code, http_status, retryable = self._resolve_runtime_error_fields(
+            task,
+            step_state,
+            error_code=error_code,
+            http_status=http_status,
+            retryable=retryable,
+        )
+        task_error_details = task.get("error", {}).get("details") if isinstance(task.get("error"), dict) else {}
+        return {
+            "phase_label": phase_label,
+            "target_label": self._build_runtime_target_label(task),
+            "phase_detail": self._resolve_phase_detail(task, step_key, step_state, last_event if isinstance(last_event, dict) else None, running_seconds, waiting_seconds),
+            "step_key": step_key,
+            "step_state": step_state,
+            "running_seconds": running_seconds,
+            "waiting_seconds": waiting_seconds,
+            "attempt": attempt,
+            "retry_count": retry_count,
+            "timeout_seconds": timeout_seconds,
+            "retryable": retryable,
+            "last_event_label": last_event_label,
+            "last_event_message": (last_event or {}).get("message"),
+            "last_event_at": (last_event or {}).get("timestamp") or task.get("updated_at"),
+            "last_activity_at": last_activity_at,
+            "last_non_heartbeat_activity_at": (last_non_heartbeat_event or {}).get("timestamp") or task.get("updated_at"),
+            "step_started_at": self._format_runtime_datetime(step_started_at),
+            "waiting_since": self._format_runtime_datetime(waiting_since),
+            "error_code": error_code,
+            "http_status": http_status,
+            "recoverability": task_error_details.get("recoverability") if isinstance(task_error_details, dict) else None,
+            "suggested_resume_step": task_error_details.get("suggested_resume_step") if isinstance(task_error_details, dict) else None,
+        }
+
+    def _resolve_summary_step_started_at(
+        self,
+        task: Dict[str, Any],
+        step_key: Optional[str],
+        last_event: Optional[Dict[str, Any]],
+    ) -> Optional[datetime]:
+        timestamp = None
+        if isinstance(last_event, dict):
+            timestamp = self._parse_iso_datetime(last_event.get("timestamp"))
+        if str(task.get("status") or "") in {"running", "retrying", "resuming_writeback"}:
+            return timestamp or self._parse_iso_datetime(task.get("updated_at")) or self._parse_iso_datetime(task.get("started_at"))
+        return timestamp or self._parse_iso_datetime(task.get("started_at"))
+
+    def _resolve_summary_waiting_since(
+        self,
+        task: Dict[str, Any],
+        step_state: str,
+        last_event: Optional[Dict[str, Any]],
+    ) -> Optional[datetime]:
+        if step_state not in ACTIVE_RUNTIME_STATES:
+            return None
+        message = str((last_event or {}).get("message") or "")
+        if message in {"llm_request_started", "request_dispatched", "awaiting_model_response", "step_heartbeat"}:
+            return self._parse_iso_datetime((last_event or {}).get("timestamp")) or self._parse_iso_datetime(task.get("updated_at"))
+        return None
+
+    def _resolve_summary_runtime_seconds(
+        self,
+        task: Dict[str, Any],
+        step_state: str,
+        step_started_at: Optional[datetime],
+    ) -> int:
+        if step_state in {"completed", "failed", "interrupted", "cancelled", "rejected", "waiting_approval"}:
+            end_dt = self._parse_iso_datetime(task.get("finished_at") or task.get("interrupted_at") or task.get("updated_at"))
+            return self._seconds_between(step_started_at, end_dt)
+        return self._seconds_between(step_started_at, datetime.now(timezone.utc))
+
+    def _resolve_summary_waiting_seconds(
+        self,
+        task: Dict[str, Any],
+        step_state: str,
+        waiting_since: Optional[datetime],
+    ) -> int:
+        if waiting_since is None:
+            return 0
+        if step_state == "waiting_approval":
+            end_dt = self._parse_iso_datetime(task.get("updated_at")) or datetime.now(timezone.utc)
+            return self._seconds_between(waiting_since, end_dt)
+        return self._seconds_between(waiting_since, datetime.now(timezone.utc))
+
+    def _build_task_list_priority(self, task: Dict[str, Any]) -> int:
+        status = str(task.get("status") or "")
+        if status == "awaiting_writeback_approval":
+            return 0
+        if status in {"running", "retrying", "resuming_writeback"}:
+            return 1
+        if status in {"failed", "interrupted"}:
+            return 3 if (task.get("runtime_status") or {}).get("retryable") is False else 2
+        if status == "rejected":
+            return 4
+        if status == "completed":
+            return 5
+        return 2
+
     def _build_runtime_target_label(self, task: Dict[str, Any]) -> Optional[str]:
         request = task.get("request") or {}
         task_type = str(task.get("task_type") or "")
@@ -2197,6 +2354,10 @@ class OrchestrationService:
             return "执行失败"
         if task.get("status") == "awaiting_writeback_approval":
             return "回写审批"
+        if task.get("status") == "resuming_writeback":
+            return "回写同步"
+        if task.get("status") == "retrying":
+            return "准备重试"
         return "等待执行"
 
     def _resolve_runtime_step_state(
@@ -2217,6 +2378,10 @@ class OrchestrationService:
             return "failed"
         if status == "completed":
             return "completed"
+        if status == "retrying":
+            return "retrying"
+        if status == "resuming_writeback":
+            return "resuming_writeback"
         if status != "running":
             return "idle"
         if last_event and str(last_event.get("message") or "") in {"step_retry_scheduled", "step_retry_started"}:
@@ -2381,7 +2546,7 @@ class OrchestrationService:
         http_status: Any,
         retryable: Any,
     ) -> tuple[Any, Any, Any]:
-        if step_state in {"completed", "waiting_approval", "running", "retrying", "idle"}:
+        if step_state in {"completed", "waiting_approval", "running", "retrying", "resuming_writeback", "idle"}:
             return None, None, None
         task_error = task.get("error") or {}
         return (
@@ -2447,6 +2612,8 @@ class OrchestrationService:
             return "当前规划信息不足，需要先回总览页补录后再运行 plan。"
         if step_state == "waiting_approval":
             return "已进入回写审批点，等待人工确认。"
+        if step_state == "resuming_writeback":
+            return "你已批准回写，系统正在继续执行写回与项目同步。"
         if step_state == "interrupted":
             return "任务在服务重启或执行中断后暂停，可重试或恢复。"
         if step_state == "cancelled":
@@ -2511,6 +2678,8 @@ class OrchestrationService:
             if attempt:
                 return f"正在进行第 {attempt} 次尝试。"
             return "步骤重试已开始。"
+        if message == "Writeback approved":
+            return "你已批准回写，系统正在继续执行后续写回步骤。"
         if message == "Resume target scheduled":
             return "已提交恢复执行，目标任务正在继续推进。"
         if message == "Resume target already running":
@@ -2731,7 +2900,8 @@ class OrchestrationService:
             task_id,
             "info",
             "Retry requested",
-            payload={"resume_from_step": target_step, "preserve_approval": preserve_approval},
+            step_name=target_step,
+            payload={"resume_from_step": target_step, "preserve_approval": preserve_approval, "attempt": 1},
         )
         self._schedule(task_id, resume_from_step=target_step)
         return self.store.get_task(task_id)
@@ -2761,8 +2931,15 @@ class OrchestrationService:
         task = self.store.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
-        self.store.update_task(task_id, approval_status="approved", status="queued")
-        self.store.append_event(task_id, "info", "Writeback approved", payload={"reason": reason})
+        resume_step = task.get("current_step") or "approval-gate"
+        self.store.update_task(task_id, approval_status="approved", status="resuming_writeback")
+        self.store.append_event(
+            task_id,
+            "info",
+            "Writeback approved",
+            step_name=resume_step,
+            payload={"reason": reason, "resume_from_step": resume_step},
+        )
         self._schedule(task_id, resume_from_step=task.get("current_step") or "approval-gate")
         return self.store.get_task(task_id)
 
@@ -2900,7 +3077,7 @@ class OrchestrationService:
                     )
                     return
 
-                apply_error = self._apply_step_side_effects(task_id, step, result.structured_output or {})
+                apply_error = await self._apply_step_side_effects(task_id, step, result.structured_output or {})
                 if apply_error:
                     self.store.mark_failed(task_id, current_step_name, apply_error)
                     self.store.append_event(task_id, "error", "Step writeback failed", step_name=current_step_name, payload=apply_error)
@@ -4876,7 +5053,7 @@ class OrchestrationService:
             summary_max_chars,
         )
 
-    def _apply_step_side_effects(self, task_id: str, step: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    async def _apply_step_side_effects(self, task_id: str, step: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
         task = self.store.get_task(task_id)
         if task is None:
             return {"code": "TASK_NOT_FOUND", "message": f"未找到任务：{task_id}"}
@@ -4886,9 +5063,9 @@ class OrchestrationService:
                 if step_name == "context":
                     self._sync_context_story_contract(task_id, task, payload)
                 elif step_name == "data-sync":
-                    self._apply_write_data_sync(task_id, task, payload)
+                    await self._apply_write_data_sync(task_id, task, payload)
             elif task.get("task_type") == "plan" and step_name == "plan":
-                self._apply_plan_writeback(task_id, task, payload)
+                await self._apply_plan_writeback(task_id, task, payload)
         except WritebackConsistencyError as exc:
             error_msg = f"步骤 {step_name} 写回一致性校验失败：{exc}"
             logger.error("Task %s step %s writeback consistency failed: %s", task_id, step_name, exc, exc_info=True)
@@ -5624,7 +5801,7 @@ class OrchestrationService:
         self.store.save_step_result(task_id, "context", updated_result)
         self.store.append_event(task_id, "info", "Context story contract synced", step_name="context", payload={"chapter": chapter})
 
-    def _apply_write_data_sync(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    async def _apply_write_data_sync(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
         request = task.get("request") or {}
         chapter = int(request.get("chapter") or 0)
         if chapter <= 0:
@@ -5761,7 +5938,7 @@ class OrchestrationService:
                 summary_content=summary_content,
                 content=content,
             )
-            self._sync_core_setting_docs(
+            await self._sync_core_setting_docs(
                 task_id=task_id,
                 trigger="write",
                 chapter=chapter,
@@ -5803,7 +5980,7 @@ class OrchestrationService:
                 raise WritebackConsistencyError(f"{exc}; rollback_error={rollback_error}") from exc
             raise
 
-    def _apply_plan_writeback(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    async def _apply_plan_writeback(self, task_id: str, task: Dict[str, Any], payload: Dict[str, Any]) -> None:
         if self._is_plan_payload_blocked(payload):
             return
         request = task.get("request") or {}
@@ -5840,7 +6017,7 @@ class OrchestrationService:
                 )
 
         self._update_state_data(_mutate)
-        self._sync_core_setting_docs(
+        await self._sync_core_setting_docs(
             task_id=task_id,
             trigger="plan",
             chapter=None,
@@ -8311,7 +8488,7 @@ class OrchestrationService:
             alignment[key] = self._normalize_director_text_list(alignment[key], limit=20)
         return alignment
 
-    def _sync_core_setting_docs(
+    async def _sync_core_setting_docs(
         self,
         *,
         task_id: str,
@@ -8321,8 +8498,9 @@ class OrchestrationService:
         state_payload: Optional[Dict[str, Any]],
         structured_sync: Optional[Dict[str, Any]],
     ) -> None:
-        state_data = self._read_state_data()
-        sync_input = self._build_setting_sync_input(
+        state_data = await asyncio.to_thread(self._read_state_data)
+        sync_input = await asyncio.to_thread(
+            self._build_setting_sync_input,
             state_data=state_data,
             trigger=trigger,
             chapter=chapter,
@@ -8330,7 +8508,7 @@ class OrchestrationService:
             state_payload=state_payload,
             structured_sync=structured_sync,
         )
-        generated = self._generate_setting_docs(sync_input)
+        generated = await asyncio.to_thread(self._generate_setting_docs, sync_input)
         changed_paths: List[str] = []
         for key, path in SETTING_DOC_PATHS.items():
             content = str(generated.get(key) or "").strip()

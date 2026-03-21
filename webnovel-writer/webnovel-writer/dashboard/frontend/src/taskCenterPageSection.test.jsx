@@ -43,6 +43,8 @@ function renderTaskCenter(tasks, selectedTask, overrides = {}) {
         <TaskCenterPageSection
             tasks={tasks}
             selectedTask={selectedTask}
+            selectedTaskId={overrides.selectedTaskId ?? selectedTask?.id ?? null}
+            currentProjectRoot={overrides.currentProjectRoot || ''}
             onSelectTask={overrides.onSelectTask || vi.fn()}
             onMutated={overrides.onMutated || vi.fn()}
             onNavigateOverview={overrides.onNavigateOverview || vi.fn()}
@@ -64,6 +66,62 @@ beforeEach(() => {
     fetchJSONMock.mockReset()
     postJSONMock.mockReset()
     fetchJSONMock.mockResolvedValue([])
+})
+
+test('task detail fetch includes explicit project_root in shell mode', async () => {
+    const task = {
+        id: 'task-shell-1',
+        task_type: 'review',
+        status: 'awaiting_writeback_approval',
+        current_step: 'approval-gate',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: {},
+        request: { chapter_range: '1-3' },
+    }
+
+    fetchJSONMock.mockResolvedValueOnce({
+        task,
+        events: [],
+    })
+
+    renderTaskCenter([task], task, { currentProjectRoot: 'C:/novel-shell' })
+
+    await waitFor(() => {
+        expect(fetchJSONMock).toHaveBeenCalledWith('/api/tasks/task-shell-1/detail', { project_root: 'C:/novel-shell' })
+    })
+})
+
+test('approval action includes explicit project_root in shell mode', async () => {
+    const user = userEvent.setup()
+    const onMutated = vi.fn()
+    const task = {
+        id: 'task-approval-1',
+        task_type: 'review',
+        status: 'awaiting_writeback_approval',
+        current_step: 'approval-gate',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: {},
+        request: { chapter_range: '1-3' },
+    }
+
+    fetchJSONMock.mockResolvedValueOnce({
+        task,
+        events: [],
+    })
+    postJSONMock.mockResolvedValueOnce({ approved: true })
+
+    renderTaskCenter([task], task, { currentProjectRoot: 'C:/novel-shell', onMutated })
+
+    await user.click(await screen.findByRole('button', { name: '批准回写' }))
+
+    await waitFor(() => {
+        expect(postJSONMock).toHaveBeenCalledWith(
+            '/api/review/approve',
+            { task_id: 'task-approval-1', reason: '由仪表盘批准回写' },
+            { params: { project_root: 'C:/novel-shell' } },
+        )
+        expect(onMutated).toHaveBeenCalled()
+    })
 })
 
 afterEach(() => {
@@ -105,7 +163,7 @@ test('task list and detail share the same continuation outcome and primary actio
     await user.click(screen.getAllByRole('button', { name: 'Launch continuation' })[0])
 
     await waitFor(() => {
-        expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/write', { chapter: 9 })
+        expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/write', { chapter: 9 }, {})
         expect(onSelectTask).toHaveBeenCalledWith('task-2')
         expect(onMutated).toHaveBeenCalled()
     })
@@ -294,5 +352,5 @@ test('recoverable invalid step output task renders system fluctuation guidance f
     renderTaskCenter([task], task)
 
     expect(screen.getAllByText(/系统波动导致步骤结构化输出无效/).length).toBeGreaterThan(0)
-    expect(screen.getByRole('button', { name: '重试' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: '按当前步骤重跑' })).not.toBeNull()
 })

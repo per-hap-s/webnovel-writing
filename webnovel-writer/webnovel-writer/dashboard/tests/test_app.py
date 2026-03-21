@@ -236,13 +236,48 @@ def test_cancel_task_calls_orchestrator(client: TestClient, mock_orchestrator: M
 
 
 def test_retry_task_accepts_resume_from_step(client: TestClient, mock_orchestrator: MagicMock):
-    mock_orchestrator.retry_task.return_value = {"id": "task-1", "status": "queued"}
+    mock_orchestrator.retry_task.return_value = {"id": "task-1", "status": "retrying"}
 
     response = client.post("/api/tasks/task-1/retry", json={"resume_from_step": "story-director"})
 
     assert response.status_code == 200
-    assert response.json()["status"] == "queued"
+    assert response.json()["status"] == "retrying"
     mock_orchestrator.retry_task.assert_called_once_with("task-1", resume_from_step="story-director")
+
+
+def test_task_summary_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.list_task_summaries.return_value = [{"id": "task-1", "status": "retrying"}]
+
+    response = client.get("/api/tasks/summary?limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == [{"id": "task-1", "status": "retrying"}]
+    mock_orchestrator.list_task_summaries.assert_called_once_with(limit=10)
+
+
+def test_task_detail_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.get_task_detail.return_value = {
+        "task": {"id": "task-1", "status": "resuming_writeback"},
+        "events": [{"id": "evt-1", "message": "Writeback approved"}],
+    }
+
+    response = client.get("/api/tasks/task-1/detail?event_limit=20")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task"]["status"] == "resuming_writeback"
+    assert payload["events"][0]["message"] == "Writeback approved"
+    mock_orchestrator.get_task_detail.assert_called_once_with("task-1", event_limit=20)
+
+
+def test_review_approve_calls_orchestrator_and_returns_resuming_status(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.approve_writeback.return_value = {"id": "task-1", "status": "resuming_writeback"}
+
+    response = client.post("/api/review/approve", json={"task_id": "task-1", "reason": "批准继续回写"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "resuming_writeback"
+    mock_orchestrator.approve_writeback.assert_called_once_with("task-1", "批准继续回写")
 
 
 def test_create_resume_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock, mock_project_root: Path):

@@ -126,7 +126,7 @@ beforeEach(() => {
     fetchJSONMock.mockImplementation((path) => {
         if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
         if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 8, total_words: 12000 } })
-        if (path === '/api/tasks') return Promise.resolve(tasksResponse)
+        if (path === '/api/tasks/summary') return Promise.resolve(tasksResponse)
         if (path === '/api/llm/status') return Promise.resolve({ installed: false })
         if (path === '/api/rag/status') return Promise.resolve({ configured: false })
         return Promise.resolve({})
@@ -160,7 +160,7 @@ test('sse refreshes are debounced and remain single-flight while in progress', a
     fetchJSONMock.mockImplementation((path) => {
         if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
         if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 8, total_words: 12000 } })
-        if (path === '/api/tasks') {
+        if (path === '/api/tasks/summary') {
             taskFetchCount += 1
             if (taskFetchCount === 2) {
                 return new Promise((resolve) => {
@@ -370,7 +370,7 @@ test('auto last preference redirects into the remembered project', async () => {
             }))
         }
         if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 8, total_words: 12000 } })
-        if (path === '/api/tasks') return Promise.resolve([])
+        if (path === '/api/tasks/summary') return Promise.resolve([])
         if (path === '/api/llm/status') return Promise.resolve({ installed: false })
         if (path === '/api/rag/status') return Promise.resolve({ configured: false })
         return Promise.resolve({})
@@ -378,9 +378,9 @@ test('auto last preference redirects into the remembered project', async () => {
 
     render(<App />)
 
-    expect(await screen.findByText('selected:none;count:0;summary:none|none')).not.toBeNull()
+    expect(await screen.findByText('项目概览')).not.toBeNull()
     expect(window.location.search).toContain('project_root=C%3A%2Fnovel')
-    expect(window.location.search).toContain('page=tasks')
+    expect(window.location.search).not.toContain('page=')
 })
 
 test('bootstrap success from workbench opens the new project and keeps planning hint', async () => {
@@ -398,7 +398,7 @@ test('bootstrap success from workbench opens the new project and keeps planning 
                 progress: { current_chapter: 0, total_words: 0 },
             })
         }
-        if (path === '/api/tasks') return Promise.resolve([])
+        if (path === '/api/tasks/summary') return Promise.resolve([])
         if (path === '/api/llm/status') return Promise.resolve({ installed: false })
         if (path === '/api/rag/status') return Promise.resolve({ configured: false })
         if (path === '/api/project/planning-profile') {
@@ -445,6 +445,58 @@ test('bootstrap success from workbench opens the new project and keeps planning 
     })
 })
 
+test('opening an uninitialized folder from workbench pre-fills the create form', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+    postJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/pick-folder') {
+            return Promise.resolve({ selected: true, project_root: 'D:\\tmp\\draft-project' })
+        }
+        if (path === '/api/workbench/open-project') {
+            return Promise.resolve({
+                opened: false,
+                project_initialized: false,
+                next_recommended_action: '该目录还没有初始化，可以直接改为新建项目。',
+            })
+        }
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '打开已有项目' }))
+
+    await waitFor(() => {
+        expect(postJSONMock).toHaveBeenCalledWith('/api/workbench/open-project', { project_root: 'D:\\tmp\\draft-project' })
+        expect(screen.getByDisplayValue('D:\\tmp\\draft-project')).not.toBeNull()
+    })
+})
+
+test('opening an existing folder surfaces real open-project errors instead of create fallback', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+    postJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/pick-folder') {
+            return Promise.resolve({ selected: true, project_root: 'D:\\tmp\\broken-project' })
+        }
+        if (path === '/api/workbench/open-project') {
+            return Promise.reject(new Error('state corrupted'))
+        }
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '打开已有项目' }))
+
+    await waitFor(() => {
+        expect(screen.getAllByText('state corrupted').length).toBeGreaterThan(0)
+        expect(screen.queryByDisplayValue('D:\\tmp\\broken-project')).toBeNull()
+    })
+})
+
 test('api settings save keeps the user on the current project page', async () => {
     const user = userEvent.setup()
 
@@ -472,7 +524,7 @@ test('opening a recent project card goes through the workbench open-project API'
             }))
         }
         if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 1, total_words: 100 } })
-        if (path === '/api/tasks') return Promise.resolve([])
+        if (path === '/api/tasks/summary') return Promise.resolve([])
         if (path === '/api/llm/status') return Promise.resolve({ installed: false })
         if (path === '/api/rag/status') return Promise.resolve({ configured: false })
         return Promise.resolve({})

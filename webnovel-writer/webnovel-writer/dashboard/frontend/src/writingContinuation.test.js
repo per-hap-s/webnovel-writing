@@ -30,8 +30,8 @@ test('completed write task is marked ready to continue when no blockers remain',
     assert.equal(summary.heading, '当前可继续下一章')
     assert.equal(summary.continuation, WRITING_CONTINUATION.continuable)
     assert.match(summary.summary, /已完成写回/)
-    assert(summary.reasons.includes('已接入 Story Director 多章规划'))
-    assert(summary.reasons.includes('已接入 Chapter Director 单章合同'))
+    assert(summary.reasons.includes('已接入多章规划'))
+    assert(summary.reasons.includes('已接入单章目标合同'))
 })
 
 test('write task with story refresh is marked as requiring replanning', () => {
@@ -62,8 +62,8 @@ test('write task with story refresh is marked as requiring replanning', () => {
     })
 
     assert.equal(summary.heading, '继续前建议先重规划')
-    assert.equal(summary.nextStep, '从 chapter-director 重试')
-    assert(summary.reasons.includes('Writeback 建议 Story Refresh'))
+    assert.equal(summary.nextStep, '刷新后续章节规划并重跑本章')
+    assert(summary.reasons.includes('当前写回结果建议刷新后续章节规划'))
 })
 
 test('guarded review block is marked as non-continuable', () => {

@@ -1,13 +1,25 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
 import { isRuntimeActiveTask } from './taskCenterRuntime.js'
 import { TaskCenterTaskDetail } from './taskCenterTaskDetail.jsx'
 import { TaskCenterTaskList } from './taskCenterTaskList.jsx'
 
+function buildPendingActionKey(action) {
+    if (!action) return ''
+    return action.id || `${action.kind}:${action.taskId || action.taskType || action.label || 'action'}`
+}
+
+function buildRequestActionKey(path, body = {}) {
+    const taskId = body?.task_id || body?.id || ''
+    return `${path}:${taskId || 'request'}`
+}
+
 export function TaskCenterPageSection({
     tasks,
     selectedTask,
+    selectedTaskId,
+    currentProjectRoot,
     onSelectTask,
     onMutated,
     onNavigateOverview,
@@ -23,49 +35,98 @@ export function TaskCenterPageSection({
     resolveApprovalStatusLabel,
     resolveTargetLabel,
 }) {
+    const [detailTask, setDetailTask] = useState(selectedTask || null)
     const [events, setEvents] = useState([])
     const [actionError, setActionError] = useState(null)
     const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
-    const [cancelSubmitting, setCancelSubmitting] = useState(false)
-    const [followupSubmitting, setFollowupSubmitting] = useState(false)
-    const canRetryTask = ['failed', 'interrupted'].includes(selectedTask?.status) && selectedTask?.runtime_status?.retryable !== false
-    const canCancelTask = ['queued', 'running', 'awaiting_writeback_approval'].includes(selectedTask?.status)
+    const [pendingActionKey, setPendingActionKey] = useState('')
+    const liveSelectedTask = detailTask || selectedTask || null
+    const requestParams = useMemo(
+        () => (currentProjectRoot ? { project_root: currentProjectRoot } : {}),
+        [currentProjectRoot],
+    )
+    const requestOptions = currentProjectRoot ? { params: requestParams } : undefined
+    const canRetryTask = ['failed', 'interrupted'].includes(liveSelectedTask?.status) && liveSelectedTask?.runtime_status?.retryable !== false
+    const canCancelTask = ['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask?.status)
 
     useEffect(() => {
-        if (!tasks.some(isRuntimeActiveTask)) return undefined
+        if (!tasks.some(isRuntimeActiveTask) && !isRuntimeActiveTask(liveSelectedTask)) return undefined
         setRuntimeNow(Date.now())
         const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000)
         return () => window.clearInterval(timer)
-    }, [tasks])
+    }, [tasks, liveSelectedTask])
 
     useEffect(() => {
-        if (!selectedTask?.id) return
-        fetchJSON(`/api/tasks/${selectedTask.id}/events`).then(setEvents).catch(() => setEvents([]))
-    }, [selectedTask?.id, selectedTask?.updated_at])
+        let cancelled = false
+        if (!selectedTaskId) {
+            setDetailTask(null)
+            setEvents([])
+            setActionError(null)
+            return () => {}
+        }
+        setDetailTask(selectedTask || null)
+        setEvents([])
+        setActionError(null)
+        fetchJSON(`/api/tasks/${selectedTaskId}/detail`, requestParams)
+            .then((payload) => {
+                if (cancelled) return
+                setDetailTask(payload?.task || null)
+                setEvents(Array.isArray(payload?.events) ? payload.events : [])
+            })
+            .catch((error) => {
+                if (cancelled) return
+                setDetailTask(selectedTask || null)
+                setEvents([])
+                setActionError(normalizeError(error))
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [requestParams, selectedTaskId, selectedTask?.updated_at])
 
-    async function perform(path, body) {
+    const taskActionState = useMemo(() => ({ pendingActionKey }), [pendingActionKey])
+
+    async function perform(path, body, options = {}) {
+        const actionKey = options.actionKey || buildRequestActionKey(path, body)
+        setPendingActionKey(actionKey)
         setActionError(null)
         try {
-            const response = await postJSON(path, body)
+            const response = requestOptions
+                ? await postJSON(path, body, requestOptions)
+                : await postJSON(path, body)
+            if (options.focusTaskId) {
+                onSelectTask(options.focusTaskId)
+            }
             onMutated()
             return response
         } catch (err) {
             setActionError(normalizeError(err))
             return null
+        } finally {
+            setPendingActionKey('')
         }
     }
 
     async function executeOperatorAction(action) {
-        if (!action || followupSubmitting || action.disabled) return
-        const isLaunchAction = action.kind === 'launch-task'
-        if (isLaunchAction) {
-            setFollowupSubmitting(true)
-        }
+        if (!action || action.disabled) return
+        const actionKey = buildPendingActionKey(action)
+        setPendingActionKey(actionKey)
         setActionError(null)
         try {
             await executeRuntimeOperatorAction({
                 action,
-                postJSON,
+                postJSON: (path, body = {}, options = {}) => {
+                    if (!currentProjectRoot) {
+                        return postJSON(path, body, options)
+                    }
+                    return postJSON(path, body, {
+                        ...options,
+                        params: {
+                            ...(options?.params || {}),
+                            ...requestParams,
+                        },
+                    })
+                },
                 onOpenTask: onSelectTask,
                 onTasksMutated: () => onMutated(),
                 onTaskCreated: (response) => {
@@ -76,9 +137,7 @@ export function TaskCenterPageSection({
         } catch (err) {
             setActionError(normalizeError(err))
         } finally {
-            if (isLaunchAction) {
-                setFollowupSubmitting(false)
-            }
+            setPendingActionKey('')
         }
     }
 
@@ -93,36 +152,20 @@ export function TaskCenterPageSection({
 
     async function cancelTask(task) {
         if (!task?.id || !canCancelTask) return
-        setCancelSubmitting(true)
-        setActionError(null)
-        try {
-            await postJSON(`/api/tasks/${task.id}/cancel`, { reason: '由仪表盘手动停止任务' })
-            onMutated()
-        } catch (err) {
-            const normalized = normalizeError(err)
-            if (normalized.statusCode === 404 || normalized.statusCode === 405) {
-                setActionError({
-                    code: 'TASK_CANCEL_UNAVAILABLE',
-                    displayMessage: '当前后端还未提供“停止任务”接口。',
-                    rawMessage: normalized.rawMessage || normalized.displayMessage,
-                    details: normalized.details,
-                    statusCode: normalized.statusCode,
-                })
-            } else {
-                setActionError(normalized)
-            }
-        } finally {
-            setCancelSubmitting(false)
-        }
+        await perform(
+            `/api/tasks/${task.id}/cancel`,
+            { reason: '由仪表盘手动停止任务' },
+            { actionKey: `cancel:${task.id}`, focusTaskId: task.id },
+        )
     }
 
     return (
         <div className="split-layout">
             <TaskCenterTaskList
                 tasks={tasks}
-                selectedTaskId={selectedTask?.id || null}
+                selectedTaskId={selectedTaskId || null}
                 runtimeNow={runtimeNow}
-                followupSubmitting={followupSubmitting}
+                taskActionState={taskActionState}
                 onSelectTask={onSelectTask}
                 onTaskPrimaryActionClick={handleTaskPrimaryActionClick}
                 translateTaskType={translateTaskType}
@@ -134,14 +177,13 @@ export function TaskCenterPageSection({
             />
             <TaskCenterTaskDetail
                 tasks={tasks}
-                selectedTask={selectedTask}
+                selectedTask={liveSelectedTask}
                 events={events}
                 runtimeNow={runtimeNow}
                 actionError={actionError}
                 canRetryTask={canRetryTask}
                 canCancelTask={canCancelTask}
-                cancelSubmitting={cancelSubmitting}
-                followupSubmitting={followupSubmitting}
+                pendingActionKey={pendingActionKey}
                 onSelectTask={onSelectTask}
                 onNavigateOverview={onNavigateOverview}
                 onPerform={perform}

@@ -10,8 +10,6 @@ import {
 } from './taskDetailPanels.jsx'
 import { buildTaskContinuationSummary } from './writingContinuation.js'
 import { formatTimestampShort } from './dashboardPageCommon.jsx'
-import { renderOperatorActionButtons } from './operatorActionButtons.jsx'
-import { normalizeOperatorAction } from './operatorAction.js'
 import {
     buildEventPayloadTags,
     formatCountValue,
@@ -22,7 +20,31 @@ import {
     withLiveRuntimeStatus,
 } from './taskCenterRuntime.js'
 import { deriveWritingTaskContext } from './writingTaskDerived.js'
+import { normalizeOperatorAction } from './operatorAction.js'
 import { supportsWritingTaskContinuation } from './writingTaskListSummary.js'
+
+function buildActionKey(action) {
+    if (!action) return ''
+    return action.id || `${action.kind}:${action.taskId || action.taskType || action.label || 'action'}`
+}
+
+function buildRequestActionKey(path, body = {}) {
+    const taskId = body?.task_id || body?.id || ''
+    return `${path}:${taskId || 'request'}`
+}
+
+function resolveRepairWritebackLabel(candidate) {
+    const action = candidate?.operator_action?.payload || candidate?.operatorAction?.payload || {}
+    return action?.require_manual_approval ? '需人工确认后写回' : '会自动写回正文'
+}
+
+function ActionButton({ className, onClick, disabled, loading, children, loadingLabel }) {
+    return (
+        <button className={className} onClick={onClick} disabled={disabled}>
+            {loading ? (loadingLabel || '处理中...') : children}
+        </button>
+    )
+}
 
 export function TaskCenterTaskDetail({
     tasks,
@@ -32,8 +54,7 @@ export function TaskCenterTaskDetail({
     actionError,
     canRetryTask,
     canCancelTask,
-    cancelSubmitting,
-    followupSubmitting,
+    pendingActionKey,
     onSelectTask,
     onNavigateOverview,
     onPerform,
@@ -75,7 +96,7 @@ export function TaskCenterTaskDetail({
                 const guardedBatchRuns = Array.isArray(guardedBatchRun?.runs) ? guardedBatchRun.runs : []
                 const lastGuardedBatchRun = guardedBatchRuns.length ? guardedBatchRuns[guardedBatchRuns.length - 1] : null
                 const lastSuccessfulBatchRun = [...guardedBatchRuns].reverse().find((item) => item?.task_status === 'completed') || null
-                const nextRecommendedAction = operatorActions.find((action) => action.variant === 'primary') || operatorActions[0] || null
+                const primaryAction = operatorActions.find((action) => action.variant === 'primary') || operatorActions[0] || null
                 const continuationSummary = supportsWritingTaskContinuation(liveSelectedTask)
                     ? buildTaskContinuationSummary({
                         task: liveSelectedTask,
@@ -92,161 +113,237 @@ export function TaskCenterTaskDetail({
                     : null
                 const canRefreshStoryPlan = Boolean(
                     storyRefresh?.should_refresh
-                    && !['queued', 'running', 'awaiting_writeback_approval'].includes(liveSelectedTask.status)
+                    && !['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask.status)
                 )
                 const reviewSummary = guardedRun?.review_summary || guardedBatchRun?.review_summary || liveSelectedTask.artifacts?.review_summary || null
                 const repairCandidates = Array.isArray(reviewSummary?.repair_candidates) ? reviewSummary.repair_candidates : []
+                const blockingItems = Array.isArray(liveSelectedTask?.artifacts?.blocking_items) ? liveSelectedTask.artifacts.blocking_items : []
+                const primaryActionKey = buildActionKey(primaryAction)
+                const retryActionKey = buildRequestActionKey(`/api/tasks/${liveSelectedTask.id}/retry`)
+                const approveActionKey = buildRequestActionKey('/api/review/approve', { task_id: liveSelectedTask.id })
+                const rejectActionKey = buildRequestActionKey('/api/review/reject', { task_id: liveSelectedTask.id })
+                const cancelActionKey = `cancel:${liveSelectedTask.id}`
 
                 return (
                     <>
                         <div className="detail-grid">
                             <MetricCard label="状态" value={resolveTaskStatusLabel ? resolveTaskStatusLabel(liveSelectedTask) : translateTaskStatus(liveSelectedTask.status)} />
-                            <MetricCard label="任务目标" value={resolveTargetLabel ? resolveTargetLabel(liveSelectedTask) : (liveSelectedTask.runtime_status?.target_label || '-')} />
-                            <MetricCard label="当前步骤" value={resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle')} />
+                            <MetricCard label="目标" value={resolveTargetLabel ? resolveTargetLabel(liveSelectedTask) : (liveSelectedTask.runtime_status?.target_label || '-')} />
+                            <MetricCard label="当前阶段" value={resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle')} />
                             <MetricCard label="审批" value={resolveApprovalStatusLabel ? resolveApprovalStatusLabel(liveSelectedTask) : (liveSelectedTask.approval_status || '-')} />
                             <MetricCard label="类型" value={translateTaskType(liveSelectedTask.task_type)} />
+                            <MetricCard label="实时状态" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
                         </div>
+
+                        <div className="planning-warning detail-action-bar">
+                            <div className="subsection-title">待处理动作</div>
+                            <div className="button-row">
+                                <ActionButton
+                                    className="secondary-button"
+                                    onClick={() => onSelectTask(liveSelectedTask.id)}
+                                    disabled={false}
+                                >
+                                    查看任务
+                                </ActionButton>
+                                {primaryAction ? (
+                                    <ActionButton
+                                        className="primary-button"
+                                        onClick={() => onExecuteOperatorAction(primaryAction)}
+                                        disabled={Boolean(primaryAction.disabled || pendingActionKey)}
+                                        loading={pendingActionKey === primaryActionKey}
+                                    >
+                                        {primaryAction.label || '执行下一步'}
+                                    </ActionButton>
+                                ) : null}
+                                {canRetryTask ? (
+                                    <ActionButton
+                                        className="secondary-button"
+                                        onClick={() => onPerform(`/api/tasks/${liveSelectedTask.id}/retry`, {}, { actionKey: retryActionKey, focusTaskId: liveSelectedTask.id })}
+                                        disabled={Boolean(pendingActionKey)}
+                                        loading={pendingActionKey === retryActionKey}
+                                    >
+                                        按当前步骤重跑
+                                    </ActionButton>
+                                ) : null}
+                                {liveSelectedTask.status === 'awaiting_writeback_approval' ? (
+                                    <>
+                                        <ActionButton
+                                            className="primary-button"
+                                            onClick={() => onPerform('/api/review/approve', { task_id: liveSelectedTask.id, reason: '由仪表盘批准回写' }, { actionKey: approveActionKey, focusTaskId: liveSelectedTask.id })}
+                                            disabled={Boolean(pendingActionKey)}
+                                            loading={pendingActionKey === approveActionKey}
+                                        >
+                                            批准回写
+                                        </ActionButton>
+                                        <ActionButton
+                                            className="danger-button"
+                                            onClick={() => onPerform('/api/review/reject', { task_id: liveSelectedTask.id, reason: '由仪表盘拒绝回写' }, { actionKey: rejectActionKey, focusTaskId: liveSelectedTask.id })}
+                                            disabled={Boolean(pendingActionKey)}
+                                            loading={pendingActionKey === rejectActionKey}
+                                        >
+                                            拒绝回写
+                                        </ActionButton>
+                                    </>
+                                ) : null}
+                                {canCancelTask ? (
+                                    <ActionButton
+                                        className="secondary-button"
+                                        onClick={() => onCancelTask(liveSelectedTask)}
+                                        disabled={Boolean(pendingActionKey)}
+                                        loading={pendingActionKey === cancelActionKey}
+                                        loadingLabel="停止中..."
+                                    >
+                                        停止任务
+                                    </ActionButton>
+                                ) : null}
+                                {parentTask ? <ActionButton className="secondary-button" onClick={() => onSelectTask(parentTask.id)}>查看父任务</ActionButton> : null}
+                                {rootTask && rootTask.id !== parentTask?.id ? <ActionButton className="secondary-button" onClick={() => onSelectTask(rootTask.id)}>查看根任务</ActionButton> : null}
+                            </div>
+                        </div>
+
                         {liveSelectedTask?.artifacts?.plan_blocked ? (
                             <div className="planning-warning">
-                                <div className="subsection-title">待补信息</div>
+                                <div className="subsection-title">当前阻断原因</div>
                                 <div className="tiny">规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行 plan。</div>
-                                <div className="planning-tags">
-                                    {(liveSelectedTask.artifacts.blocking_items || []).map((item, index) => (
-                                        <span key={`${item.field || item.label}-${index}`} className="planning-tag">{item.label || item.field || '未命名缺失项'}</span>
-                                    ))}
-                                </div>
-                                {onNavigateOverview ? <button className="secondary-button" onClick={onNavigateOverview}>前往总览补录</button> : null}
+                                {blockingItems.length ? (
+                                    <div className="alignment-list">
+                                        {blockingItems.map((item, index) => (
+                                            <div key={`${item.field || item.label || 'blocking'}-${index}`} className="alignment-chip missed">
+                                                {item.label || item.field || '待补信息'}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : null}
+                                {onNavigateOverview ? <div className="button-row"><button className="secondary-button" onClick={onNavigateOverview}>前往项目总览补录</button></div> : null}
                             </div>
                         ) : null}
-                        <div className="subsection">
-                            <div className="subsection-title">实时运行状态</div>
-                            <div className="detail-grid">
-                                <MetricCard label="当前阶段" value={liveSelectedTask.runtime_status?.phase_label || (resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle'))} />
-                                <MetricCard label="任务目标" value={liveSelectedTask.runtime_status?.target_label || (resolveTargetLabel ? resolveTargetLabel(liveSelectedTask) : '-')} />
-                                <MetricCard label="阶段说明" value={liveSelectedTask.runtime_status?.phase_detail || '暂无'} />
-                                <MetricCard label="运行状态" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
-                                <MetricCard label="已运行时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.running_seconds)} />
-                                <MetricCard label="已等待时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.waiting_seconds)} />
-                                <MetricCard label="当前尝试" value={formatCountValue(liveSelectedTask.runtime_status?.attempt)} />
-                                <MetricCard label="重试次数" value={formatCountValue(liveSelectedTask.runtime_status?.retry_count, true)} />
-                                <MetricCard label="超时预算" value={formatTimeoutValue(liveSelectedTask.runtime_status?.timeout_seconds)} />
-                                <MetricCard label="步骤开始于" value={formatTimestampShort(liveSelectedTask.runtime_status?.step_started_at || '-')} />
-                                <MetricCard label="等待开始于" value={formatTimestampShort(liveSelectedTask.runtime_status?.waiting_since || '-')} />
-                                <MetricCard label="最近事件" value={liveSelectedTask.runtime_status?.last_event_label || '暂无'} />
-                                <MetricCard label="最近更新时间" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_event_at || liveSelectedTask.updated_at || '-')} />
-                                <MetricCard label="最近活动" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_activity_at || '-')} />
-                                <MetricCard label="最近一次有效活动" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_non_heartbeat_activity_at || '-')} />
-                                <MetricCard label="错误码" value={liveSelectedTask.runtime_status?.error_code || '-'} />
-                                <MetricCard label="HTTP 状态" value={liveSelectedTask.runtime_status?.http_status || '-'} />
-                                <MetricCard label="是否可重试" value={formatRetryableValue(liveSelectedTask.runtime_status?.retryable)} />
-                            </div>
-                        </div>
-                        {(liveSelectedTask.parent_task_id || liveSelectedTask.trigger_source || liveSelectedTask.root_task_id) ? (
-                            <div className="subsection">
-                                <div className="subsection-title">任务链路</div>
-                                <div className="detail-grid">
-                                    <MetricCard label="触发来源" value={liveSelectedTask.trigger_source || '-'} />
-                                    <MetricCard label="父任务" value={liveSelectedTask.parent_task_id || '-'} />
-                                    <MetricCard label="根任务" value={liveSelectedTask.root_task_id || '-'} />
-                                    <MetricCard label="父步骤" value={liveSelectedTask.parent_step_name ? translateStepName(liveSelectedTask.parent_step_name) : '-'} />
-                                </div>
-                                <div className="button-row">
-                                    {parentTask ? <button className="secondary-button" onClick={() => onSelectTask(parentTask.id)}>查看父任务</button> : null}
-                                    {rootTask && rootTask.id !== parentTask?.id ? <button className="secondary-button" onClick={() => onSelectTask(rootTask.id)}>查看根任务</button> : null}
-                                </div>
-                            </div>
-                        ) : null}
+
                         {continuationSummary ? (
                             <TaskContinuationSection
                                 continuationSummary={continuationSummary}
-                                operatorActions={operatorActions}
-                                renderOperatorActionButtons={(actions) => renderOperatorActionButtons(actions, onExecuteOperatorAction, followupSubmitting, '', '创建中...')}
+                                operatorActions={[]}
+                                renderOperatorActionButtons={() => []}
                                 MetricCard={MetricCard}
                             />
                         ) : null}
-                        <NarrativeContractsSection
-                            storyPlan={storyPlan}
-                            directorBrief={directorBrief}
-                            currentStorySlot={currentStorySlot}
-                            MetricCard={MetricCard}
-                        />
-                        <AlignmentResultsSection storyAlignment={storyAlignment} directorAlignment={directorAlignment} />
-                        <StoryRefreshSection
-                            storyRefresh={storyRefresh}
-                            canRefreshStoryPlan={canRefreshStoryPlan}
-                            onRetryStory={() => onPerform(`/api/tasks/${liveSelectedTask.id}/retry`, { resume_from_step: storyRefresh?.recommended_resume_from || 'story-director' })}
-                            MetricCard={MetricCard}
-                        />
+
                         <ReviewSummarySection
                             summary={reviewSummary}
                             MetricCard={MetricCard}
                         />
+
                         {repairCandidates.length ? (
                             <div className="subsection">
-                                <div className="subsection-title">自动修稿候选</div>
+                                <div className="subsection-title">可自动处理的问题</div>
                                 <div className="summary-grid">
                                     {repairCandidates.slice(0, 6).map((candidate, index) => {
                                         const action = normalizeOperatorAction(candidate.operator_action || candidate.operatorAction || null)
+                                        const actionKey = buildActionKey(action)
                                         return (
-                                            <div key={`${candidate.issue_type || 'repair'}-${candidate.issue_title || index}-${index}`} className="summary-card">
-                                                <div className="summary-card-title">{candidate.issue_title || candidate.issue_type || '修稿候选'}</div>
-                                                <div className="summary-card-meta">{`章节：${candidate.chapter || '-'} / 类型：${candidate.issue_type || '-'}`}</div>
-                                                <div className="tiny">{candidate.rewrite_goal || '未提供修稿目标。'}</div>
-                                                {Array.isArray(candidate.guardrails) && candidate.guardrails.length ? (
-                                                    <div className="planning-tags">
-                                                        {candidate.guardrails.slice(0, 3).map((item) => (
-                                                            <span key={`${candidate.issue_type || 'repair'}-${item}`} className="planning-tag">{item}</span>
-                                                        ))}
+                                            <div key={`${candidate.issue_title || index}-${index}`} className="summary-card">
+                                                <div className="summary-card-title">{candidate.issue_title || '待处理问题'}</div>
+                                                <div className="summary-card-meta">{candidate.chapter ? `影响章节：第 ${candidate.chapter} 章` : '影响章节：未定位'}</div>
+                                                <div className="summary-card-meta">{resolveRepairWritebackLabel(candidate)}</div>
+                                                <div className="tiny">{candidate.rewrite_goal || candidate.reason || '当前未提供可直接执行的处理建议。'}</div>
+                                                {action ? (
+                                                    <div className="button-row">
+                                                        <ActionButton
+                                                            className="primary-button"
+                                                            onClick={() => onExecuteOperatorAction(action)}
+                                                            disabled={Boolean(action.disabled || pendingActionKey)}
+                                                            loading={pendingActionKey === actionKey}
+                                                        >
+                                                            {action.label || '创建局部修稿任务'}
+                                                        </ActionButton>
                                                     </div>
                                                 ) : null}
-                                                {candidate.auto_rewrite_eligible && action ? (
-                                                    <div className="button-row">
-                                                        {renderOperatorActionButtons([action], onExecuteOperatorAction, followupSubmitting, '', '创建中...')}
-                                                    </div>
-                                                ) : (
-                                                    <div className="tiny">{candidate.reason || '当前问题需人工处理。'}</div>
-                                                )}
                                             </div>
                                         )
                                     })}
                                 </div>
                             </div>
                         ) : null}
-                        <GuardedRunSection
-                            guardedRun={guardedRun}
-                            MetricCard={MetricCard}
-                            translateStepName={translateStepName}
-                            translateTaskStatus={translateTaskStatus}
-                        />
-                        <GuardedBatchSection
-                            guardedBatchRun={guardedBatchRun}
-                            MetricCard={MetricCard}
-                            translateStepName={translateStepName}
-                            translateTaskStatus={translateTaskStatus}
-                            onSelectTask={onSelectTask}
-                            lastSuccessfulBatchRun={lastSuccessfulBatchRun}
-                            lastGuardedBatchRun={lastGuardedBatchRun}
-                            nextRecommendedAction={nextRecommendedAction}
-                        />
-                        <ResumeSection
-                            resumeRun={resumeRun}
-                            MetricCard={MetricCard}
-                            translateStepName={translateStepName}
-                        />
-                        <div className="button-row">
-                            {canRetryTask ? <button className="secondary-button" onClick={() => onPerform(`/api/tasks/${liveSelectedTask.id}/retry`, {})}>重试</button> : null}
-                            {canCancelTask ? (
-                                <button className="secondary-button" onClick={() => onCancelTask(liveSelectedTask)} disabled={cancelSubmitting}>
-                                    {cancelSubmitting ? '停止中...' : '停止任务'}
-                                </button>
-                            ) : null}
-                            {liveSelectedTask.status === 'awaiting_writeback_approval' && (
-                                <>
-                                    <button className="primary-button" onClick={() => onPerform('/api/review/approve', { task_id: liveSelectedTask.id, reason: '由仪表盘批准回写' })}>批准回写</button>
-                                    <button className="danger-button" onClick={() => onPerform('/api/review/reject', { task_id: liveSelectedTask.id, reason: '由仪表盘拒绝回写' })}>拒绝回写</button>
-                                </>
+
+                        <StoryRefreshSection
+                            storyRefresh={storyRefresh}
+                            canRefreshStoryPlan={canRefreshStoryPlan}
+                            onRetryStory={() => onPerform(
+                                `/api/tasks/${liveSelectedTask.id}/retry`,
+                                { resume_from_step: storyRefresh?.recommended_resume_from || 'story-director' },
+                                {
+                                    actionKey: buildRequestActionKey(`/api/tasks/${liveSelectedTask.id}/retry`, { task_id: liveSelectedTask.id, resume_from_step: storyRefresh?.recommended_resume_from || 'story-director' }),
+                                    focusTaskId: liveSelectedTask.id,
+                                },
                             )}
-                        </div>
+                            MetricCard={MetricCard}
+                        />
+
+                        <details className="raw-output-details">
+                            <summary>高级诊断信息</summary>
+                            <div className="subsection">
+                                <div className="subsection-title">运行状态</div>
+                                <div className="detail-grid">
+                                    <MetricCard label="阶段说明" value={liveSelectedTask.runtime_status?.phase_detail || '暂无'} />
+                                    <MetricCard label="已运行时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.running_seconds)} />
+                                    <MetricCard label="已等待时长" value={formatRuntimeDuration(liveSelectedTask.runtime_status?.waiting_seconds)} />
+                                    <MetricCard label="当前尝试" value={formatCountValue(liveSelectedTask.runtime_status?.attempt)} />
+                                    <MetricCard label="重试次数" value={formatCountValue(liveSelectedTask.runtime_status?.retry_count, true)} />
+                                    <MetricCard label="超时预算" value={formatTimeoutValue(liveSelectedTask.runtime_status?.timeout_seconds)} />
+                                    <MetricCard label="最近更新" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_event_at || liveSelectedTask.updated_at || '-')} />
+                                    <MetricCard label="是否可重试" value={formatRetryableValue(liveSelectedTask.runtime_status?.retryable)} />
+                                </div>
+                            </div>
+
+                            <NarrativeContractsSection
+                                storyPlan={storyPlan}
+                                directorBrief={directorBrief}
+                                currentStorySlot={currentStorySlot}
+                                MetricCard={MetricCard}
+                            />
+                            <AlignmentResultsSection storyAlignment={storyAlignment} directorAlignment={directorAlignment} />
+                            <GuardedRunSection
+                                guardedRun={guardedRun}
+                                MetricCard={MetricCard}
+                                translateStepName={translateStepName}
+                                translateTaskStatus={translateTaskStatus}
+                            />
+                            <GuardedBatchSection
+                                guardedBatchRun={guardedBatchRun}
+                                MetricCard={MetricCard}
+                                translateStepName={translateStepName}
+                                translateTaskStatus={translateTaskStatus}
+                                onSelectTask={onSelectTask}
+                                lastSuccessfulBatchRun={lastSuccessfulBatchRun}
+                                lastGuardedBatchRun={lastGuardedBatchRun}
+                                nextRecommendedAction={primaryAction}
+                            />
+                            <ResumeSection
+                                resumeRun={resumeRun}
+                                MetricCard={MetricCard}
+                                translateStepName={translateStepName}
+                            />
+                            <div className="subsection">
+                                <div className="subsection-title">原始步骤输出</div>
+                                <pre className="code-block">{JSON.stringify(liveSelectedTask.artifacts?.step_results || {}, null, 2)}</pre>
+                            </div>
+                            <div className="subsection">
+                                <div className="subsection-title">事件流</div>
+                                <div className="event-list">
+                                    {events.map((event) => (
+                                        <div key={event.id} className={`event-card ${event.level}`}>
+                                            <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} · {formatTimestampShort(event.timestamp)}</div>
+                                            <div>{translateEventMessage(event.message)}</div>
+                                            <div className="event-payload-row">
+                                                {buildEventPayloadTags(event.payload || {}).map((tag) => (
+                                                    <span key={`${event.id}-${tag.label}`} className="event-payload-tag">{`${tag.label}：${tag.value}`}</span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </details>
+
                         <ErrorNotice error={actionError} />
                         <ErrorNotice
                             error={liveSelectedTask.error || null}
@@ -258,29 +355,6 @@ export function TaskCenterTaskDetail({
                                         : '任务失败原因'
                             }
                         />
-                        <div className="subsection">
-                            <div className="subsection-title">步骤输出</div>
-                            <details className="raw-output-details">
-                                <summary>查看原始结果 / 调试信息</summary>
-                                <pre className="code-block">{JSON.stringify(liveSelectedTask.artifacts?.step_results || {}, null, 2)}</pre>
-                            </details>
-                        </div>
-                        <div className="subsection">
-                            <div className="subsection-title">事件流</div>
-                            <div className="event-list">
-                                {events.map((event) => (
-                                    <div key={event.id} className={`event-card ${event.level}`}>
-                                        <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} · {formatTimestampShort(event.timestamp)}</div>
-                                        <div>{translateEventMessage(event.message)}</div>
-                                        <div className="event-payload-row">
-                                            {buildEventPayloadTags(event.payload || {}).map((tag) => (
-                                                <span key={`${event.id}-${tag.label}`} className="event-payload-tag">{tag.label}：{tag.value}</span>
-                                            ))}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
                     </>
                 )
             })()}

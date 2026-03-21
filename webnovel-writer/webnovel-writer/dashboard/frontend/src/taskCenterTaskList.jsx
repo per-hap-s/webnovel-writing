@@ -7,11 +7,16 @@ import {
     withLiveRuntimeStatus,
 } from './taskCenterRuntime.js'
 
+function buildActionKey(action) {
+    if (!action) return ''
+    return action.id || `${action.kind}:${action.taskId || action.taskType || action.label || 'action'}`
+}
+
 export function TaskCenterTaskList({
     tasks,
     selectedTaskId,
     runtimeNow,
-    followupSubmitting,
+    taskActionState,
     onSelectTask,
     onTaskPrimaryActionClick,
     translateTaskType,
@@ -23,13 +28,15 @@ export function TaskCenterTaskList({
 }) {
     return (
         <section className="panel list-panel">
-            <div className="panel-title">任务监控</div>
+            <div className="panel-title">任务中心</div>
             <div className="task-list">
                 {tasks.map((task) => {
                     const liveTask = withLiveRuntimeStatus(task, runtimeNow)
                     const writingSummary = buildWritingTaskListSummary({ task: liveTask })
                     const primaryAction = writingSummary?.primaryAction || null
-                    const recommendedLabel = writingSummary?.primaryActionLabel || writingSummary?.nextStep || ''
+                    const actionKey = buildActionKey(primaryAction)
+                    const actionPending = Boolean(primaryAction && taskActionState?.pendingActionKey === actionKey)
+                    const nextStepLabel = writingSummary?.primaryActionLabel || writingSummary?.nextStep || '当前无下一步'
                     return (
                         <div key={task.id} className={`task-item ${selectedTaskId === task.id ? 'active' : ''}`}>
                             <button className="task-item-main" onClick={() => onSelectTask(task.id)}>
@@ -45,26 +52,25 @@ export function TaskCenterTaskList({
                                     <div className="task-followup">
                                         <div className="task-followup-header">
                                             <span className={`runtime-badge ${mapContinuationToneToBadgeTone(writingSummary.tone)}`}>{writingSummary.continuationLabel}</span>
-                                            {recommendedLabel ? <span className="tiny task-followup-action">{recommendedLabel}</span> : null}
+                                            <span className="tiny task-followup-action">{nextStepLabel}</span>
                                         </div>
                                         <div className="tiny task-followup-summary">{writingSummary.reasonLabel}</div>
                                     </div>
                                 ) : null}
                             </button>
-                            {writingSummary ? (
-                                <div className="task-item-actions">
-                                    <button
-                                        className={primaryAction ? 'primary-button' : 'secondary-button'}
-                                        onClick={(event) => onTaskPrimaryActionClick(event, liveTask, primaryAction)}
-                                        disabled={Boolean(primaryAction && (followupSubmitting || primaryAction.disabled))}
-                                        title={primaryAction ? (primaryAction.reason || primaryAction.label) : '查看任务'}
-                                    >
-                                        {primaryAction
-                                            ? (followupSubmitting ? '处理中...' : primaryAction.label)
-                                            : '查看任务'}
-                                    </button>
-                                </div>
-                            ) : null}
+                            <div className="task-item-actions">
+                                <button className="secondary-button" onClick={() => onSelectTask(task.id)}>
+                                    查看任务
+                                </button>
+                                <button
+                                    className={primaryAction ? 'primary-button' : 'secondary-button'}
+                                    onClick={(event) => onTaskPrimaryActionClick(event, liveTask, primaryAction)}
+                                    disabled={!primaryAction || actionPending || primaryAction.disabled}
+                                    title={primaryAction ? (primaryAction.reason || primaryAction.label) : '当前任务暂无可执行的下一步'}
+                                >
+                                    {actionPending ? '处理中...' : (primaryAction?.label || '执行下一步')}
+                                </button>
+                            </div>
                         </div>
                     )
                 })}

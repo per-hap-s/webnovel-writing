@@ -72,6 +72,8 @@ const LANDING_PREFERENCES = [
     { value: 'auto_last', label: '自动进入上次项目' },
 ]
 
+const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'])
+
 const UI_COPY = {
     overviewPlanningTitle: '规划必填信息',
     projectCreateHint: '双击启动后会先进入工作台，在这里打开已有项目或新建项目。',
@@ -79,8 +81,8 @@ const UI_COPY = {
     planningHint: '先把这里的规划信息补齐，再运行“规划卷”。如果信息不足，系统会提示你回到这里继续补资料。',
     writingEngine: '写作引擎',
     retrievalEngine: '检索引擎',
-    overviewMainlineTitle: '写作主链',
-    overviewMainlineEmpty: '暂无可展示的写作主链任务；创建 write / guarded / resume 任务后会在这里展示解释摘要。',
+    overviewMainlineTitle: '主线任务',
+    overviewMainlineEmpty: '暂无可展示的主线任务；创建 write / guarded / resume 任务后会在这里显示下一步建议。',
     viewTask: '查看任务',
     suggestedNextStep: '建议下一步',
 }
@@ -108,6 +110,7 @@ export default function App() {
     const statusRefreshSeqRef = useRef(0)
     const optimisticTasksRef = useRef(new Map())
     const autoRedirectedRef = useRef(false)
+    const lastSseActivityAtRef = useRef(0)
     const projectMode = Boolean(currentProjectRoot)
     const effectivePage = projectMode ? page : 'workbench'
 
@@ -125,7 +128,7 @@ export default function App() {
         const targetUrl = hubData?.current_project?.dashboard_url
         if (!targetUrl) return
         autoRedirectedRef.current = true
-        applyDashboardUrl(targetUrl)
+        applyDashboardUrl(forceProjectDashboardUrl(targetUrl, 'control'))
     }, [hubData, currentProjectRoot])
 
     useEffect(() => {
@@ -133,6 +136,7 @@ export default function App() {
             coreRefreshSeqRef.current += 1
             statusRefreshSeqRef.current += 1
             optimisticTasksRef.current.clear()
+            lastSseActivityAtRef.current = 0
             setProjectInfo(null)
             setLlmStatus(null)
             setRagStatus(null)
@@ -151,6 +155,7 @@ export default function App() {
         void reloadServiceStatus()
         const dispose = subscribeSSE(
             () => {
+                lastSseActivityAtRef.current = Date.now()
                 if (coreRefreshTimerRef.current) {
                     window.clearTimeout(coreRefreshTimerRef.current)
                 }
@@ -160,7 +165,19 @@ export default function App() {
                 }, 250)
             },
             {
-                onOpen: () => setConnected(true),
+                onOpen: () => {
+                    lastSseActivityAtRef.current = Date.now()
+                    setConnected(true)
+                },
+                onHeartbeat: () => {
+                    lastSseActivityAtRef.current = Date.now()
+                    setConnected(true)
+                },
+                onOverflow: () => {
+                    lastSseActivityAtRef.current = Date.now()
+                    setConnected(false)
+                    scheduleCoreRefresh()
+                },
                 onError: () => setConnected(false),
             },
         )
@@ -179,6 +196,17 @@ export default function App() {
             setConnected(false)
         }
     }, [projectMode, currentProjectRoot])
+
+    useEffect(() => {
+        if (!projectMode) return () => {}
+        const hasActiveTasks = tasks.some((task) => ACTIVE_TASK_STATUSES.has(String(task?.status || '')))
+        const isSseStale = !lastSseActivityAtRef.current || (Date.now() - lastSseActivityAtRef.current) > 20000
+        const intervalMs = (hasActiveTasks || isSseStale) ? 3000 : 20000
+        const timer = window.setInterval(() => {
+            void flushCoreRefresh()
+        }, intervalMs)
+        return () => window.clearInterval(timer)
+    }, [projectMode, currentProjectRoot, tasks])
 
     function scheduleCoreRefresh() {
         if (!projectMode) return
@@ -217,7 +245,7 @@ export default function App() {
         const params = { project_root: currentProjectRoot }
         const [projectResult, tasksResult] = await Promise.allSettled([
             fetchJSON('/api/project/info', params),
-            fetchJSON('/api/tasks', params),
+            fetchJSON('/api/tasks/summary', params),
         ])
         if (refreshId !== coreRefreshSeqRef.current) return
 
@@ -229,7 +257,7 @@ export default function App() {
         }
 
         if (tasksResult.status === 'fulfilled') {
-            const mergedItems = mergeFetchedTasksWithOptimistic(tasksResult.value, optimisticTasksRef.current)
+            const mergedItems = sortTaskSummaries(mergeFetchedTasksWithOptimistic(tasksResult.value, optimisticTasksRef.current))
             setTasks(mergedItems)
             setSelectedTaskId((currentId) => {
                 if (mergedItems.length === 0) return null
@@ -293,13 +321,25 @@ export default function App() {
     }
 
     async function openWorkbenchProject(projectRoot, fallbackUrl = '') {
-        const response = await postJSON('/api/workbench/open-project', { project_root: projectRoot })
-        if (response?.opened) {
-            const nextUrl = response?.suggested_dashboard_url || fallbackUrl || `/?project_root=${encodeURIComponent(projectRoot)}`
-            applyDashboardUrl(nextUrl)
-            await reloadHub({ projectRoot })
+        try {
+            const response = await postJSON('/api/workbench/open-project', { project_root: projectRoot })
+            if (response?.opened) {
+                const nextUrl = forceProjectDashboardUrl(
+                    response?.suggested_dashboard_url || fallbackUrl || `/?project_root=${encodeURIComponent(projectRoot)}`,
+                    'control',
+                )
+                applyDashboardUrl(nextUrl)
+                await reloadHub({ projectRoot })
+            }
+            return response
+        } catch (error) {
+            const normalizedError = normalizeError(error)
+            setHubLoadError(normalizedError)
+            return {
+                opened: false,
+                error: normalizedError,
+            }
         }
-        return response
     }
 
     function openWorkbenchPanel(nextTab) {
@@ -313,7 +353,7 @@ export default function App() {
             return
         }
         optimisticTasksRef.current.set(task.id, task)
-        setTasks((items) => [task, ...items.filter((item) => item.id !== task.id)])
+        setTasks((items) => sortTaskSummaries([task, ...items.filter((item) => item.id !== task.id)]))
         setSelectedTaskId(task.id)
         setPage('tasks')
         scheduleCoreRefresh()
@@ -322,6 +362,9 @@ export default function App() {
     function handleOpenTask(taskId) {
         setSelectedTaskId(taskId)
         setPage('tasks')
+        if (!tasks.some((item) => item.id === taskId)) {
+            scheduleCoreRefresh()
+        }
     }
 
     const selectedTask = useMemo(() => tasks.find((item) => item.id === selectedTaskId) || null, [tasks, selectedTaskId])
@@ -485,6 +528,8 @@ export default function App() {
                     <TaskCenterPage
                         tasks={tasks}
                         selectedTask={selectedTask}
+                        selectedTaskId={selectedTaskId}
+                        currentProjectRoot={currentProjectRoot}
                         onSelectTask={setSelectedTaskId}
                         onMutated={scheduleCoreRefresh}
                         onNavigateOverview={() => setPage('control')}
@@ -678,6 +723,23 @@ function compareTaskFreshness(left, right) {
     return String(left?.id || '').localeCompare(String(right?.id || ''))
 }
 
+function sortTaskSummaries(items) {
+    return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+        const leftPriority = Number(left?.list_priority ?? 99)
+        const rightPriority = Number(right?.list_priority ?? 99)
+        if (leftPriority !== rightPriority) return leftPriority - rightPriority
+        return compareTaskFreshness(left, right)
+    })
+}
+
+function forceProjectDashboardUrl(nextUrl, page = 'control') {
+    const parsed = new URL(nextUrl, window.location.origin)
+    if (parsed.searchParams.get('project_root')) {
+        parsed.searchParams.set(DASHBOARD_PAGE_QUERY_KEY, page)
+    }
+    return `${parsed.pathname}${parsed.search}${parsed.hash || ''}`
+}
+
 function mergeFetchedTasksWithOptimistic(items, optimisticTasks) {
     const fetchedItems = Array.isArray(items) ? items : []
     if (!(optimisticTasks instanceof Map) || optimisticTasks.size === 0) {
@@ -848,35 +910,29 @@ function WritingTaskOverviewCard({ task, summary, submitting, onOpenTask, onActi
             <div className="summary-card-meta">{summary.reasonLabel}</div>
             <div className="summary-card-meta">{`${UI_COPY.suggestedNextStep}：${recommendedLabel}`}</div>
             <div className="button-row">
-                {summary.primaryAction ? (
-                    <button
-                        className="primary-button"
-                        onClick={() => onAction(summary.primaryAction)}
-                        disabled={submitting || summary.primaryAction.disabled}
-                        title={summary.primaryAction.reason || summary.primaryAction.label}
-                    >
-                        {submitting ? '处理中...' : summary.primaryActionLabel}
-                    </button>
-                ) : (
-                    <button className="secondary-button" onClick={() => onOpenTask(task.id)}>
-                        {UI_COPY.viewTask}
-                    </button>
-                )}
-                {summary.primaryAction ? (
-                    <button className="secondary-button" onClick={() => onOpenTask(task.id)}>
-                        {UI_COPY.viewTask}
-                    </button>
-                ) : null}
+                <button className="secondary-button" onClick={() => onOpenTask(task.id)}>
+                    {UI_COPY.viewTask}
+                </button>
+                <button
+                    className={summary.primaryAction ? 'primary-button' : 'secondary-button'}
+                    onClick={() => summary.primaryAction && onAction(summary.primaryAction)}
+                    disabled={!summary.primaryAction || submitting || summary.primaryAction.disabled}
+                    title={summary.primaryAction ? (summary.primaryAction.reason || summary.primaryAction.label) : '当前任务暂无可执行的下一步'}
+                >
+                    {submitting ? '处理中...' : (summary.primaryActionLabel || '执行下一步')}
+                </button>
             </div>
         </div>
     )
 }
 
-function TaskCenterPage({ tasks, selectedTask, onSelectTask, onMutated, onNavigateOverview }) {
+function TaskCenterPage({ tasks, selectedTask, selectedTaskId, currentProjectRoot, onSelectTask, onMutated, onNavigateOverview }) {
     return (
         <TaskCenterPageSection
             tasks={tasks}
             selectedTask={selectedTask}
+            selectedTaskId={selectedTaskId}
+            currentProjectRoot={currentProjectRoot}
             onSelectTask={onSelectTask}
             onMutated={onMutated}
             onNavigateOverview={onNavigateOverview}

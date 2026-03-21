@@ -1,6 +1,9 @@
 const BASE = ''
 const DEFAULT_REQUEST_TIMEOUT_MS = 20000
 const STATUS_REQUEST_TIMEOUT_MS = 8000
+const TASK_SUMMARY_REQUEST_TIMEOUT_MS = 35000
+const TASK_DETAIL_REQUEST_TIMEOUT_MS = 35000
+const PROJECT_INFO_REQUEST_TIMEOUT_MS = 25000
 
 const CODE_MESSAGE_MAP = {
     CONFLICT: '当前操作与现有数据冲突，请调整后重试。',
@@ -68,9 +71,11 @@ const STATUS_CODE_MAP = {
     504: 'REQUEST_TIMEOUT',
 }
 
-CODE_MESSAGE_MAP.REPAIR_NOT_ELIGIBLE = '当前问题类型不在自动修稿白名单内，需人工处理。'
+CODE_MESSAGE_MAP.REPAIR_NOT_ELIGIBLE = '当前问题类型不在局部修稿白名单内，需人工处理。'
 CODE_MESSAGE_MAP.REPAIR_REVIEW_BLOCKED = '修稿复审未通过，当前版本不会自动写回。'
 CODE_MESSAGE_MAP.REPAIR_INPUT_INVALID = '修稿任务输入不完整，请重新从审查候选入口发起。'
+
+CODE_MESSAGE_MAP.CLIENT_TIMEOUT = '浏览器等待接口返回超时，后台任务可能仍在继续执行。'
 
 class AppError extends Error {
     constructor({
@@ -190,6 +195,15 @@ function inferTimeoutMs(path, timeoutMs) {
     if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) {
         return timeoutMs
     }
+    if (path === '/api/tasks/summary') {
+        return TASK_SUMMARY_REQUEST_TIMEOUT_MS
+    }
+    if (path === '/api/project/info') {
+        return PROJECT_INFO_REQUEST_TIMEOUT_MS
+    }
+    if (/^\/api\/tasks\/[^/]+\/detail$/.test(path)) {
+        return TASK_DETAIL_REQUEST_TIMEOUT_MS
+    }
     if (path === '/api/llm/status' || path === '/api/rag/status') {
         return STATUS_REQUEST_TIMEOUT_MS
     }
@@ -200,8 +214,8 @@ export function normalizeError(error) {
     if (error instanceof AppError) return error
     if (error?.name === 'AbortError') {
         return new AppError({
-            displayMessage: CODE_MESSAGE_MAP.REQUEST_TIMEOUT,
-            code: 'REQUEST_TIMEOUT',
+            displayMessage: CODE_MESSAGE_MAP.CLIENT_TIMEOUT,
+            code: 'CLIENT_TIMEOUT',
             rawMessage: '请求已中止。',
         })
     }
@@ -310,14 +324,23 @@ export function postJSON(path, body = {}, options = {}) {
 }
 
 export function subscribeSSE(onMessage, handlers = {}) {
-    const { onOpen, onError } = handlers
+    const { onOpen, onError, onHeartbeat, onOverflow } = handlers
     const es = new EventSource(buildUrl('/api/events'))
     es.onopen = () => {
         if (onOpen) onOpen()
     }
     es.onmessage = (event) => {
         try {
-            onMessage(JSON.parse(event.data))
+            const payload = JSON.parse(event.data)
+            if (payload?.kind === 'heartbeat') {
+                onHeartbeat?.(payload)
+                return
+            }
+            if (payload?.kind === 'overflow') {
+                onOverflow?.(payload)
+                return
+            }
+            onMessage(payload)
         } catch {
             // ignore malformed events
         }

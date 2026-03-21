@@ -33,12 +33,12 @@ function buildContractSignals({
     storyRefresh,
 }) {
     const signals = []
-    if (storyPlan) signals.push('已接入 Story Director 多章规划')
-    if (directorBrief) signals.push('已接入 Chapter Director 单章合同')
-    signals.push(...buildAlignmentSignals('Story Alignment', storyAlignment))
-    signals.push(...buildAlignmentSignals('Director Alignment', directorAlignment))
+    if (storyPlan) signals.push('已接入多章规划')
+    if (directorBrief) signals.push('已接入单章目标合同')
+    signals.push(...buildAlignmentSignals('剧情对齐', storyAlignment))
+    signals.push(...buildAlignmentSignals('章节目标对齐', directorAlignment))
     if (storyRefresh?.should_refresh) {
-        signals.push(`Story Refresh 建议从 ${storyRefresh.recommended_resume_from || 'story-director'} 恢复`)
+        signals.push('当前结果建议先刷新后续章节规划')
     }
     return signals
 }
@@ -153,7 +153,7 @@ function buildGuardedWriteContinuation(task, guardedRun, operatorActions, contra
             continuation: '暂停推进',
             nextStep: primaryAction?.label || '从推荐步骤重试',
             summary: guardedRun?.next_action?.suggested_action || '护栏推进已经明确要求先刷新叙事规划，再决定是否继续。',
-            reasons: ['护栏命中 Story Refresh', ...contractSignals],
+            reasons: ['护栏任务命中重规划建议', ...contractSignals],
             actionLabel: primaryAction?.label,
         })
     }
@@ -169,7 +169,7 @@ function buildGuardedWriteContinuation(task, guardedRun, operatorActions, contra
             continuation: recovery?.continuation || WRITING_CONTINUATION.blocked,
             nextStep: primaryAction?.label || recovery?.primaryActionLabel || '打开阻断子任务',
             summary: issueCount
-                ? `当前子任务的审查摘要记录了 ${issueCount} 个问题，先处理阻断再继续。`
+                ? `当前子任务的问题汇总记录了 ${issueCount} 个问题，先处理阻断再继续。`
                 : '当前子任务被审查关卡拦截，护栏不能继续推进。',
             reasons: ['护栏被审查关卡拦截', recovery?.followupLabel, recovery?.reviewSummaryHint, ...contractSignals].filter(Boolean),
             actionLabel: primaryAction?.label,
@@ -185,7 +185,7 @@ function buildGuardedWriteContinuation(task, guardedRun, operatorActions, contra
             heading: recovery?.heading || '继续前需要人工审批',
             continuation: recovery?.continuation || WRITING_CONTINUATION.waitingApproval,
             nextStep: primaryAction?.label || recovery?.primaryActionLabel || '打开待审批子任务',
-            summary: '当前护栏任务已经停在 approval-gate，必须先处理待审批子任务。',
+            summary: '当前护栏任务已经停在待人工确认阶段，必须先处理待审批子任务。',
             reasons: ['护栏停在人工审批', recovery?.followupLabel, ...contractSignals].filter(Boolean),
             actionLabel: primaryAction?.label,
         })
@@ -224,8 +224,8 @@ function buildGuardedBatchContinuation(task, guardedBatchRun, operatorActions, c
             heading: '继续前需要先重规划',
             continuation: '暂停推进',
             nextStep: primaryAction?.label || '从推荐步骤恢复',
-            summary: guardedBatchRun?.next_action?.suggested_action || '批量护栏已因 Story Refresh 建议停止，先重规划再决定是否继续。',
-            reasons: ['批量护栏命中 Story Refresh', ...contractSignals],
+            summary: guardedBatchRun?.next_action?.suggested_action || '批量护栏已因重规划建议停止，先刷新后续章节规划再决定是否继续。',
+            reasons: ['批量护栏命中重规划建议', ...contractSignals],
             actionLabel: primaryAction?.label,
         })
     }
@@ -241,7 +241,7 @@ function buildGuardedBatchContinuation(task, guardedBatchRun, operatorActions, c
             continuation: recovery?.continuation || WRITING_CONTINUATION.blocked,
             nextStep: primaryAction?.label || recovery?.primaryActionLabel || '打开最后子任务',
             summary: issueCount
-                ? `最后一个子任务的审查摘要记录了 ${issueCount} 个问题，先处理阻断再继续。`
+                ? `最后一个子任务的问题汇总记录了 ${issueCount} 个问题，先处理阻断再继续。`
                 : '批量护栏被最后一个子任务的审查结果阻断。',
             reasons: ['批量护栏被审查关卡拦截', recovery?.followupLabel, recovery?.reviewSummaryHint, ...contractSignals].filter(Boolean),
             actionLabel: primaryAction?.label,
@@ -313,8 +313,8 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
             heading: recovery?.heading || '继续前需要人工审批',
             continuation: recovery?.continuation || WRITING_CONTINUATION.waitingApproval,
             nextStep: recovery?.primaryActionLabel || '批准或拒绝回写',
-            summary: '正文已经生成并停在 approval-gate，必须先处理人工审批。',
-            reasons: ['当前 write 任务停在 approval-gate', recovery?.followupLabel, ...contractSignals].filter(Boolean),
+            summary: '正文已经生成并停在待人工确认阶段，必须先处理人工审批。',
+            reasons: ['当前写作任务停在待人工确认阶段', recovery?.followupLabel, ...contractSignals].filter(Boolean),
             actionLabel: primaryAction?.label || recovery?.primaryActionLabel || '批准或拒绝回写',
         })
     }
@@ -330,9 +330,9 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
             continuation: recovery?.continuation || WRITING_CONTINUATION.blocked,
             nextStep: recovery?.primaryActionLabel || '打开阻断任务并修复',
             summary: reviewIssueCount
-                ? `审查摘要记录了 ${reviewIssueCount} 个问题，当前章节尚不满足继续推进条件。`
+                ? `问题汇总记录了 ${reviewIssueCount} 个问题，当前章节尚不满足继续推进条件。`
                 : '当前章节被审查关卡拦截，不能直接继续下一章。',
-            reasons: ['Write 任务被审查关卡拦截', recovery?.followupLabel, recovery?.reviewSummaryHint, ...contractSignals].filter(Boolean),
+            reasons: ['当前写作任务被审查阻断', recovery?.followupLabel, recovery?.reviewSummaryHint, ...contractSignals].filter(Boolean),
             actionLabel: primaryAction?.label,
         })
     }
@@ -341,10 +341,10 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
             tone: 'warning',
             heading: '继续前建议先重规划',
             continuation: '建议暂停',
-            nextStep: `从 ${storyRefresh.recommended_resume_from || 'story-director'} 重试`,
+            nextStep: '刷新后续章节规划并重跑本章',
             summary: storyRefresh.suggested_action || '当前章节的写回结果已经建议先刷新滚动规划，再决定是否继续。',
-            reasons: ['Writeback 建议 Story Refresh', ...contractSignals],
-            actionLabel: primaryAction?.label || `从 ${storyRefresh.recommended_resume_from || 'story-director'} 重试`,
+            reasons: ['当前写回结果建议刷新后续章节规划', ...contractSignals],
+            actionLabel: primaryAction?.label || '刷新后续章节规划并重跑本章',
         })
     }
     if (task?.status === 'completed' && missedCount > 0) {
@@ -364,7 +364,7 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
             heading: '当前可继续下一章',
             continuation: WRITING_CONTINUATION.continuable,
             nextStep: '创建下一章写作或护栏推进',
-            summary: '当前章节已完成写回，未命中新的 Story Refresh 或审查阻断，可以进入下一章。',
+            summary: '当前章节已完成写回，未命中新的重规划建议或审查阻断，可以进入下一章。',
             reasons: ['当前章节已完成写回', ...contractSignals],
             actionLabel: primaryAction?.label,
         })

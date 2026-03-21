@@ -5,6 +5,7 @@ export function resolveRuntimeBadgeLabel(task) {
     if (stepState === 'cancelled') return '已停止'
     if (stepState === 'rejected') return '已拒绝'
     if (stepState === 'retrying') return '重试中'
+    if (stepState === 'resuming_writeback') return '回写中'
     if (stepState === 'waiting_approval') return '待审批'
     if (stepState === 'failed') return '已失败'
     if (stepState === 'completed') return '已完成'
@@ -17,6 +18,7 @@ export function resolveRuntimeBadgeTone(task) {
     const stepState = task?.runtime_status?.step_state
     if (stepState === 'running') return 'info'
     if (stepState === 'retrying') return 'warning'
+    if (stepState === 'resuming_writeback') return 'info'
     if (stepState === 'waiting_approval') return 'warning'
     if (stepState === 'interrupted') return 'warning'
     if (stepState === 'cancelled') return 'warning'
@@ -44,6 +46,8 @@ export function buildRuntimeSummary(task) {
     }
     if (runtime.step_state === 'retrying' && runtime.attempt) {
         parts.push(`第 ${runtime.attempt} 次尝试`)
+    } else if (runtime.step_state === 'resuming_writeback') {
+        parts.push('审批已通过，正在回写正文和同步项目数据')
     } else if (runtime.step_state === 'running' && runtime.running_seconds >= 0) {
         parts.push(formatRuntimeDuration(runtime.running_seconds))
     } else if (runtime.step_state === 'failed' && runtime.error_code) {
@@ -59,7 +63,7 @@ export function buildRuntimeSummary(task) {
 
 export function isRuntimeActiveTask(task) {
     const stepState = task?.runtime_status?.step_state
-    return stepState === 'running' || stepState === 'retrying'
+    return stepState === 'running' || stepState === 'retrying' || stepState === 'resuming_writeback'
 }
 
 export function withLiveRuntimeStatus(task, nowMs) {

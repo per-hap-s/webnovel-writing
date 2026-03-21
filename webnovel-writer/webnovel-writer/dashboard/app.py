@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from subprocess import run
 import subprocess
 from contextlib import asynccontextmanager, closing
@@ -1350,6 +1351,10 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
     def list_tasks(request: Request, limit: int = 50):
         return _get_request_orchestrator(request).list_tasks(limit=limit)
 
+    @app.get('/api/tasks/summary')
+    def list_task_summaries(request: Request, limit: int = 50):
+        return _get_request_orchestrator(request).list_task_summaries(limit=limit)
+
     def _create_task(task_type: str, request: TaskRequest, http_request: Request):
         project_root_value = request.project_root or str(_resolve_request_project_root(http_request))
         payload = request.model_dump() if hasattr(request, 'model_dump') else request.dict()
@@ -1478,6 +1483,13 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         if not task:
             raise HTTPException(404, '未找到任务。')
         return task
+
+    @app.get('/api/tasks/{task_id}/detail')
+    def get_task_detail(task_id: str, request: Request, event_limit: int = 200):
+        payload = _get_request_orchestrator(request).get_task_detail(task_id, event_limit=event_limit)
+        if not payload:
+            raise HTTPException(404, '未找到任务。')
+        return payload
 
     @app.get('/api/tasks/{task_id}/events')
     def get_task_events(task_id: str, request: Request, limit: int = 200):
@@ -1822,7 +1834,12 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         async def _gen():
             try:
                 while True:
-                    msg = await q.get()
+                    try:
+                        msg = await asyncio.wait_for(q.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        heartbeat = json.dumps({"kind": "heartbeat", "ts": time.time()})
+                        yield f'data: {heartbeat}\n\n'
+                        continue
                     yield f'data: {msg}\n\n'
             except asyncio.CancelledError:
                 pass

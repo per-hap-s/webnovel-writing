@@ -11,6 +11,8 @@ const TASK_TYPE_LABELS = {
 const STATUS_LABELS = {
     queued: '已排队',
     running: '运行中',
+    retrying: '重试中',
+    resuming_writeback: '回写中',
     awaiting_writeback_approval: '等待回写审批',
     completed: '已完成',
     failed: '失败',
@@ -38,9 +40,9 @@ const STEP_LABELS = {
     'consistency-review': '一致性审查',
     'continuity-review': '连续性审查',
     'ooc-review': '角色一致性审查',
-    'review-summary': '审查汇总',
+    'review-summary': '问题汇总',
     polish: '润色',
-    'approval-gate': '审批关卡',
+    'approval-gate': '待人工确认',
     'data-sync': '数据同步',
     idle: '空闲',
 }
@@ -177,7 +179,7 @@ const UI_COPY = {
     unknownSystemEventWithDetail: '系统事件（请查看详情区）',
 }
 
-TASK_TYPE_LABELS.repair = '自动修稿'
+TASK_TYPE_LABELS.repair = '局部修稿'
 STEP_LABELS['repair-plan'] = '修稿规划'
 STEP_LABELS['repair-draft'] = '修稿改写'
 STEP_LABELS['repair-writeback'] = '修稿回写'
@@ -279,7 +281,7 @@ export function resolveApprovalStatusLabel(task) {
     const writebackStep = task?.task_type === 'repair' ? 'repair-writeback' : 'data-sync'
     if (approvalStatus === 'approved') {
         if (task?.status === 'completed') return UI_COPY.approvalApprovedCompleted
-        if (['queued', 'running'].includes(task?.status) && ['approval-gate', writebackStep].includes(task?.current_step)) {
+        if (['queued', 'running', 'retrying', 'resuming_writeback'].includes(task?.status) && ['approval-gate', writebackStep].includes(task?.current_step)) {
             return UI_COPY.approvalApprovedWritingBack
         }
         return UI_COPY.approvalApproved

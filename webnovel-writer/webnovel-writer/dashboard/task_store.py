@@ -191,6 +191,10 @@ class TaskStore:
                 "review_summary": None,
                 "approval": {},
             },
+            "runtime_meta": {
+                "last_event": None,
+                "last_non_heartbeat_event": None,
+            },
         }
         self._write_task(task)
         self.append_event(task_id, "info", f"任务已加入队列: {task_type}")
@@ -335,6 +339,8 @@ class TaskStore:
                     logger.debug("事件文件锁释放成功，任务ID: %s", task_id)
                 except Exception as e:
                     logger.warning("事件文件锁释放失败，任务ID: %s，错误: %s", task_id, e)
+
+        self._record_runtime_event(task_id, event)
         
         return event
 
@@ -441,7 +447,7 @@ class TaskStore:
                 step_results.pop(failed_step, None)
             if not preserve_approval:
                 artifacts["approval"] = {}
-            task["status"] = "queued"
+            task["status"] = "retrying"
             if not preserve_approval:
                 task["approval_status"] = "not_required"
             task["current_step"] = None
@@ -487,6 +493,43 @@ class TaskStore:
 
     def _events_path(self, task_id: str) -> Path:
         return self.base_dir / f"{task_id}.events.jsonl"
+
+    def _record_runtime_event(self, task_id: str, event: Dict[str, Any]) -> None:
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                return
+            runtime_meta = task.setdefault("runtime_meta", {})
+            runtime_meta["last_event"] = self._compact_runtime_event(event)
+            if str(event.get("message") or "") != "step_heartbeat":
+                runtime_meta["last_non_heartbeat_event"] = self._compact_runtime_event(event)
+                task["updated_at"] = str(event.get("timestamp") or _now_iso())
+            self._write_task(task)
+
+    def _compact_runtime_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        payload = event.get("payload") or {}
+        compact_payload = {
+            key: payload.get(key)
+            for key in (
+                "attempt",
+                "retry_count",
+                "timeout_seconds",
+                "retryable",
+                "error_code",
+                "http_status",
+                "next_step",
+                "resume_from_step",
+            )
+            if payload.get(key) is not None
+        }
+        return {
+            "id": event.get("id"),
+            "level": event.get("level"),
+            "message": event.get("message"),
+            "step_name": event.get("step_name"),
+            "timestamp": event.get("timestamp"),
+            "payload": compact_payload,
+        }
 
     def _write_task(self, task: Dict[str, Any]) -> None:
         """

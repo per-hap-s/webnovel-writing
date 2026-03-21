@@ -62,14 +62,18 @@ class FileWatcher:
             self._loop.call_soon_threadsafe(self._dispatch, msg)
 
     def _dispatch(self, msg: str):
-        dead: list[asyncio.Queue] = []
         for q in self._subscribers:
             try:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
-                dead.append(q)
-        for dq in dead:
-            self.unsubscribe(dq)
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(json.dumps({"kind": "overflow", "ts": time.time()}))
+                except asyncio.QueueFull:
+                    pass
 
     def start(self, watch_dir: Path, loop: asyncio.AbstractEventLoop):
         self.watch(watch_dir, loop)

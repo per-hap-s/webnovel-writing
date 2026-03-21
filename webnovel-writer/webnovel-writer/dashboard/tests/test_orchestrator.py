@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -112,21 +113,81 @@ def test_apply_plan_writeback_preserves_unrelated_state_fields(tmp_path: Path):
         encoding="utf-8",
     )
     service = OrchestrationService(project_root, runner=MappingRunner())
-    service._sync_core_setting_docs = lambda **kwargs: None
+    async def _noop_sync(**kwargs):
+        return None
+
+    service._sync_core_setting_docs = _noop_sync
     task = service.store.create_task("plan", {"volume": 1}, {"name": "plan", "version": 1, "steps": []})
 
-    service._apply_plan_writeback(
-        task["id"],
-        task,
-        {
-            "chapters": [{"chapter": 1}, {"chapter": 12}],
-            "summary": "Volume summary",
-        },
+    asyncio.run(
+        service._apply_plan_writeback(
+            task["id"],
+            task,
+            {
+                "chapters": [{"chapter": 1}, {"chapter": 12}],
+                "summary": "Volume summary",
+            },
+        )
     )
 
     updated = json.loads(state_path.read_text(encoding="utf-8"))
     assert updated["chapter_meta"]["7"]["title"] == "Existing Chapter"
     assert updated["planning"]["volume_plans"]["1"]["chapter_count"] == 2
+
+
+def test_plan_setting_doc_sync_runs_without_blocking_event_loop(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    workflow = {
+        "name": "plan",
+        "version": 1,
+        "steps": [{"name": "plan", "type": "llm", "instructions": "do", "output_schema": {}}],
+    }
+    llm_started = threading.Event()
+    llm_release = threading.Event()
+
+    class SlowSettingDocRunner(MappingRunner):
+        mode = "api"
+        provider = "openai-compatible"
+
+        def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
+            if step_spec["name"] == "plan":
+                return step_result(
+                    "plan",
+                    payload={
+                        "volume_plan": {"title": "Volume 1"},
+                        "chapters": [{"chapter": 1, "title": "Start"}],
+                    },
+                )
+            if step_spec["name"] == "setting-docs-sync":
+                llm_started.set()
+                assert llm_release.wait(timeout=1), "setting-docs-sync did not receive release signal"
+                return step_result(
+                    "setting-docs-sync",
+                    payload={
+                        "worldview": "# 世界观\n\n- 待补充\n",
+                        "power_system": "# 力量体系\n\n- 待补充\n",
+                        "protagonist": "# 主角卡\n\n- 待补充\n",
+                        "golden_finger": "# 金手指设计\n\n- 待补充\n",
+                    },
+                )
+            return super().run(step_spec, workspace, prompt_bundle, progress_callback)
+
+    service = OrchestrationService(project_root, runner=SlowSettingDocRunner())
+    task = service.store.create_task("plan", {"volume": 1}, workflow)
+    service._run_plan_preflight = lambda *args, **kwargs: None
+
+    async def _exercise() -> None:
+        runner_task = asyncio.create_task(service._run_task(task["id"]))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(llm_started.wait, 1), timeout=1)
+            await asyncio.wait_for(asyncio.sleep(0.05), timeout=0.2)
+        finally:
+            llm_release.set()
+        await asyncio.wait_for(runner_task, timeout=1)
+
+    asyncio.run(_exercise())
+    completed = service.get_task(task["id"])
+    assert completed["status"] == "completed"
 
 
 def test_probe_rag_returns_client_probe(tmp_path: Path):
@@ -145,7 +206,7 @@ def test_retry_keeps_failed_step_and_queues_again(tmp_path: Path):
     project_root = make_project(tmp_path)
 
     class FailingRunner(MappingRunner):
-        def run(self, step_spec, workspace, prompt_bundle):
+        def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
             return step_result(step_spec["name"], success=False, payload=None, error={"code": "STEP_FAILED", "message": "failed"})
 
     workflow = {"name": "write", "version": 1, "steps": [{"name": "context", "type": "llm"}, {"name": "draft", "type": "llm"}]}
@@ -158,7 +219,7 @@ def test_retry_keeps_failed_step_and_queues_again(tmp_path: Path):
     assert failed_task["current_step"] == "context"
 
     retried = service.retry_task(task["id"])
-    assert retried["status"] == "queued"
+    assert retried["status"] == "retrying"
 
 
 def test_retry_defaults_to_polish_or_data_sync(tmp_path: Path):
@@ -180,7 +241,7 @@ def test_retry_defaults_to_polish_or_data_sync(tmp_path: Path):
 
     retried_polish = service.retry_task(polish_task["id"])
     polish_event = service.get_events(polish_task["id"])[-1]
-    assert retried_polish["status"] == "queued"
+    assert retried_polish["status"] == "retrying"
     assert polish_event["payload"]["resume_from_step"] == "polish"
 
     data_sync_task = service.store.create_task("write", {"chapter": 2}, workflow)
@@ -197,7 +258,7 @@ def test_retry_defaults_to_polish_or_data_sync(tmp_path: Path):
     retried_data_sync = service.retry_task(data_sync_task["id"])
     data_sync_event = service.get_events(data_sync_task["id"])[-1]
     refreshed = service.get_task(data_sync_task["id"])
-    assert retried_data_sync["status"] == "queued"
+    assert retried_data_sync["status"] == "retrying"
     assert data_sync_event["payload"]["resume_from_step"] == "data-sync"
     assert refreshed["approval_status"] == "approved"
 
@@ -265,6 +326,60 @@ def test_runtime_status_aggregates_retry_and_waiting_approval(tmp_path: Path):
     assert waiting_runtime["step_state"] == "waiting_approval"
     assert waiting_runtime["phase_label"] == "回写审批"
     assert waiting_runtime["waiting_since"] is None
+
+
+def test_list_task_summaries_returns_runtime_snapshot_without_full_events(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "context", "type": "llm"}]}
+    task = service.store.create_task("write", {"chapter": 3}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow, status="running", current_step="context")
+    service.store.append_event(
+        task["id"],
+        "info",
+        "request_dispatched",
+        step_name="context",
+        payload={"attempt": 1, "retry_count": 0, "timeout_seconds": 90},
+    )
+
+    summaries = service.list_task_summaries(limit=10)
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["id"] == task["id"]
+    assert summary["runtime_status"]["step_state"] == "running"
+    assert summary["runtime_status"]["last_event_message"] == "request_dispatched"
+    assert summary["runtime_status"]["timeout_seconds"] == 90
+
+
+def test_approve_writeback_marks_task_resuming_before_scheduler_runs(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {
+        "name": "write",
+        "version": 1,
+        "steps": [
+            {"name": "context", "type": "llm"},
+            {"name": "approval-gate", "type": "internal"},
+            {"name": "data-sync", "type": "llm"},
+        ],
+    }
+    task = service.store.create_task("write", {"chapter": 1, "require_manual_approval": True}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow)
+    service.store.mark_waiting_for_approval(
+        task["id"],
+        "approval-gate",
+        {"status": "pending", "requested_at": "2026-03-16T10:05:00", "next_step": "data-sync"},
+    )
+
+    approved = service.approve_writeback(task["id"], "继续回写")
+    events = service.get_events(task["id"])
+    approval_event = next(event for event in reversed(events) if event["message"] == "Writeback approved")
+
+    assert approved["status"] == "resuming_writeback"
+    assert approved["approval_status"] == "approved"
+    assert approval_event["payload"]["resume_from_step"] == "approval-gate"
+    assert approval_event["payload"]["reason"] == "继续回写"
 
 
 def test_long_running_step_emits_progress_and_heartbeat(tmp_path: Path):

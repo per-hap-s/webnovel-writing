@@ -499,7 +499,7 @@ class TestUpdateTask:
 
         reset = task_store.reset_for_retry(task["id"])
 
-        assert reset["status"] == "queued"
+        assert reset["status"] == "retrying"
         assert reset["approval_status"] == "not_required"
         assert reset["current_step"] is None
         assert reset["finished_at"] is None

@@ -581,6 +581,8 @@ function translateConnection(status) {
 export function TaskCenterPageSection({
     tasks,
     selectedTask,
+    selectedTaskId,
+    currentProjectRoot,
     onSelectTask,
     onMutated,
     onNavigateOverview,
@@ -599,6 +601,8 @@ export function TaskCenterPageSection({
         <TaskCenterPageSectionImpl
             tasks={tasks}
             selectedTask={selectedTask}
+            selectedTaskId={selectedTaskId}
+            currentProjectRoot={currentProjectRoot}
             onSelectTask={onSelectTask}
             onMutated={onMutated}
             onNavigateOverview={onNavigateOverview}

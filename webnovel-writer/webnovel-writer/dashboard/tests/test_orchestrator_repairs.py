@@ -1584,7 +1584,7 @@ def test_retry_repair_task_preserves_approved_state_for_repair_writeback(tmp_pat
     events = service.get_events(task["id"])
     retry_event = next(event for event in reversed(events) if event["message"] == "Retry requested")
 
-    assert retried["status"] == "queued"
+    assert retried["status"] == "retrying"
     assert retried["approval_status"] == "approved"
     assert retry_event["payload"]["resume_from_step"] == "repair-writeback"
     assert retry_event["payload"]["preserve_approval"] is True

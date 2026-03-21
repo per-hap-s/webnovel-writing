@@ -62,7 +62,7 @@ export function SupervisorAuditGroupCard({
             {recoverySemantics ? <div className="tiny">{`恢复语义：${recoverySemantics.label}`}</div> : null}
             {recoverySemantics ? <div className="tiny">{`主恢复动作：${recoverySemantics.primaryActionLabel}`}</div> : null}
             {recoverySemantics ? <div className="tiny">{`恢复后目标：${recoverySemantics.followupLabel}`}</div> : null}
-            {recoverySemantics?.reviewSummaryHint ? <div className="tiny">{`审查摘要：${recoverySemantics.reviewSummaryHint}`}</div> : null}
+            {recoverySemantics?.reviewSummaryHint ? <div className="tiny">{`问题汇总：${recoverySemantics.reviewSummaryHint}`}</div> : null}
             {group.stableKey ? (
                 <div className="button-row">
                     <button className="secondary-button" onClick={() => setAuditFocusedStableKey(group.stableKey)}>

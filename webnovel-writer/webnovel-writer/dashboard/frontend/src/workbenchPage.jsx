@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ErrorNotice, ProjectBootstrapSection } from './appSections.jsx'
 import { formatNumber } from './dashboardPageCommon.jsx'
 import { normalizeError, postJSON } from './api.js'
@@ -53,9 +53,15 @@ export function WorkbenchPage({
     const [busyKey, setBusyKey] = useState('')
     const [draftRoot, setDraftRoot] = useState('')
     const [landingPreference, setLandingPreference] = useState(() => readLandingPreference(landingPreferenceKey))
+    const createPanelRef = useRef(null)
 
     const currentProject = hubData?.current_project || null
     const missingCards = hubData?.missing_projects || []
+
+    useEffect(() => {
+        if (!draftRoot || !createPanelRef.current || typeof createPanelRef.current.scrollIntoView !== 'function') return
+        createPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, [draftRoot])
 
     async function pickFolder() {
         const response = await postJSON('/api/workbench/pick-folder', {})
@@ -69,6 +75,18 @@ export function WorkbenchPage({
         if (response?.opened) {
             setMessage('')
             setDraftRoot('')
+            return
+        }
+        if (response?.error) {
+            setError(response.error)
+            return
+        }
+        if (response?.project_initialized !== false) { /*
+            setError(normalizeError(new Error(response?.next_recommended_action || '鎵撳紑椤圭洰澶辫触锛岃绋嶅悗鍐嶈瘯銆?)))
+            return */
+        }
+        if (response?.project_initialized !== false) {
+            setError(normalizeError(new Error(response?.next_recommended_action || 'Open project failed. Please try again.')))
             return
         }
         setDraftRoot(projectRoot)
@@ -152,7 +170,7 @@ export function WorkbenchPage({
             <section className="panel full-span workbench-hero">
                 <div className="task-item-header workbench-hero-header">
                     <div>
-                        <div className="workbench-eyebrow">Workbench</div>
+                        <div className="workbench-eyebrow">工作台</div>
                         <div className="panel-title">项目工作台</div>
                         <div className="workbench-hero-copy">左侧用于快速进入项目，右侧保留项目管理、创建入口和工具动作。工作台本身不再重复堆放整套项目列表。</div>
                     </div>
@@ -211,7 +229,7 @@ export function WorkbenchPage({
                         </button>
                     </section>
 
-                    <section className="panel full-span workbench-panel">
+                    <section ref={createPanelRef} className="panel full-span workbench-panel">
                         <div className="panel-title">新建项目</div>
                         <div className="workbench-section-copy">先选目录，再填写标题和题材。创建成功后会直接进入该项目 Dashboard。</div>
                         <div className="task-row-actions workbench-inline-actions">

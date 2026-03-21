@@ -28,23 +28,23 @@ function normalizeKind(value) {
 }
 
 function defaultLabelForAction(action) {
-    if (!action) return '执行操作'
+    if (!action) return '执行下一步'
     if (action.kind === 'open-task' || action.kind === 'open-blocked-task') {
-        return action.taskId ? '打开任务' : '查看任务'
+        return '查看任务'
     }
     if (action.kind === 'retry-task') {
-        return action.resumeFromStep === 'story-director' ? '从 Story Director 重试' : '重试任务'
+        return action.resumeFromStep === 'story-director' ? '刷新后续章节规划并重跑本章' : '按当前步骤重跑'
     }
     if (action.kind === 'launch-task') {
-        return action.taskType ? `创建 ${action.taskType}` : '创建任务'
+        return action.taskType === 'repair' ? '创建局部修稿任务' : '执行下一步'
     }
     if (action.kind === 'resume-existing-task') {
-        return '恢复任务'
+        return '恢复执行'
     }
     if (action.kind === 'complete-noop') {
-        return '完成'
+        return '无需操作'
     }
-    return '执行操作'
+    return '执行下一步'
 }
 
 export function normalizeOperatorAction(action, fallback = {}) {
@@ -159,7 +159,7 @@ function buildGuardedWriteFallbackActions(task, structuredOutput) {
             normalizeOperatorAction({
                 id: `guarded-write:retry:${task?.id || nextChapter}`,
                 kind: 'retry-task',
-                label: '从 Story Director 重试',
+                label: '刷新后续章节规划并重跑本章',
                 variant: 'primary',
                 taskId: task?.id || '',
                 resumeFromStep: 'story-director',
@@ -269,7 +269,7 @@ function buildGuardedBatchFallbackActions(task, structuredOutput) {
             normalizeOperatorAction({
                 id: `guarded-batch:retry-last:${task?.id || nextChapter}`,
                 kind: 'retry-task',
-                label: '从 Story Director 重试最后子任务',
+                label: '刷新后续章节规划并重跑最后子任务',
                 variant: 'secondary',
                 taskId: structuredOutput?.last_child_task_id || task?.id || '',
                 resumeFromStep: 'story-director',

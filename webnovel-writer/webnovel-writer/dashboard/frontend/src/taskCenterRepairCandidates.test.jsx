@@ -105,7 +105,7 @@ test('review summary repair candidate can launch repair task from task detail', 
                         operator_action: {
                             kind: 'launch-task',
                             task_type: 'repair',
-                            label: '启动自动修稿',
+                            label: '创建局部修稿任务',
                             payload: {
                                 chapter: 2,
                                 mode: 'standard',
@@ -130,7 +130,7 @@ test('review summary repair candidate can launch repair task from task detail', 
 
     renderTaskCenter([task], task, { onSelectTask, onMutated })
 
-    await user.click(screen.getByRole('button', { name: '启动自动修稿' }))
+    await user.click(screen.getByRole('button', { name: '创建局部修稿任务' }))
 
     await waitFor(() => {
         expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/repair', {
