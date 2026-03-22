@@ -180,6 +180,18 @@ def make_service(project_root: Path, runner: MappingRunner | SequenceRunner) -> 
         return OrchestrationService(project_root, runner=runner)
 
 
+def resume_write_after_brief(service: OrchestrationService, task: dict, *, reason: str = "approve brief") -> dict:
+    approved = service.approve_writeback(task["id"], reason=reason)
+    asyncio.run(service._run_task(task["id"], resume_from_step=approved.get("current_step") or "chapter-brief-approval"))
+    return service.get_task(task["id"])
+
+
+def run_write_after_brief_approval(service: OrchestrationService, request: dict, *, reason: str = "approve brief") -> dict:
+    waiting = service.run_task_sync("write", request)
+    assert waiting["status"] == "awaiting_chapter_brief_approval"
+    return resume_write_after_brief(service, waiting, reason=reason)
+
+
 def long_content(title: str = "Chapter") -> str:
     return f"# {title}\n" + ("Rain archive memory cost " * 50)
 
@@ -365,7 +377,7 @@ def test_write_project_context_includes_context_payload_and_settings_snapshots(t
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
 
     assert task["status"] == "completed"
     context_bundle = next(bundle for step_name, bundle in runner.prompt_bundles if step_name == "context")
@@ -401,7 +413,7 @@ def test_write_data_sync_persists_chapter_index_and_canonical_word_count(tmp_pat
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
 
     assert task["status"] == "completed"
     chapter_record = service.index_manager.get_chapter(1)
@@ -450,7 +462,7 @@ def test_write_data_sync_uses_requested_chapter_as_only_write_target(tmp_path: P
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 2, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 2, "require_manual_approval": False})
 
     expected_chapter_path = project_root / service._default_chapter_file(2)
     expected_summary_path = project_root / service._default_summary_file(2)
@@ -495,7 +507,7 @@ def test_write_data_sync_persists_structured_settings_into_state_and_index(tmp_p
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 2, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 2, "require_manual_approval": False})
 
     assert task["status"] == "completed"
     state = json.loads((project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
@@ -540,7 +552,7 @@ def test_write_data_sync_enriches_minimal_payload_from_planning_profile(tmp_path
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 3, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 3, "require_manual_approval": False})
 
     assert task["status"] == "completed"
     writeback = task["artifacts"]["writeback"]
@@ -575,7 +587,7 @@ def test_write_data_sync_rejects_truncated_or_bogus_word_count(tmp_path: Path):
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
 
     assert task["status"] == "failed"
     assert task["error"]["code"] == "VALIDATION_ERROR"
@@ -609,7 +621,7 @@ def test_write_data_sync_fails_when_chapter_index_is_missing_after_writeback(tmp
     service = make_service(project_root, runner)
     service.index_manager.add_chapter = lambda chapter_meta: None
 
-    task = service.run_task_sync("write", {"chapter": 2, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 2, "require_manual_approval": False})
 
     assert task["status"] == "failed"
     assert task["error"]["code"] == "WRITEBACK_CONSISTENCY_ERROR"
@@ -790,7 +802,7 @@ def test_write_context_auto_retries_once_and_compacts_context_payload_for_later_
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
 
     assert task["status"] == "completed"
     assert runner.calls[:2] == ["context", "context"]
@@ -871,7 +883,7 @@ def test_write_draft_auto_retries_once_after_invalid_json_output(tmp_path: Path)
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
 
     assert task["status"] == "completed"
     assert runner.calls[:3] == ["context", "draft", "draft"]
@@ -1043,7 +1055,7 @@ def test_write_data_sync_invalid_output_is_retriable_but_not_auto_retried(tmp_pa
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
     task_with_runtime = service.get_task(task["id"])
     messages = [event["message"] for event in service.get_events(task["id"])]
 
@@ -1073,7 +1085,7 @@ def test_failed_write_does_not_persist_review_metrics_before_data_sync(tmp_path:
     )
     service = make_service(project_root, runner)
 
-    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    task = run_write_after_brief_approval(service, {"chapter": 1, "require_manual_approval": False})
 
     assert task["status"] == "failed"
     assert service.index_manager.get_chapter(1) is None
@@ -1247,11 +1259,14 @@ def test_write_task_finishes_completed_after_manual_approval_and_data_sync(tmp_p
 
     waiting = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": True})
 
-    assert waiting["status"] == "awaiting_writeback_approval"
+    assert waiting["status"] == "awaiting_chapter_brief_approval"
 
-    approved = service.approve_writeback(waiting["id"], reason="manual approval")
-    asyncio.run(service._run_task(waiting["id"], resume_from_step=approved.get("current_step") or "approval-gate"))
-    completed = service.get_task(waiting["id"])
+    after_brief = resume_write_after_brief(service, waiting, reason="approve brief")
+    assert after_brief["status"] == "awaiting_writeback_approval"
+
+    approved = service.approve_writeback(after_brief["id"], reason="manual approval")
+    asyncio.run(service._run_task(after_brief["id"], resume_from_step=approved.get("current_step") or "approval-gate"))
+    completed = service.get_task(after_brief["id"])
 
     assert completed["status"] == "completed"
     assert completed["current_step"] is None
@@ -1371,7 +1386,7 @@ def test_write_data_sync_rolls_back_partial_mutations_on_consistency_failure(tmp
     service = make_service(project_root, runner)
 
     with patch.object(service, "_validate_writeback_consistency", side_effect=ValueError("force consistency failure")):
-        task = service.run_task_sync("write", {"chapter": chapter, "require_manual_approval": False})
+        task = run_write_after_brief_approval(service, {"chapter": chapter, "require_manual_approval": False})
 
     assert task["status"] == "failed"
     assert chapter_path.read_text(encoding="utf-8") == "旧正文内容\n"

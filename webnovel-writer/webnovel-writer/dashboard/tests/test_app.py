@@ -936,6 +936,79 @@ def test_story_plans_endpoint_reads_file_backed_story_director_payloads(client: 
     assert payload[0]["updated_at_display"]
 
 
+def test_director_hub_endpoint_returns_current_brief_and_continuity_ledgers(
+    client: TestClient,
+    mock_project_root: Path,
+    mock_orchestrator: MagicMock,
+):
+    director_dir = mock_project_root / ".webnovel" / "director"
+    director_dir.mkdir(parents=True, exist_ok=True)
+    (director_dir / "ch0003.json").write_text(
+        json.dumps(
+            {
+                "chapter": 3,
+                "chapter_goal": "Push the bureau clue forward.",
+                "primary_conflict": "Shen Yan must move before the cost spikes.",
+                "must_advance_threads": ["warning source", "bureau debt"],
+                "forbidden_terms": ["system panel"],
+                "voice_constraints": ["Keep Shen Yan terse."],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    state = json.loads((mock_project_root / ".webnovel" / "state.json").read_text(encoding="utf-8"))
+    state["progress"]["current_chapter"] = 2
+    state["voice_bible"] = {"characters": {"Shen Yan": {"constraints": ["Keep Shen Yan terse."]}}}
+    state["mystery_ledger"] = [{"name": "warning source", "status": "active"}]
+    state["rule_assertions"] = [{"name": "Every rewind burns one memory"}]
+    state["trust_map"] = {"Shen Yan->Bureau": {"status": "fragile", "chapter": 3}}
+    state["director_decisions"] = [{"chapter": 3, "decision": "Hold back the watcher identity."}]
+    state["plot_threads"] = {"active_threads": [{"title": "warning source", "stage": "active"}], "foreshadowing": []}
+    (mock_project_root / ".webnovel" / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    mock_orchestrator.get_director_hub.return_value = {
+        "current_chapter": 3,
+        "current_brief": {
+            "chapter": 3,
+            "chapter_goal": "Push the bureau clue forward.",
+            "primary_conflict": "Shen Yan must move before the cost spikes.",
+        },
+        "voice_bible": {"characters": {"Shen Yan": {"constraints": ["Keep Shen Yan terse."]}}},
+        "continuity": {
+            "mystery_ledger": [{"name": "warning source", "status": "active"}],
+            "rule_assertions": [{"name": "Every rewind burns one memory"}],
+            "trust_map": {"Shen Yan->Bureau": {"status": "fragile", "chapter": 3}},
+            "director_decisions": [{"chapter": 3, "decision": "Hold back the watcher identity."}],
+            "plot_threads": [{"title": "warning source", "stage": "active"}],
+        },
+    }
+
+    response = client.get("/api/project/director-hub")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_brief"]["chapter"] == 3
+    assert payload["voice_bible"]["characters"]["Shen Yan"]["constraints"] == ["Keep Shen Yan terse."]
+    assert payload["continuity"]["mystery_ledger"][0]["name"] == "warning source"
+    assert payload["continuity"]["plot_threads"][0]["title"] == "warning source"
+    mock_orchestrator.get_director_hub.assert_called_once()
+
+
+def test_chapter_brief_approve_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.approve_chapter_brief.return_value = {
+        "id": "task-brief-1",
+        "status": "queued",
+        "current_step": "chapter-brief-approval",
+    }
+
+    response = client.post("/api/chapters/3/brief/approve", json={"reason": "批准开写"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    mock_orchestrator.approve_chapter_brief.assert_called_once_with(3, "批准开写")
+
+
 def test_foreshadowing_endpoint_supports_chapter_entity_and_limit(client: TestClient, mock_project_root: Path):
     _seed_narrative_tables(mock_project_root)
 

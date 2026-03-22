@@ -72,7 +72,7 @@ const LANDING_PREFERENCES = [
     { value: 'auto_last', label: '自动进入上次项目' },
 ]
 
-const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'])
+const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'awaiting_chapter_brief_approval', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'])
 
 const UI_COPY = {
     overviewPlanningTitle: '规划必填信息',
@@ -95,6 +95,7 @@ export default function App() {
     const [hubData, setHubData] = useState(null)
     const [hubLoadError, setHubLoadError] = useState(null)
     const [projectInfo, setProjectInfo] = useState(null)
+    const [directorHub, setDirectorHub] = useState(null)
     const [llmStatus, setLlmStatus] = useState(null)
     const [ragStatus, setRagStatus] = useState(null)
     const [tasks, setTasks] = useState([])
@@ -138,6 +139,7 @@ export default function App() {
             optimisticTasksRef.current.clear()
             lastSseActivityAtRef.current = 0
             setProjectInfo(null)
+            setDirectorHub(null)
             setLlmStatus(null)
             setRagStatus(null)
             setTasks([])
@@ -243,9 +245,10 @@ export default function App() {
 
     async function reloadCore(refreshId) {
         const params = { project_root: currentProjectRoot }
-        const [projectResult, tasksResult] = await Promise.allSettled([
+        const [projectResult, tasksResult, directorHubResult] = await Promise.allSettled([
             fetchJSON('/api/project/info', params),
             fetchJSON('/api/tasks/summary', params),
+            fetchJSON('/api/project/director-hub', params),
         ])
         if (refreshId !== coreRefreshSeqRef.current) return
 
@@ -266,6 +269,13 @@ export default function App() {
             })
         } else {
             errors.push(normalizeError(tasksResult.reason))
+        }
+
+        if (directorHubResult.status === 'fulfilled') {
+            setDirectorHub(directorHubResult.value)
+        } else {
+            setDirectorHub(null)
+            errors.push(normalizeError(directorHubResult.reason))
         }
 
         setCoreLoadError(errors[0] || null)
@@ -480,6 +490,7 @@ export default function App() {
                 {effectivePage === 'control' && projectMode && (
                     <ControlPage
                         projectInfo={projectInfo}
+                        directorHub={directorHub}
                         llmStatus={llmStatus}
                         ragStatus={ragStatus}
                         tasks={tasks}
@@ -764,7 +775,59 @@ function mapContinuationToneToBadgeTone(tone) {
     return 'muted'
 }
 
-function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onApiSettingsSaved, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
+function trimText(value) {
+    return String(value || '').trim()
+}
+
+function mapDirectorItems(items, resolver) {
+    if (!Array.isArray(items)) return []
+    return items
+        .map((item) => resolver?.(item))
+        .filter(Boolean)
+}
+
+function mapTrustItems(trustMap) {
+    if (!trustMap || typeof trustMap !== 'object') return []
+    return Object.entries(trustMap)
+        .slice(0, 6)
+        .map(([key, value]) => {
+            const status = trimText(value?.status)
+            const chapter = Number(value?.chapter || 0)
+            if (status && chapter > 0) return `${key} / ${status}（第 ${chapter} 章）`
+            if (status) return `${key} / ${status}`
+            return key
+        })
+}
+
+function mapVoiceBibleItems(voiceBible) {
+    const characters = voiceBible?.characters
+    if (!characters || typeof characters !== 'object') return []
+    return Object.entries(characters)
+        .slice(0, 6)
+        .map(([name, entry]) => {
+            const constraints = coerceUniqueTextList(entry?.constraints)
+            const notes = coerceUniqueTextList(entry?.notes)
+            const detail = constraints[0] || notes[0] || trimText(entry?.arc_stage)
+            return detail ? `${name} / ${detail}` : name
+        })
+}
+
+function coerceUniqueTextList(items) {
+    const source = Array.isArray(items) ? items : (items ? [items] : [])
+    const seen = new Set()
+    const values = []
+    source.forEach((item) => {
+        const text = trimText(item)
+        if (!text) return
+        const key = text.toLowerCase()
+        if (seen.has(key)) return
+        seen.add(key)
+        values.push(text)
+    })
+    return values
+}
+
+function ControlPage({ projectInfo, directorHub, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onApiSettingsSaved, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
     const [submittingActionKey, setSubmittingActionKey] = useState('')
@@ -823,6 +886,8 @@ function ControlPage({ projectInfo, llmStatus, ragStatus, tasks, bootstrapHint, 
                     <div className="empty-state">{`${UI_COPY.retrievalEngine}最近错误：${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`}</div>
                 )}
             </section>
+
+            <DirectorHubPanel directorHub={directorHub} />
 
             <section className="panel">
                 <div className="panel-title">项目创建</div>
@@ -922,6 +987,120 @@ function WritingTaskOverviewCard({ task, summary, submitting, onOpenTask, onActi
                     {submitting ? '处理中...' : (summary.primaryActionLabel || '执行下一步')}
                 </button>
             </div>
+        </div>
+    )
+}
+
+function DirectorHubPanel({ directorHub }) {
+    const currentBrief = directorHub?.current_brief || {}
+    const storyPlan = directorHub?.story_plan || {}
+    const continuity = directorHub?.continuity || {}
+    const voiceBible = directorHub?.voice_bible || {}
+    const chapterBeats = Array.isArray(storyPlan?.chapters) ? storyPlan.chapters.slice(0, 3) : []
+    const activeThreads = mapDirectorItems(continuity?.plot_threads, (item) => item?.title || item?.name)
+    const mysteryItems = mapDirectorItems(continuity?.mystery_ledger, (item) => item?.name || item?.title)
+    const ruleItems = mapDirectorItems(continuity?.rule_assertions, (item) => item?.name || item?.title)
+    const trustItems = mapTrustItems(continuity?.trust_map)
+    const decisionItems = mapDirectorItems(continuity?.director_decisions, (item) => {
+        const chapter = Number(item?.chapter || 0)
+        const goal = trimText(item?.chapter_goal)
+        if (chapter > 0 && goal) return `第 ${chapter} 章 / ${goal}`
+        if (chapter > 0) return `第 ${chapter} 章导演决策`
+        return goal
+    })
+    const voiceItems = mapVoiceBibleItems(voiceBible)
+    const currentChapter = Number(directorHub?.current_chapter || currentBrief?.chapter || 0)
+
+    return (
+        <section className="panel full-span">
+            <div className="panel-title">导演台</div>
+            <div className="director-hub-topline">
+                <span className="runtime-badge info">{`当前准备章：${currentChapter > 0 ? `第 ${currentChapter} 章` : '未确定'}`}</span>
+                <span className="runtime-badge muted">{`活跃线程 ${activeThreads.length}`}</span>
+                <span className="runtime-badge muted">{`谜团 ${mysteryItems.length}`}</span>
+                <span className="runtime-badge muted">{`规则 ${ruleItems.length}`}</span>
+            </div>
+            <div className="director-hub-grid">
+                <section className="director-hub-card">
+                    <div className="subsection-title">当前章 brief</div>
+                    {currentBrief && Object.keys(currentBrief).length ? (
+                        <>
+                            <div className="director-hub-kv">
+                                <div><strong>本章目标：</strong>{trimText(currentBrief.chapter_goal) || '未生成'}</div>
+                                <div><strong>核心冲突：</strong>{trimText(currentBrief.primary_conflict) || '未生成'}</div>
+                                <div><strong>揭示上限：</strong>{trimText(currentBrief.allowed_reveal_ceiling) || '未设定'}</div>
+                                <div><strong>章末钩子：</strong>{trimText(currentBrief.ending_hook_target) || '未设定'}</div>
+                            </div>
+                            <DirectorChipGroup title="必须推进" items={currentBrief.must_advance_threads} emptyText="暂未指定必须推进的线程" />
+                            <DirectorChipGroup title="必须压住的信息" items={currentBrief.must_hold_back_facts} emptyText="暂无需要压住的事实" />
+                            <DirectorChipGroup title="声线约束" items={currentBrief.voice_constraints} emptyText="暂无声线约束" />
+                            <DirectorChipGroup title="禁用术语" items={currentBrief.forbidden_terms} emptyText="暂无禁用术语" />
+                        </>
+                    ) : (
+                        <div className="empty-state">当前还没有可展示的章节 brief。</div>
+                    )}
+                </section>
+
+                <section className="director-hub-card">
+                    <div className="subsection-title">卷规划摘要</div>
+                    {storyPlan && Object.keys(storyPlan).length ? (
+                        <>
+                            <div className="director-hub-kv">
+                                <div><strong>锚点章节：</strong>{Number(storyPlan.anchor_chapter || 0) || '-'}</div>
+                                <div><strong>规划跨度：</strong>{Number(storyPlan.planning_horizon || 0) || '-'}</div>
+                                <div><strong>规划理由：</strong>{trimText(storyPlan.rationale) || '未提供'}</div>
+                            </div>
+                            <DirectorChipGroup title="优先线程" items={storyPlan.priority_threads} emptyText="暂无优先线程" />
+                            <div className="director-mini-list">
+                                {chapterBeats.length ? chapterBeats.map((beat) => (
+                                    <div key={`beat-${beat.chapter || beat.chapter_goal}`} className="director-mini-card">
+                                        <div className="director-mini-title">{`第 ${Number(beat.chapter || 0) || '-'} 章`}</div>
+                                        <div className="tiny">{trimText(beat.chapter_goal) || '未填写章节目标'}</div>
+                                        <div className="tiny">{`章末钩子：${trimText(beat.ending_hook_target) || '未填写'}`}</div>
+                                    </div>
+                                )) : (
+                                    <div className="empty-state">当前还没有可展示的章节节拍。</div>
+                                )}
+                            </div>
+                        </>
+                    ) : (
+                        <div className="empty-state">当前还没有可展示的卷规划摘要。</div>
+                    )}
+                </section>
+
+                <section className="director-hub-card">
+                    <div className="subsection-title">连续性账本</div>
+                    <DirectorChipGroup title="活跃线程" items={activeThreads} emptyText="暂无活跃线程" />
+                    <DirectorChipGroup title="未回收谜团" items={mysteryItems} emptyText="暂无待压住的谜团" />
+                    <DirectorChipGroup title="已坐实规则" items={ruleItems} emptyText="暂无已坐实规则" />
+                    <DirectorChipGroup title="关系变化" items={trustItems} emptyText="暂无关系变化" />
+                    <DirectorChipGroup title="最近导演决策" items={decisionItems} emptyText="暂无导演决策记录" />
+                </section>
+
+                <section className="director-hub-card">
+                    <div className="subsection-title">人物声线卡</div>
+                    <DirectorChipGroup title="声线摘要" items={voiceItems} emptyText="当前还没有结构化声线约束。" />
+                </section>
+            </div>
+        </section>
+    )
+}
+
+function DirectorChipGroup({ title, items, emptyText }) {
+    const values = coerceUniqueTextList(items)
+
+    return (
+        <div className="director-chip-group">
+            <div className="tiny director-chip-group-title">{title}</div>
+            {values.length ? (
+                <div className="planning-tags">
+                    {values.map((item) => (
+                        <span key={`${title}-${item}`} className="planning-tag director-tag">{item}</span>
+                    ))}
+                </div>
+            ) : (
+                <div className="tiny">{emptyText}</div>
+            )}
         </div>
     )
 }

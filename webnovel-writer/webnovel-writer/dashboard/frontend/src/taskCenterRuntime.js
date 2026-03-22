@@ -53,7 +53,7 @@ export function buildRuntimeSummary(task) {
     } else if (runtime.step_state === 'failed' && runtime.error_code) {
         parts.push(runtime.error_code)
     } else if (runtime.step_state === 'waiting_approval') {
-        parts.push('等待人工批准回写')
+        parts.push(task?.status === 'awaiting_chapter_brief_approval' ? '等待人工批准开写' : '等待人工批准回写')
     } else if (runtime.step_state === 'completed' && runtime.running_seconds > 0) {
         parts.push(`耗时 ${formatRuntimeDuration(runtime.running_seconds)}`)
     }

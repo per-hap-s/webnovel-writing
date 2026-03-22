@@ -126,6 +126,48 @@ beforeEach(() => {
     fetchJSONMock.mockImplementation((path) => {
         if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
         if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 8, total_words: 12000 } })
+        if (path === '/api/project/director-hub') {
+            return Promise.resolve({
+                current_chapter: 9,
+                current_brief: {
+                    chapter: 9,
+                    chapter_goal: 'Lead with scene action',
+                    primary_conflict: 'The protagonist must decide before the clue disappears.',
+                    allowed_reveal_ceiling: 'Only confirm the cost of one rewind.',
+                    ending_hook_target: 'Leave a trace that points to chapter 10.',
+                    must_advance_threads: ['Archive thread'],
+                    must_hold_back_facts: ['Watcher identity'],
+                    voice_constraints: ['Keep the prose tactile'],
+                    forbidden_terms: ['system panel'],
+                },
+                story_plan: {
+                    anchor_chapter: 9,
+                    rationale: 'Keep the rain archive line under pressure.',
+                    priority_threads: ['Archive thread', 'Memory cost'],
+                    chapters: [
+                        {
+                            chapter: 9,
+                            chapter_goal: 'Pressure the archive thread',
+                            ending_hook_target: 'Point toward the flooded station',
+                        },
+                    ],
+                },
+                continuity: {
+                    plot_threads: [{ title: 'Archive thread', urgency: 'high' }],
+                    mystery_ledger: [{ name: 'Watcher identity' }],
+                    rule_assertions: [{ name: 'One rewind burns one memory' }],
+                    trust_map: {
+                        'Shen Yan->Bureau': { status: 'fragile', chapter: 8 },
+                    },
+                    director_decisions: [{ chapter: 9 }],
+                },
+                voice_bible: {
+                    characters: {
+                        'Shen Yan': { constraints: ['Keep the prose tactile'] },
+                    },
+                },
+            })
+        }
         if (path === '/api/tasks/summary') return Promise.resolve(tasksResponse)
         if (path === '/api/llm/status') return Promise.resolve({ installed: false })
         if (path === '/api/rag/status') return Promise.resolve({ configured: false })
@@ -297,6 +339,18 @@ test('overview renders disabled primary action label instead of falling back to 
     const actionButton = await screen.findByRole('button', { name: 'Open blocked task' })
     expect(actionButton.getAttribute('disabled')).not.toBeNull()
     expect(actionButton.getAttribute('title')).toBe('missing target_task_id')
+})
+
+test('control overview renders director hub guidance from the backend snapshot', async () => {
+    setProjectModeUrl()
+
+    render(<App />)
+
+    expect(await screen.findByText('Lead with scene action')).not.toBeNull()
+    expect(screen.getByText('The protagonist must decide before the clue disappears.')).not.toBeNull()
+    expect(screen.getByText('Keep the rain archive line under pressure.')).not.toBeNull()
+    expect(screen.getAllByText('Archive thread').length).toBeGreaterThan(0)
+    expect(screen.getByText('One rewind burns one memory')).not.toBeNull()
 })
 
 test('overview primary action surfaces request errors', async () => {

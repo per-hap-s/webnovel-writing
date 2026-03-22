@@ -69,6 +69,7 @@ from .task_models import (
     PlanningProfileRequest,
     RAGSettingsRequest,
     RetryRequest,
+    ChapterBriefDecisionRequest,
     ReviewDecisionRequest,
     SupervisorDismissRequest,
     TaskRequest,
@@ -1201,6 +1202,18 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         state_data = _read_state_data(project_root_value)
         return _planning_profile_payload(state_data, project_root_value)
 
+    @app.get('/api/project/director-hub')
+    def get_director_hub(request: Request):
+        return _get_request_orchestrator(request).get_director_hub()
+
+    @app.get('/api/project/continuity-ledger')
+    def get_continuity_ledger(request: Request):
+        return _get_request_orchestrator(request).get_continuity_ledger()
+
+    @app.get('/api/chapters/{chapter}/brief')
+    def get_chapter_brief(chapter: int, request: Request):
+        return _get_request_orchestrator(request).get_chapter_brief(chapter)
+
     @app.post('/api/project/planning-profile')
     async def save_planning_profile(http_request: Request, request: PlanningProfileRequest):
         project_root_value = _resolve_request_project_root(http_request)
@@ -1520,6 +1533,20 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
     async def reject_review(http_request: Request, request: ReviewDecisionRequest):
         try:
             return _get_request_orchestrator(http_request).reject_writeback(request.task_id, request.reason)
+        except KeyError as exc:
+            raise HTTPException(404, '未找到任务。') from exc
+
+    @app.post('/api/chapters/{chapter}/brief/approve')
+    async def approve_chapter_brief(chapter: int, http_request: Request, request: ChapterBriefDecisionRequest):
+        try:
+            return _get_request_orchestrator(http_request).approve_chapter_brief(chapter, request.reason)
+        except KeyError as exc:
+            raise HTTPException(404, '未找到任务。') from exc
+
+    @app.post('/api/chapters/{chapter}/brief/reject')
+    async def reject_chapter_brief(chapter: int, http_request: Request, request: ChapterBriefDecisionRequest):
+        try:
+            return _get_request_orchestrator(http_request).reject_chapter_brief(chapter, request.reason)
         except KeyError as exc:
             raise HTTPException(404, '未找到任务。') from exc
 

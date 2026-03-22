@@ -29,7 +29,7 @@ class TaskRequest(BaseModel):
     chapter_range: Optional[str] = None
     volume: Optional[str] = None
     mode: str = "standard"
-    require_manual_approval: bool = True
+    require_manual_approval: bool = False
     options: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -116,6 +116,10 @@ class CancelTaskRequest(BaseModel):
 
 class ReviewDecisionRequest(BaseModel):
     task_id: str
+    reason: str = ""
+
+
+class ChapterBriefDecisionRequest(BaseModel):
     reason: str = ""
 
 

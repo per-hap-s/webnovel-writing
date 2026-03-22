@@ -292,6 +292,17 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
         normalizeList(task?.artifacts?.writeback?.director_alignment?.missed).length
         + normalizeList(task?.artifacts?.writeback?.story_alignment?.missed).length
 
+    if (task?.status === 'awaiting_chapter_brief_approval') {
+        return buildSummary({
+            tone: 'warning',
+            heading: '开写前需要先确认 chapter brief',
+            continuation: WRITING_CONTINUATION.waitingApproval,
+            nextStep: primaryAction?.label || '批准开写',
+            summary: '本章导演 brief 已生成，只有先批准本章目标、冲突和信息边界，正文阶段才会启动。',
+            reasons: ['当前任务停在 chapter brief 审批', ...contractSignals],
+            actionLabel: primaryAction?.label || '批准开写',
+        })
+    }
     if (task?.status === 'queued' || task?.status === 'running') {
         return buildSummary({
             tone: 'warning',

@@ -42,6 +42,10 @@
         "relationship_moves",
         "knowledge_reveals",
         "forbidden_resolutions",
+        "allowed_reveal_ceiling",
+        "must_hold_back_facts",
+        "voice_constraints",
+        "forbidden_terms",
         "ending_hook_target",
         "tempo",
         "review_focus",
@@ -58,11 +62,19 @@
         "relationship_moves": [],
         "knowledge_reveals": [],
         "forbidden_resolutions": [],
+        "allowed_reveal_ceiling": "string",
+        "must_hold_back_facts": [],
+        "voice_constraints": [],
+        "forbidden_terms": [],
         "ending_hook_target": "string",
         "tempo": "string",
         "review_focus": [],
         "rationale": "string"
       }
+    },
+    {
+      "name": "chapter-brief-approval",
+      "type": "internal"
     },
     {
       "name": "context",

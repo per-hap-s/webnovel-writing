@@ -373,14 +373,30 @@ class TaskStore:
             error=None,
         )
 
-    def mark_waiting_for_approval(self, task_id: str, step_name: str, approval: Dict[str, Any]) -> Dict[str, Any]:
+    def mark_waiting_for_approval(
+        self,
+        task_id: str,
+        step_name: str,
+        approval: Dict[str, Any],
+        *,
+        status: str = "awaiting_writeback_approval",
+        approval_kind: str = "writeback",
+    ) -> Dict[str, Any]:
         with self._lock:
             task = self.get_task(task_id)
             if task is None:
                 raise KeyError(task_id)
             artifacts = task.setdefault("artifacts", {})
-            artifacts["approval"] = approval
-            task["status"] = "awaiting_writeback_approval"
+            approval_artifacts = dict(artifacts.get("approval") or {})
+            approval_record = {
+                **approval,
+                "kind": approval_kind,
+                "status": str(approval.get("status") or "pending"),
+            }
+            approval_artifacts["current"] = approval_record
+            approval_artifacts[approval_kind] = approval_record
+            artifacts["approval"] = approval_artifacts
+            task["status"] = status
             task["approval_status"] = "pending"
             task["current_step"] = step_name
             task["updated_at"] = _now_iso()
@@ -425,14 +441,14 @@ class TaskStore:
             error={"code": "TASK_CANCELLED", "message": reason, "retryable": False},
         )
 
-    def mark_rejected(self, task_id: str, reason: str) -> Dict[str, Any]:
+    def mark_rejected(self, task_id: str, reason: str, *, error_code: str = "WRITEBACK_REJECTED") -> Dict[str, Any]:
         return self.update_task(
             task_id,
             status="rejected",
             current_step=None,
             finished_at=_now_iso(),
             approval_status="rejected",
-            error={"code": "WRITEBACK_REJECTED", "message": reason},
+            error={"code": error_code, "message": reason},
         )
 
     def reset_for_retry(self, task_id: str, *, preserve_approval: bool = False) -> Dict[str, Any]:

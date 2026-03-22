@@ -95,7 +95,7 @@ function buildTaskLaunchPayload(task, chapter, taskType) {
             start_chapter: Math.max(1, Number(chapter || 0)),
             max_chapters: Math.max(1, Number(request.max_chapters || 1)),
             mode: String(request.mode || 'standard'),
-            require_manual_approval: request.require_manual_approval !== false,
+            require_manual_approval: request.require_manual_approval === true,
             project_root: String(request.project_root || ''),
             options: isRecord(request.options) ? request.options : {},
         }
@@ -103,7 +103,7 @@ function buildTaskLaunchPayload(task, chapter, taskType) {
     return {
         chapter: Math.max(1, Number(chapter || 0)),
         mode: String(request.mode || 'standard'),
-        require_manual_approval: request.require_manual_approval !== false,
+        require_manual_approval: request.require_manual_approval === true,
         project_root: String(request.project_root || ''),
         options: isRecord(request.options) ? request.options : {},
     }

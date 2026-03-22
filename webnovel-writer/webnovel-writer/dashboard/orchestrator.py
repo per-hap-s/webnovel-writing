@@ -100,6 +100,7 @@ RUNTIME_PHASE_LABELS = {
     "guarded-batch-runner": "护栏批量推进",
     "story-director": "多章叙事规划",
     "chapter-director": "单章导演决策",
+    "chapter-brief-approval": "章节 brief 确认",
     "repair-plan": "修稿规划",
     "repair-draft": "修稿改写",
     "context": "上下文准备",
@@ -127,6 +128,9 @@ RUNTIME_EVENT_LABELS = {
     "step_heartbeat": "任务仍在运行",
     "step_retry_scheduled": "已安排步骤重试",
     "step_retry_started": "步骤重试开始",
+    "Waiting for chapter brief approval": "等待人工确认章节 brief",
+    "Chapter brief approved": "已批准 chapter brief",
+    "Chapter brief rejected": "已驳回 chapter brief",
     "step_waiting_approval": "等待人工批准回写",
     "Waiting for writeback approval": "等待人工批准回写",
     "Retry requested": "已请求重试",
@@ -233,6 +237,53 @@ class OrchestrationService:
             "task": task,
             "events": self.get_events(task_id, limit=event_limit),
         }
+
+    def get_chapter_brief(self, chapter: int) -> Dict[str, Any]:
+        return self._load_director_brief(chapter) or self._build_fallback_director_brief(chapter)
+
+    def get_continuity_ledger(self) -> Dict[str, Any]:
+        state = self._read_state_data()
+        plot_threads = (state.get("plot_threads") or {}).get("active_threads") or []
+        return {
+            "plot_threads": plot_threads if isinstance(plot_threads, list) else [],
+            "mystery_ledger": state.get("mystery_ledger") or [],
+            "rule_assertions": state.get("rule_assertions") or [],
+            "voice_bible": state.get("voice_bible") or {},
+            "trust_map": state.get("trust_map") or {},
+            "director_decisions": state.get("director_decisions") or [],
+        }
+
+    def get_director_hub(self) -> Dict[str, Any]:
+        state = self._read_state_data()
+        progress = state.get("progress") or {}
+        current_chapter = max(1, int(progress.get("current_chapter") or 0) + 1)
+        story_plan = self._load_story_plan(current_chapter) or {}
+        current_brief = self._load_director_brief(current_chapter) or self._load_director_brief(max(1, current_chapter - 1)) or {}
+        continuity = self.get_continuity_ledger()
+        return {
+            "current_chapter": current_chapter,
+            "story_plan": story_plan,
+            "current_brief": current_brief,
+            "voice_bible": continuity.get("voice_bible") or {},
+            "continuity": {
+                "plot_threads": continuity.get("plot_threads") or [],
+                "mystery_ledger": continuity.get("mystery_ledger") or [],
+                "rule_assertions": continuity.get("rule_assertions") or [],
+                "trust_map": continuity.get("trust_map") or {},
+                "director_decisions": continuity.get("director_decisions") or [],
+            },
+        }
+
+    def _find_latest_write_task_for_chapter(self, chapter: int, *, status: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        for task in self.store.list_tasks(limit=200):
+            if str(task.get("task_type") or "") != "write":
+                continue
+            if int((task.get("request") or {}).get("chapter") or 0) != int(chapter):
+                continue
+            if status and str(task.get("status") or "") != status:
+                continue
+            return task
+        return None
 
     def get_events(self, task_id: str, limit: int = 200) -> List[Dict[str, Any]]:
         return self.store.get_events(task_id, limit=limit)
@@ -1712,7 +1763,7 @@ class OrchestrationService:
         return {
             "chapter": max(1, int(chapter or 1)),
             "mode": str(request.get("mode") or "standard"),
-            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "require_manual_approval": bool(request.get("require_manual_approval", False)),
             "project_root": str(request.get("project_root") or self.project_root),
             "options": request.get("options") if isinstance(request.get("options"), dict) else {},
         }
@@ -1723,7 +1774,7 @@ class OrchestrationService:
             "start_chapter": max(1, int(start_chapter or 1)),
             "max_chapters": max(1, int(request.get("max_chapters") or 1)),
             "mode": str(request.get("mode") or "standard"),
-            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "require_manual_approval": bool(request.get("require_manual_approval", False)),
             "project_root": str(request.get("project_root") or self.project_root),
             "options": request.get("options") if isinstance(request.get("options"), dict) else {},
         }
@@ -1903,14 +1954,14 @@ class OrchestrationService:
         followup_request = {
             "chapter": next_chapter,
             "mode": str(request.get("mode") or "standard"),
-            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "require_manual_approval": bool(request.get("require_manual_approval", False)),
             "project_root": str(request.get("project_root") or self.project_root),
             "options": request.get("options") if isinstance(request.get("options"), dict) else {},
         }
         current_request = {
             "chapter": chapter,
             "mode": str(request.get("mode") or "standard"),
-            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "require_manual_approval": bool(request.get("require_manual_approval", False)),
             "project_root": str(request.get("project_root") or self.project_root),
             "options": request.get("options") if isinstance(request.get("options"), dict) else {},
         }
@@ -2004,7 +2055,7 @@ class OrchestrationService:
             "start_chapter": next_chapter,
             "max_chapters": max(1, int(request.get("max_chapters") or requested_max_chapters or 1)),
             "mode": str(request.get("mode") or "standard"),
-            "require_manual_approval": bool(request.get("require_manual_approval", True)),
+            "require_manual_approval": bool(request.get("require_manual_approval", False)),
             "project_root": str(request.get("project_root") or self.project_root),
             "options": request.get("options") if isinstance(request.get("options"), dict) else {},
         }
@@ -2317,7 +2368,7 @@ class OrchestrationService:
 
     def _build_task_list_priority(self, task: Dict[str, Any]) -> int:
         status = str(task.get("status") or "")
-        if status == "awaiting_writeback_approval":
+        if status in {"awaiting_chapter_brief_approval", "awaiting_writeback_approval"}:
             return 0
         if status in {"running", "retrying", "resuming_writeback"}:
             return 1
@@ -2399,6 +2450,8 @@ class OrchestrationService:
             return "流程已完成"
         if task.get("status") == "failed":
             return "执行失败"
+        if task.get("status") == "awaiting_chapter_brief_approval":
+            return "导演待确认"
         if task.get("status") == "awaiting_writeback_approval":
             return "回写审批"
         if task.get("status") == "resuming_writeback":
@@ -2415,7 +2468,7 @@ class OrchestrationService:
         attempt: Any,
     ) -> str:
         status = str(task.get("status") or "")
-        if status == "awaiting_writeback_approval" or task.get("approval_status") == "pending":
+        if status in {"awaiting_chapter_brief_approval", "awaiting_writeback_approval"} or task.get("approval_status") == "pending":
             return "waiting_approval"
         if status == "interrupted":
             return "cancelled" if str((task.get("error") or {}).get("code") or "") == "TASK_CANCELLED" else "interrupted"
@@ -2447,7 +2500,7 @@ class OrchestrationService:
         if not events or not step_key:
             return events
         boundary_messages = {f"Step started: {step_key}", "step_retry_started"}
-        if str(task.get("status") or "") == "awaiting_writeback_approval" or task.get("approval_status") == "pending":
+        if str(task.get("status") or "") in {"awaiting_chapter_brief_approval", "awaiting_writeback_approval"} or task.get("approval_status") == "pending":
             boundary_messages.update({"step_waiting_approval", "Waiting for writeback approval"})
 
         start_index = 0
@@ -2940,7 +2993,7 @@ class OrchestrationService:
             raise KeyError(task_id)
         target_step = resume_from_step or self._determine_resume_from_step(current_task)
         preserve_approval = bool(
-            current_task.get("approval_status") == "approved" and target_step in {"approval-gate", "data-sync", "repair-writeback"}
+            current_task.get("approval_status") == "approved" and target_step in {"chapter-brief-approval", "approval-gate", "data-sync", "repair-writeback"}
         )
         self.store.reset_for_retry(task_id, preserve_approval=preserve_approval)
         self.store.append_event(
@@ -2979,6 +3032,19 @@ class OrchestrationService:
         if task is None:
             raise KeyError(task_id)
         resume_step = task.get("current_step") or "approval-gate"
+        status = str(task.get("status") or "")
+        if status == "awaiting_chapter_brief_approval":
+            self.store.update_task(task_id, approval_status="approved", status="queued")
+            self.store.append_event(
+                task_id,
+                "info",
+                "Chapter brief approved",
+                step_name=resume_step,
+                payload={"reason": reason, "resume_from_step": resume_step},
+            )
+            self._schedule(task_id, resume_from_step=resume_step)
+            return self.store.get_task(task_id)
+
         self.store.update_task(task_id, approval_status="approved", status="resuming_writeback")
         self.store.append_event(
             task_id,
@@ -2987,12 +3053,31 @@ class OrchestrationService:
             step_name=resume_step,
             payload={"reason": reason, "resume_from_step": resume_step},
         )
-        self._schedule(task_id, resume_from_step=task.get("current_step") or "approval-gate")
+        self._schedule(task_id, resume_from_step=resume_step)
         return self.store.get_task(task_id)
 
     def reject_writeback(self, task_id: str, reason: str = "") -> Dict[str, Any]:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        status = str(task.get("status") or "")
+        if status == "awaiting_chapter_brief_approval":
+            self.store.append_event(task_id, "warning", "Chapter brief rejected", payload={"reason": reason})
+            return self.store.mark_rejected(task_id, reason or "Brief rejected by operator", error_code="CHAPTER_BRIEF_REJECTED")
         self.store.append_event(task_id, "warning", "Writeback rejected", payload={"reason": reason})
         return self.store.mark_rejected(task_id, reason or "Rejected by operator")
+
+    def approve_chapter_brief(self, chapter: int, reason: str = "") -> Dict[str, Any]:
+        task = self._find_latest_write_task_for_chapter(chapter, status="awaiting_chapter_brief_approval")
+        if task is None:
+            raise KeyError(f"chapter-brief:{chapter}")
+        return self.approve_writeback(str(task.get("id") or ""), reason)
+
+    def reject_chapter_brief(self, chapter: int, reason: str = "") -> Dict[str, Any]:
+        task = self._find_latest_write_task_for_chapter(chapter, status="awaiting_chapter_brief_approval")
+        if task is None:
+            raise KeyError(f"chapter-brief:{chapter}")
+        return self.reject_writeback(str(task.get("id") or ""), reason)
 
     def confirm_invalid_facts(self, ids: List[int], action: str) -> Dict[str, Any]:
         updated = 0
@@ -3329,6 +3414,50 @@ class OrchestrationService:
             self.store.append_event(task_id, "info", "Chapter director prepared", step_name=step_name, payload={"chapter": brief.get("chapter")})
             return "ok"
 
+        if step_name == "chapter-brief-approval":
+            if task.get("approval_status") == "approved":
+                approval_artifacts = dict(((task.get("artifacts") or {}).get("approval") or {}))
+                current_approval = dict(approval_artifacts.get("current") or {})
+                if current_approval.get("kind") == "chapter_brief":
+                    current_approval["status"] = "approved"
+                    approval_artifacts["current"] = current_approval
+                    approval_artifacts["chapter_brief"] = current_approval
+                artifacts = dict(task.get("artifacts") or {})
+                artifacts["approval"] = approval_artifacts
+                self.store.update_task(task_id, approval_status="not_required", artifacts=artifacts)
+                self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": {"approval_required": True, "approved": True}})
+                return "ok"
+
+            brief = self._get_task_director_brief(task, int(((task.get("request") or {}).get("chapter") or 0)))
+            approval = {
+                "status": "pending",
+                "requested_at": task.get("updated_at"),
+                "brief": brief,
+                "next_step": self._next_step_name(workflow, index),
+            }
+            self.store.mark_waiting_for_approval(
+                task_id,
+                step_name,
+                approval,
+                status="awaiting_chapter_brief_approval",
+                approval_kind="chapter_brief",
+            )
+            self.store.append_event(
+                task_id,
+                "warning",
+                "step_waiting_approval",
+                step_name=step_name,
+                payload={
+                    "attempt": 1,
+                    "retry_count": 0,
+                    "retryable": True,
+                    "next_step": approval.get("next_step"),
+                    "approval_kind": "chapter_brief",
+                },
+            )
+            self.store.append_event(task_id, "warning", "Waiting for chapter brief approval", step_name=step_name)
+            return "paused"
+
         if step_name == "repair-plan":
             try:
                 repair_plan = self._build_repair_plan(task)
@@ -3372,7 +3501,7 @@ class OrchestrationService:
 
         if step_name == "approval-gate":
             request = task.get("request", {})
-            require_manual_approval = bool(request.get("require_manual_approval", True))
+            require_manual_approval = bool(request.get("require_manual_approval", False))
             summary = (task.get("artifacts") or {}).get("review_summary")
             if task.get("approval_status") == "approved":
                 self.store.save_step_result(task_id, step_name, {"success": True, "structured_output": {"approval_required": True, "approved": True}})
@@ -3681,7 +3810,7 @@ class OrchestrationService:
             child_request = {
                 "chapter": current_chapter,
                 "mode": str(request.get("mode") or "standard"),
-                "require_manual_approval": bool(request.get("require_manual_approval", True)),
+                "require_manual_approval": bool(request.get("require_manual_approval", False)),
                 "project_root": str(request.get("project_root") or self.project_root),
                 "options": request.get("options") if isinstance(request.get("options"), dict) else {},
             }
@@ -5440,6 +5569,30 @@ class OrchestrationService:
             for item in knowledge_conflicts[:3]
             if str(item.get("topic") or "").strip()
         ]
+        allowed_reveal_ceiling = "只允许确认当前章必须推进的事实，不允许提前实锤幕后全貌。"
+        must_hold_back_facts = self._normalize_director_text_list(
+            [
+                *[str(item.get("name") or "").strip() for item in active_foreshadowing[:3] if str(item.get("name") or "").strip()],
+                *[str(item.get("topic") or "").strip() for item in knowledge_conflicts[:2] if str(item.get("topic") or "").strip()],
+            ],
+            limit=4,
+        )
+        voice_constraints = self._normalize_director_text_list(
+            [
+                str(genre_profile.get("voice") or "").strip(),
+                "避免分析式旁白盖过动作与对话。",
+                "人物台词必须符合当前认知层级。",
+            ],
+            limit=4,
+        )
+        forbidden_terms = self._normalize_director_text_list(
+            [
+                "系统面板",
+                "降维打击",
+                "信息差碾压",
+            ],
+            limit=5,
+        )
 
         forbidden_resolutions = self._normalize_director_text_list(story_slot.get("forbidden_resolutions"), limit=4)
         forbidden_resolutions.extend(
@@ -5487,6 +5640,10 @@ class OrchestrationService:
             "relationship_moves": relationship_moves,
             "knowledge_reveals": knowledge_reveals,
             "forbidden_resolutions": forbidden_resolutions,
+            "allowed_reveal_ceiling": allowed_reveal_ceiling,
+            "must_hold_back_facts": must_hold_back_facts,
+            "voice_constraints": voice_constraints,
+            "forbidden_terms": forbidden_terms,
             "ending_hook_target": ending_hook_target,
             "tempo": tempo,
             "review_focus": review_focus,
@@ -5506,6 +5663,10 @@ class OrchestrationService:
             "relationship_moves": [],
             "knowledge_reveals": [],
             "forbidden_resolutions": ["不要一次性解释完所有疑点"],
+            "allowed_reveal_ceiling": "只揭示本章行动必须知道的事实。",
+            "must_hold_back_facts": ["幕后真相"],
+            "voice_constraints": ["避免分析腔，优先动作与场景。"],
+            "forbidden_terms": ["系统面板", "降维打击"],
             "ending_hook_target": "章末留下下一步行动目标或更高代价。",
             "tempo": "中速推进，后半章抬升压力。",
             "review_focus": ["检查本章目标是否清晰推进", "检查章末钩子是否形成下一步驱动力"],
@@ -5525,6 +5686,10 @@ class OrchestrationService:
             "relationship_moves": self._normalize_director_text_list(brief.get("relationship_moves")),
             "knowledge_reveals": self._normalize_director_text_list(brief.get("knowledge_reveals")),
             "forbidden_resolutions": self._normalize_director_text_list(brief.get("forbidden_resolutions")),
+            "allowed_reveal_ceiling": str(brief.get("allowed_reveal_ceiling") or "").strip() or "只揭示本章必须推进的事实。",
+            "must_hold_back_facts": self._normalize_director_text_list(brief.get("must_hold_back_facts")),
+            "voice_constraints": self._normalize_director_text_list(brief.get("voice_constraints")),
+            "forbidden_terms": self._normalize_director_text_list(brief.get("forbidden_terms")),
             "ending_hook_target": str(brief.get("ending_hook_target") or "").strip() or "章末留下明确的下一步压力。",
             "tempo": str(brief.get("tempo") or "").strip() or "中速推进，章末抬升压力。",
             "review_focus": self._normalize_director_text_list(brief.get("review_focus")),
@@ -5536,6 +5701,8 @@ class OrchestrationService:
             normalized["setup_targets"] = ["补一条可回收的新线索"]
         if not normalized["review_focus"]:
             normalized["review_focus"] = ["检查本章是否完成 director brief 的核心目标"]
+        if not normalized["voice_constraints"]:
+            normalized["voice_constraints"] = ["避免分析腔，优先动作与场景。"]
         return normalized
 
     def _normalize_director_text_list(self, value: Any, limit: int = 5) -> List[str]:
@@ -5702,6 +5869,11 @@ class OrchestrationService:
         path = self._story_plan_path(anchor_chapter)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        volume_number = self._resolve_volume_for_chapter(anchor_chapter)
+        markdown_path = self.project_root / STORY_DIRECTOR_DIR_NAME / f"volume-{volume_number:02d}.md"
+        markdown_path.write_text(self._render_story_plan_markdown(plan, volume_number=volume_number), encoding="utf-8")
+        json_alias_path = self.project_root / STORY_DIRECTOR_DIR_NAME / f"volume-{volume_number:02d}.json"
+        json_alias_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
     def _load_story_plan(self, chapter: int) -> Dict[str, Any]:
@@ -5810,6 +5982,15 @@ class OrchestrationService:
         path = self._director_brief_path(chapter)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+        brief_dir = self.project_root / ".webnovel" / "chapter-briefs"
+        brief_dir.mkdir(parents=True, exist_ok=True)
+        (brief_dir / f"chapter-{chapter:04d}.json").write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+        (brief_dir / f"chapter-{chapter:04d}.md").write_text(self._render_director_brief_markdown(brief), encoding="utf-8")
+        (self.project_root / ".webnovel" / "director" / "current-director-brief.json").write_text(
+            json.dumps(brief, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._record_director_decision(brief)
         return path
 
     def _load_director_brief(self, chapter: int) -> Dict[str, Any]:
@@ -5821,6 +6002,257 @@ class OrchestrationService:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _render_story_plan_markdown(self, plan: Dict[str, Any], *, volume_number: int) -> str:
+        chapters = [item for item in (plan.get("chapters") or []) if isinstance(item, dict)]
+        lines = [
+            f"# Volume {volume_number} Director Plan",
+            "",
+            f"- Anchor chapter: {int(plan.get('anchor_chapter') or 0)}",
+            f"- Planning horizon: {int(plan.get('planning_horizon') or 0)}",
+            f"- Priority threads: {', '.join(plan.get('priority_threads') or []) or '-'}",
+            f"- Risk flags: {', '.join(plan.get('risk_flags') or []) or '-'}",
+            "",
+            "## Chapter Beats",
+        ]
+        for item in chapters[:10]:
+            lines.extend(
+                [
+                    f"### Chapter {int(item.get('chapter') or 0)}",
+                    f"- Role: {str(item.get('role') or '').strip() or '-'}",
+                    f"- Goal: {str(item.get('chapter_goal') or '').strip() or '-'}",
+                    f"- Must advance: {', '.join(item.get('must_advance_threads') or []) or '-'}",
+                    f"- Hold back: {', '.join(item.get('forbidden_resolutions') or []) or '-'}",
+                    f"- Ending hook: {str(item.get('ending_hook_target') or '').strip() or '-'}",
+                    "",
+                ]
+            )
+        return "\n".join(lines).strip() + "\n"
+
+    def _render_director_brief_markdown(self, brief: Dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                f"# Chapter {int(brief.get('chapter') or 0)} Brief",
+                "",
+                f"- Goal: {brief.get('chapter_goal') or '-'}",
+                f"- Conflict: {brief.get('primary_conflict') or '-'}",
+                f"- Allowed reveal ceiling: {brief.get('allowed_reveal_ceiling') or '-'}",
+                f"- Must advance: {', '.join(brief.get('must_advance_threads') or []) or '-'}",
+                f"- Payoff targets: {', '.join(brief.get('payoff_targets') or []) or '-'}",
+                f"- Setup targets: {', '.join(brief.get('setup_targets') or []) or '-'}",
+                f"- Hold back facts: {', '.join(brief.get('must_hold_back_facts') or []) or '-'}",
+                f"- Voice constraints: {', '.join(brief.get('voice_constraints') or []) or '-'}",
+                f"- Forbidden terms: {', '.join(brief.get('forbidden_terms') or []) or '-'}",
+                f"- Ending hook: {brief.get('ending_hook_target') or '-'}",
+                f"- Review focus: {', '.join(brief.get('review_focus') or []) or '-'}",
+                "",
+                "## Rationale",
+                str(brief.get("rationale") or "-"),
+                "",
+            ]
+        )
+
+    def _record_director_decision(self, brief: Dict[str, Any]) -> None:
+        chapter = int(brief.get("chapter") or 0)
+        if chapter <= 0:
+            return
+
+        def _mutate(state_payload: Dict[str, Any]) -> None:
+            decisions = state_payload.setdefault("director_decisions", [])
+            if not isinstance(decisions, list):
+                decisions = []
+                state_payload["director_decisions"] = decisions
+            entry = {
+                "chapter": chapter,
+                "chapter_goal": str(brief.get("chapter_goal") or "").strip(),
+                "ending_hook_target": str(brief.get("ending_hook_target") or "").strip(),
+                "must_hold_back_facts": list(brief.get("must_hold_back_facts") or []),
+                "voice_constraints": list(brief.get("voice_constraints") or []),
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            state_payload["director_decisions"] = [
+                item for item in decisions if not (isinstance(item, dict) and int(item.get("chapter") or 0) == chapter)
+            ]
+            state_payload["director_decisions"].append(entry)
+
+        self._update_state_data(_mutate)
+
+    def _sync_write_continuity_ledgers(
+        self,
+        *,
+        chapter: int,
+        director_brief: Dict[str, Any],
+        payload: Dict[str, Any],
+        narrative_sync: Dict[str, Any],
+    ) -> None:
+        protagonist_name = str(
+            (((self._read_state_data().get("planning") or {}).get("profile") or {}).get("protagonist_name") or "")
+        ).strip()
+        voice_constraints = self._merge_string_entries([], director_brief.get("voice_constraints"))
+        must_hold_back = self._merge_string_entries([], director_brief.get("must_hold_back_facts"))
+        must_advance_threads = self._merge_string_entries([], director_brief.get("must_advance_threads"))
+        foreshadowing_items = list(narrative_sync.get("foreshadowing_items") or [])
+        knowledge_states = list(narrative_sync.get("knowledge_states") or [])
+        character_arcs = list(narrative_sync.get("character_arcs") or [])
+        world_rules = self._coerce_setting_items(payload.get("world_rules"))
+
+        def _merge_list_of_dicts(current: Any, items: List[Dict[str, Any]], *, key_name: str = "name") -> List[Dict[str, Any]]:
+            merged: List[Dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in list(current or []) + items:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get(key_name) or item.get("title") or "").strip()
+                if not key:
+                    continue
+                slug = key.casefold()
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                merged.append(dict(item))
+            return merged
+
+        def _mutate(state_data: Dict[str, Any]) -> None:
+            voice_bible = dict(state_data.get("voice_bible") or {})
+            voice_characters = dict(voice_bible.get("characters") or {})
+            if protagonist_name and voice_constraints:
+                protagonist_entry = dict(voice_characters.get(protagonist_name) or {})
+                protagonist_entry["constraints"] = self._merge_string_entries(
+                    protagonist_entry.get("constraints"),
+                    voice_constraints,
+                )
+                protagonist_entry["updated_chapter"] = chapter
+                voice_characters[protagonist_name] = protagonist_entry
+            for arc in character_arcs:
+                entity_id = str(arc.get("entity_id") or "").strip()
+                if not entity_id:
+                    continue
+                voice_entry = dict(voice_characters.get(entity_id) or {})
+                notes = self._merge_string_entries(
+                    voice_entry.get("notes"),
+                    [str(arc.get("notes") or "").strip()] if str(arc.get("notes") or "").strip() else [],
+                )
+                if notes:
+                    voice_entry["notes"] = notes
+                if isinstance(arc.get("relationship_state"), dict) and arc.get("relationship_state"):
+                    voice_entry["relationship_state"] = dict(arc.get("relationship_state") or {})
+                voice_entry["arc_stage"] = str(arc.get("arc_stage") or voice_entry.get("arc_stage") or "").strip()
+                voice_entry["updated_chapter"] = chapter
+                voice_characters[entity_id] = voice_entry
+            if voice_characters:
+                voice_bible["characters"] = voice_characters
+                state_data["voice_bible"] = voice_bible
+
+            mystery_entries: List[Dict[str, Any]] = []
+            for fact in must_hold_back:
+                mystery_entries.append(
+                    {
+                        "name": fact,
+                        "status": "hold_back",
+                        "source": "chapter-brief",
+                        "last_updated_chapter": chapter,
+                    }
+                )
+            for item in foreshadowing_items:
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                mystery_entries.append(
+                    {
+                        "name": name,
+                        "status": str(item.get("status") or "active").strip() or "active",
+                        "summary": str(item.get("content") or "").strip(),
+                        "planned_payoff_chapter": int(item.get("planned_payoff_chapter") or 0),
+                        "last_updated_chapter": chapter,
+                    }
+                )
+            for item in knowledge_states:
+                topic = str(item.get("topic") or "").strip()
+                truth_status = str(item.get("truth_status") or "").strip()
+                if not topic or truth_status not in {"unknown", "partial"}:
+                    continue
+                mystery_entries.append(
+                    {
+                        "name": topic,
+                        "status": truth_status,
+                        "belief": str(item.get("belief") or "").strip(),
+                        "holder": str(item.get("entity_id") or "").strip(),
+                        "last_updated_chapter": chapter,
+                    }
+                )
+            if mystery_entries:
+                state_data["mystery_ledger"] = _merge_list_of_dicts(state_data.get("mystery_ledger"), mystery_entries)
+
+            rule_entries: List[Dict[str, Any]] = []
+            for raw_rule in world_rules:
+                if isinstance(raw_rule, dict):
+                    name = str(raw_rule.get("name") or raw_rule.get("title") or "").strip()
+                    summary = str(raw_rule.get("summary") or raw_rule.get("description") or "").strip()
+                else:
+                    name = str(raw_rule or "").strip()
+                    summary = ""
+                if not name:
+                    continue
+                rule_entries.append(
+                    {
+                        "name": name,
+                        "summary": summary,
+                        "source": "data-sync",
+                        "last_confirmed_chapter": chapter,
+                    }
+                )
+            if rule_entries:
+                state_data["rule_assertions"] = _merge_list_of_dicts(state_data.get("rule_assertions"), rule_entries)
+
+            trust_map = dict(state_data.get("trust_map") or {})
+            for arc in character_arcs:
+                entity_id = str(arc.get("entity_id") or "").strip()
+                relationship_state = arc.get("relationship_state")
+                if not entity_id or not isinstance(relationship_state, dict):
+                    continue
+                for target, status in relationship_state.items():
+                    target_name = str(target or "").strip()
+                    if not target_name:
+                        continue
+                    trust_map[f"{entity_id}->{target_name}"] = {
+                        "status": status,
+                        "chapter": chapter,
+                    }
+            if trust_map:
+                state_data["trust_map"] = trust_map
+
+            plot_threads = dict(state_data.get("plot_threads") or {})
+            active_threads = list(plot_threads.get("active_threads") or [])
+            active_entries: List[Dict[str, Any]] = []
+            for title in must_advance_threads:
+                active_entries.append(
+                    {
+                        "title": title,
+                        "stage": "active",
+                        "urgency": "high",
+                        "last_advanced_chapter": chapter,
+                        "planned_payoff_window": "",
+                    }
+                )
+            for item in foreshadowing_items:
+                title = str(item.get("name") or "").strip()
+                if not title:
+                    continue
+                payoff_chapter = int(item.get("planned_payoff_chapter") or 0)
+                active_entries.append(
+                    {
+                        "title": title,
+                        "stage": str(item.get("status") or "active").strip() or "active",
+                        "urgency": "medium",
+                        "last_advanced_chapter": chapter,
+                        "planned_payoff_window": str(payoff_chapter) if payoff_chapter > 0 else "",
+                    }
+                )
+            if active_entries:
+                plot_threads["active_threads"] = _merge_list_of_dicts(active_threads, active_entries, key_name="title")
+                state_data["plot_threads"] = plot_threads
+
+        self._update_state_data(_mutate)
 
     def _get_task_director_brief(self, task: Dict[str, Any], chapter: int) -> Dict[str, Any]:
         step_results = ((task.get("artifacts") or {}).get("step_results") or {})
@@ -5919,6 +6351,12 @@ class OrchestrationService:
             state_manager.update_progress(chapter, words=0)
             state_manager._pending_progress_words_delta += word_count - previous_word_count
             state_manager.save_state()
+            self._sync_write_continuity_ledgers(
+                chapter=chapter,
+                director_brief=director_brief,
+                payload=payload,
+                narrative_sync=narrative_sync,
+            )
             if structured_sync["world_settings"]:
                 self._merge_world_settings(structured_sync["world_settings"])
             if structured_sync["entities"]:

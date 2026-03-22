@@ -13,6 +13,7 @@ const STATUS_LABELS = {
     running: '运行中',
     retrying: '重试中',
     resuming_writeback: '回写中',
+    awaiting_chapter_brief_approval: '等待 brief 确认',
     awaiting_writeback_approval: '等待回写审批',
     completed: '已完成',
     failed: '失败',
@@ -35,6 +36,7 @@ const STEP_LABELS = {
     'guarded-batch-runner': '护栏批量推进',
     'story-director': '多章叙事规划',
     'chapter-director': '单章导演决策',
+    'chapter-brief-approval': 'brief 待确认',
     context: '上下文准备',
     draft: '草稿生成',
     'consistency-review': '一致性审查',
@@ -113,6 +115,9 @@ const EXACT_EVENT_MESSAGES = {
     'Task completed': '任务已完成',
     'Story director prepared': '多章叙事规划已生成',
     'Chapter director prepared': '单章导演简报已生成',
+    'Chapter brief approved': '已批准 brief，可以开写',
+    'Chapter brief rejected': '已驳回 brief，需重新生成',
+    'Waiting for chapter brief approval': '等待章节 brief 批准',
     'Context story contract synced': '上下文已同步叙事导演合同',
     'Story plan refresh suggested': '建议重新生成滚动规划',
     'Guarded runner blocked by story refresh': '护栏推进因滚动规划刷新建议而停止',
@@ -277,6 +282,7 @@ export function translateApprovalStatus(value) {
 export function resolveApprovalStatusLabel(task) {
     const approvalStatus = task?.approval_status || 'n/a'
     if (!['write', 'repair'].includes(task?.task_type)) return translateApprovalStatus(approvalStatus)
+    if (task?.status === 'awaiting_chapter_brief_approval') return '等你批准开写'
     if (!task?.request?.require_manual_approval) return UI_COPY.approvalNotRequired
     const writebackStep = task?.task_type === 'repair' ? 'repair-writeback' : 'data-sync'
     if (approvalStatus === 'approved') {

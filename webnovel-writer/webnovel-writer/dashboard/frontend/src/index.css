@@ -868,6 +868,60 @@ th, td {
     font-size: 0.84rem;
     color: var(--muted);
 }
+.director-hub-topline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+.director-hub-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+}
+.director-hub-card {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+    border-radius: 18px;
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 242, 233, 0.94));
+}
+.director-hub-card .subsection-title {
+    margin-bottom: 0;
+}
+.director-hub-kv {
+    display: grid;
+    gap: 8px;
+    font-size: 0.92rem;
+    line-height: 1.55;
+}
+.director-chip-group {
+    display: grid;
+    gap: 8px;
+}
+.director-chip-group-title {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.director-tag {
+    background: rgba(255, 255, 255, 0.82);
+}
+.director-mini-list {
+    display: grid;
+    gap: 10px;
+}
+.director-mini-card {
+    display: grid;
+    gap: 6px;
+    padding: 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(31, 27, 24, 0.08);
+    background: rgba(255, 250, 241, 0.82);
+}
+.director-mini-title {
+    font-weight: 700;
+}
 .workbench-layout {
     gap: 18px;
 }

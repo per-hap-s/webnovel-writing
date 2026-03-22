@@ -137,6 +137,17 @@ webnovel review 1-5
 - `问题汇总`、`待人工确认`、`局部修稿` 为前端统一术语，不再直出内部英文步骤名
 - 活跃任务存在时会自动启用高频轮询；SSE 只作为刷新提示，不再是唯一刷新来源
 
+## Write Mainline
+
+当前 `write` 主链已切换为“导演台优先”的双阶段写作：
+
+- 阶段 A：`story-director -> chapter-director -> chapter-brief-approval`
+- 阶段 B：`context -> draft -> consistency-review -> continuity-review -> ooc-review -> review-summary -> polish -> approval-gate -> data-sync`
+- 每章都会先停在 `awaiting_chapter_brief_approval`，必须先批准本章 brief 才会进入正文阶段
+- 默认不再额外卡正文回写审批；只有显式传入 `require_manual_approval = true` 时，正文才会在 `approval-gate` 等待人工确认
+- `data-sync` 会把 `voice_bible`、`mystery_ledger`、`rule_assertions`、`trust_map`、`plot_threads.active_threads` 同步进长期状态
+- 工作台 / 任务中心会把这一阶段显示为 `等待 brief 确认`、`批准开写`、`驳回重做 brief`
+
 ## Repair Mainline
 
 当前支持单章 `repair` 任务：

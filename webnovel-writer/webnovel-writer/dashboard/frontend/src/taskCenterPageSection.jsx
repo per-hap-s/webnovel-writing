@@ -58,7 +58,7 @@ export function TaskCenterPageSection({
         selectedTask.runtime_status?.suggested_resume_step || '',
     ].join('|') : ''
     const canRetryTask = ['failed', 'interrupted'].includes(liveSelectedTask?.status) && liveSelectedTask?.runtime_status?.retryable !== false
-    const canCancelTask = ['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask?.status)
+    const canCancelTask = ['queued', 'running', 'awaiting_chapter_brief_approval', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask?.status)
 
     useEffect(() => {
         if (!tasks.some(isRuntimeActiveTask) && !isRuntimeActiveTask(liveSelectedTask)) return undefined

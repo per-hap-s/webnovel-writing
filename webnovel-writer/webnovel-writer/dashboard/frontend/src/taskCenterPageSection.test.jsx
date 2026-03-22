@@ -244,6 +244,40 @@ test('approval action includes explicit project_root in shell mode', async () =>
     })
 })
 
+test('chapter brief approval tasks surface approve and reject actions in the first screen', async () => {
+    const task = {
+        id: 'task-brief-1',
+        task_type: 'write',
+        status: 'awaiting_chapter_brief_approval',
+        current_step: 'chapter-brief-approval',
+        approval_status: 'pending',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: {},
+        request: { chapter: 3, require_manual_approval: false },
+        artifacts: {
+            step_results: {
+                'chapter-director': {
+                    structured_output: {
+                        chapter: 3,
+                        chapter_goal: 'Push the bureau clue forward.',
+                        primary_conflict: 'Shen Yan must act before the memory cost escalates.',
+                    },
+                },
+            },
+        },
+    }
+
+    fetchJSONMock.mockResolvedValueOnce({
+        task,
+        events: [],
+    })
+
+    renderTaskCenter([task], task)
+
+    expect(await screen.findByRole('button', { name: '批准开写' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: '驳回重做 brief' })).not.toBeNull()
+})
+
 afterEach(() => {
     cleanup()
 })

@@ -120,6 +120,13 @@ export function TaskCenterTaskDetail({
                 const blockingItems = Array.isArray(liveSelectedTask?.artifacts?.blocking_items) ? liveSelectedTask.artifacts.blocking_items : []
                 const primaryActionKey = buildActionKey(primaryAction)
                 const retryActionKey = buildRequestActionKey(`/api/tasks/${liveSelectedTask.id}/retry`)
+                const chapter = Number(
+                    liveSelectedTask?.request?.chapter
+                    || liveSelectedTask?.artifacts?.step_results?.['chapter-director']?.structured_output?.chapter
+                    || 0,
+                )
+                const briefApproveActionKey = buildRequestActionKey(`/api/chapters/${chapter}/brief/approve`)
+                const briefRejectActionKey = buildRequestActionKey(`/api/chapters/${chapter}/brief/reject`)
                 const approveActionKey = buildRequestActionKey('/api/review/approve', { task_id: liveSelectedTask.id })
                 const rejectActionKey = buildRequestActionKey('/api/review/reject', { task_id: liveSelectedTask.id })
                 const cancelActionKey = `cancel:${liveSelectedTask.id}`
@@ -164,6 +171,34 @@ export function TaskCenterTaskDetail({
                                     >
                                         按当前步骤重跑
                                     </ActionButton>
+                                ) : null}
+                                {liveSelectedTask.status === 'awaiting_chapter_brief_approval' && chapter > 0 ? (
+                                    <>
+                                        <ActionButton
+                                            className="primary-button"
+                                            onClick={() => onPerform(
+                                                `/api/chapters/${chapter}/brief/approve`,
+                                                { reason: '由仪表盘批准开写' },
+                                                { actionKey: briefApproveActionKey, focusTaskId: liveSelectedTask.id },
+                                            )}
+                                            disabled={Boolean(pendingActionKey)}
+                                            loading={pendingActionKey === briefApproveActionKey}
+                                        >
+                                            批准开写
+                                        </ActionButton>
+                                        <ActionButton
+                                            className="danger-button"
+                                            onClick={() => onPerform(
+                                                `/api/chapters/${chapter}/brief/reject`,
+                                                { reason: '由仪表盘驳回 brief' },
+                                                { actionKey: briefRejectActionKey, focusTaskId: liveSelectedTask.id },
+                                            )}
+                                            disabled={Boolean(pendingActionKey)}
+                                            loading={pendingActionKey === briefRejectActionKey}
+                                        >
+                                            驳回重做 brief
+                                        </ActionButton>
+                                    </>
                                 ) : null}
                                 {liveSelectedTask.status === 'awaiting_writeback_approval' ? (
                                     <>

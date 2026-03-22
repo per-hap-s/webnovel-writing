@@ -36,7 +36,7 @@ const DEFAULT_LAUNCHER_FORM = {
     chapter_range: '1-3',
     volume: '1',
     mode: 'standard',
-    require_manual_approval: true,
+    require_manual_approval: false,
 }
 
 export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIONS, suggestedChapter }) {
@@ -144,7 +144,7 @@ export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIO
                             checked={form.require_manual_approval}
                             onChange={(event) => setForm({ ...form, require_manual_approval: event.target.checked })}
                         />
-                        回写前需要人工确认
+                        正文回写前需要人工确认
                     </label>
                 )}
             </div>
