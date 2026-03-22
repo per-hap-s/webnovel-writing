@@ -1,11 +1,12 @@
 const TASK_TYPE_LABELS = {
-    init: '旧初始化',
-    plan: '规划卷',
+    init: '旧项目补齐',
+    plan: '多章规划',
     write: '撰写章节',
-    'guarded-write': '护栏推进',
+    'guarded-write': '护栏推进单章',
     'guarded-batch-write': '护栏批量推进',
     review: '执行审查',
     resume: '恢复任务',
+    repair: '局部修稿',
 }
 
 const STATUS_LABELS = {
@@ -13,8 +14,8 @@ const STATUS_LABELS = {
     running: '运行中',
     retrying: '重试中',
     resuming_writeback: '回写中',
-    awaiting_chapter_brief_approval: '等待 brief 确认',
-    awaiting_writeback_approval: '等待回写审批',
+    awaiting_chapter_brief_approval: '等待确认开写',
+    awaiting_writeback_approval: '人工确认回写',
     completed: '已完成',
     failed: '失败',
     interrupted: '已中断',
@@ -22,8 +23,8 @@ const STATUS_LABELS = {
 }
 
 const APPROVAL_STATUS_LABELS = {
-    not_required: '无需审批',
-    pending: '待批准回写',
+    not_required: '无需确认',
+    pending: '待确认',
     approved: '已批准',
     rejected: '已拒绝',
 }
@@ -32,20 +33,23 @@ const STEP_LABELS = {
     init: '初始化',
     plan: '规划',
     resume: '恢复',
-    'guarded-chapter-runner': '护栏推进一章',
+    'guarded-chapter-runner': '护栏推进单章',
     'guarded-batch-runner': '护栏批量推进',
-    'story-director': '多章叙事规划',
-    'chapter-director': '单章导演决策',
-    'chapter-brief-approval': 'brief 待确认',
+    'story-director': '多章规划',
+    'chapter-director': '单章指挥',
+    'chapter-brief-approval': '章节简报确认',
     context: '上下文准备',
     draft: '草稿生成',
     'consistency-review': '一致性审查',
     'continuity-review': '连续性审查',
     'ooc-review': '角色一致性审查',
     'review-summary': '问题汇总',
-    polish: '润色',
-    'approval-gate': '待人工确认',
+    polish: '定向润色',
+    'approval-gate': '人工确认回写',
     'data-sync': '数据同步',
+    'repair-plan': '修稿规划',
+    'repair-draft': '修稿改写',
+    'repair-writeback': '修稿回写',
     idle: '空闲',
 }
 
@@ -110,88 +114,84 @@ const EXACT_EVENT_MESSAGES = {
     'Retry requested': '已请求重试',
     'Writeback approved': '已批准回写',
     'Writeback rejected': '已拒绝回写',
-    'Rejected by operator': '已被操作人拒绝',
+    'Rejected by operator': '已被人工拒绝',
     'Schema validation failed': '结构校验失败',
     'Task completed': '任务已完成',
-    'Story director prepared': '多章叙事规划已生成',
-    'Chapter director prepared': '单章导演简报已生成',
-    'Chapter brief approved': '已批准 brief，可以开写',
-    'Chapter brief rejected': '已驳回 brief，需重新生成',
-    'Waiting for chapter brief approval': '等待章节 brief 批准',
-    'Context story contract synced': '上下文已同步叙事导演合同',
-    'Story plan refresh suggested': '建议重新生成滚动规划',
-    'Guarded runner blocked by story refresh': '护栏推进因滚动规划刷新建议而停止',
-    'Guarded runner child task created': '护栏推进已创建 write 子任务',
-    'Guarded runner stopped at approval gate': '护栏推进在审批关卡停止',
-    'Guarded runner blocked by review gate': '护栏推进被审查关卡拦截',
+    'Story director prepared': '多章规划已生成',
+    'Chapter director prepared': '章节简报已生成',
+    'Chapter brief approved': '章节简报已批准，可开始正文写作',
+    'Chapter brief rejected': '章节简报已驳回，需要重新生成',
+    'Waiting for chapter brief approval': '等待确认章节简报',
+    'Context story contract synced': '上下文已同步创作合同',
+    'Story plan refresh suggested': '建议刷新后续章节规划',
+    'Guarded runner blocked by story refresh': '护栏推进因刷新建议而暂停',
+    'Guarded runner child task created': '护栏推进已创建写作子任务',
+    'Guarded runner stopped at approval gate': '护栏推进停在人工确认回写',
+    'Guarded runner blocked by review gate': '护栏推进被审查阻断',
     'Guarded runner child task failed': '护栏推进子任务失败',
     'Guarded runner completed one chapter': '护栏推进已完成一章',
     'Guarded batch child task created': '护栏批量推进已创建子任务',
-    'Guarded batch stopped by child outcome': '护栏批量推进因子任务结果而停止',
+    'Guarded batch stopped by child outcome': '护栏批量推进因子任务结果而暂停',
     'Guarded batch child task failed': '护栏批量推进子任务失败',
-    'Guarded batch completed requested chapters': '护栏批量推进已完成请求章数',
-    'Review summary persisted': '审查汇总已写入',
-    'Review gate blocked execution': '审查闸门阻止继续执行',
-    'Waiting for writeback approval': '等待回写审批',
-    'Write target normalized': '已按任务章节号纠正写回目标',
-    'Data sync completed': '写回同步完成',
-    'Data sync payload enriched': '已补齐写回所需的结构化信息',
-    'Plan writeback completed': '卷规划写回完成',
-    'Core setting docs synced': '核心设定集已更新',
+    'Guarded batch completed requested chapters': '护栏批量推进已完成请求章节',
+    'Review summary persisted': '问题汇总已写入',
+    'Review gate blocked execution': '审查阻断后续执行',
+    'Waiting for writeback approval': '等待人工确认回写',
+    'Write target normalized': '已校正回写目标',
+    'Data sync completed': '数据同步完成',
+    'Data sync payload enriched': '已补齐数据同步所需结构化信息',
+    'Plan writeback completed': '规划回写完成',
+    'Core setting docs synced': '核心设定文档已同步',
     'Chapter body written': '正文已写入',
-    'Step writeback failed': '步骤写回失败',
-    'Resume target resolved': '已确定需要恢复的任务',
-    'Resume target scheduled': '已重新排入恢复队列',
-    'Resume target already running': '目标任务正在运行，无需重复恢复',
-    'Resume schedule failed': '恢复排程失败',
+    'Step writeback failed': '阶段回写失败',
+    'Resume target resolved': '已定位恢复目标',
+    'Resume target scheduled': '已加入恢复调度',
+    'Resume target already running': '恢复目标已在运行',
+    'Resume schedule failed': '恢复调度失败',
     'Task scheduled for resume': '任务已准备恢复',
-    'Task auto-completed during resume recovery': '恢复检查时检测到任务已完成',
+    'Task auto-completed during resume recovery': '恢复检查时发现任务已完成',
     'Resume target failed': '恢复目标执行失败',
-    'Workflow spec not found': '未找到工作流契约',
-    'Workflow parse failed': '工作流契约解析失败',
-    'Workflow config error': '工作流配置有误',
+    'Workflow spec not found': '未找到工作流定义',
+    'Workflow parse failed': '工作流解析失败',
+    'Workflow config error': '工作流配置错误',
     'Task execution failed': '任务执行失败',
-    plan_blocked: '规划待补信息',
+    plan_blocked: '规划信息不足',
     writeback_rollback_started: '开始回滚失败写回',
     writeback_rollback_finished: '失败写回已回滚',
-    'Review summary prepared': '审查汇总已生成',
+    'Review summary prepared': '问题汇总已生成',
     prompt_compiled: '提示词已组装完成',
-    request_dispatched: '已向上游发出请求',
-    awaiting_model_response: '正在等待模型响应',
+    request_dispatched: '已向模型发出请求',
+    awaiting_model_response: '等待模型响应',
     response_received: '已收到模型响应',
     parsing_output: '正在解析输出',
-    step_heartbeat: '步骤仍在运行',
-    step_retry_scheduled: '已安排步骤重试',
-    step_retry_started: '步骤重试开始',
-    step_waiting_approval: '等待人工批准回写',
-    step_auto_retried: '步骤已自动重试',
+    step_heartbeat: '阶段仍在运行',
+    step_retry_scheduled: '已安排阶段重试',
+    step_retry_started: '阶段重试开始',
+    step_waiting_approval: '等待人工确认回写',
+    step_auto_retried: '阶段已自动重试',
     raw_output_parse_failed: '原始输出解析失败',
     json_extraction_recovered: '已从原始输出中恢复 JSON',
+    'Repair plan prepared': '修稿规划已生成',
+    'Repair plan blocked': '修稿启动前缺少输入',
+    'Repair writeback blocked': '修稿回写被阻断',
+    'Repair writeback completed': '修稿回写已完成',
 }
 
 const UI_COPY = {
-    planBlockedStatus: '待补资料 / 已停止',
+    planBlockedStatus: '待补资料 / 已暂停',
     planBlockedStep: '待补资料',
     approvalNotApplicable: '不适用',
-    approvalNotRequired: '本任务无需你处理',
-    approvalNotReached: '尚未进入审批',
-    approvalPending: '等你批准回写',
+    approvalNotRequired: '当前任务无需你确认',
+    approvalNotReached: '尚未进入确认阶段',
+    approvalPending: '等待你确认回写',
+    briefApprovalPending: '等待确认章节简报',
     approvalApproved: '已批准',
-    approvalApprovedWritingBack: '你已批准，系统正在写回',
-    approvalApprovedCompleted: '已批准，写回已完成',
+    approvalApprovedWritingBack: '已批准，系统正在回写',
+    approvalApprovedCompleted: '已批准，回写已完成',
     approvalRejected: '已拒绝回写',
     unknownSystemEvent: '系统事件',
-    unknownSystemEventWithDetail: '系统事件（请查看详情区）',
+    unknownSystemEventWithDetail: '系统事件（请查看详情）',
 }
-
-TASK_TYPE_LABELS.repair = '局部修稿'
-STEP_LABELS['repair-plan'] = '修稿规划'
-STEP_LABELS['repair-draft'] = '修稿改写'
-STEP_LABELS['repair-writeback'] = '修稿回写'
-EXACT_EVENT_MESSAGES['Repair plan prepared'] = '修稿规划已生成'
-EXACT_EVENT_MESSAGES['Repair plan blocked'] = '修稿启动前置输入不足'
-EXACT_EVENT_MESSAGES['Repair writeback blocked'] = '修稿回写被复审或输入阻断'
-EXACT_EVENT_MESSAGES['Repair writeback completed'] = '修稿回写已完成'
 
 export function MetricCard({ label, value }) {
     return (
@@ -282,12 +282,15 @@ export function translateApprovalStatus(value) {
 export function resolveApprovalStatusLabel(task) {
     const approvalStatus = task?.approval_status || 'n/a'
     if (!['write', 'repair'].includes(task?.task_type)) return translateApprovalStatus(approvalStatus)
-    if (task?.status === 'awaiting_chapter_brief_approval') return '等你批准开写'
+    if (task?.status === 'awaiting_chapter_brief_approval') return UI_COPY.briefApprovalPending
     if (!task?.request?.require_manual_approval) return UI_COPY.approvalNotRequired
     const writebackStep = task?.task_type === 'repair' ? 'repair-writeback' : 'data-sync'
     if (approvalStatus === 'approved') {
         if (task?.status === 'completed') return UI_COPY.approvalApprovedCompleted
-        if (['queued', 'running', 'retrying', 'resuming_writeback'].includes(task?.status) && ['approval-gate', writebackStep].includes(task?.current_step)) {
+        if (
+            ['queued', 'running', 'retrying', 'resuming_writeback'].includes(task?.status)
+            && ['approval-gate', writebackStep].includes(task?.current_step)
+        ) {
             return UI_COPY.approvalApprovedWritingBack
         }
         return UI_COPY.approvalApproved
@@ -307,7 +310,7 @@ export function resolveTaskTargetLabel(task) {
         return `第 ${request.chapter} 章`
     }
     if (task?.task_type === 'repair' && request.chapter) {
-        return `第 ${request.chapter} 章修稿`
+        return `第 ${request.chapter} 章局部修稿`
     }
     if (task?.task_type === 'guarded-write' && request.chapter) {
         return `护栏推进第 ${request.chapter} 章`
@@ -318,8 +321,8 @@ export function resolveTaskTargetLabel(task) {
         if (startChapter > 0) {
             const endChapter = startChapter + maxChapters - 1
             return endChapter > startChapter
-                ? `护栏批量推进第 ${startChapter}-${endChapter} 章`
-                : `护栏批量推进第 ${startChapter} 章`
+                ? `护栏推进第 ${startChapter}-${endChapter} 章`
+                : `护栏推进第 ${startChapter} 章`
         }
         return `护栏批量推进 ${maxChapters} 章`
     }
@@ -357,16 +360,16 @@ export function translateEventMessage(message) {
     if (EXACT_EVENT_MESSAGES[message]) return EXACT_EVENT_MESSAGES[message]
 
     const queuedMatch = message.match(/^Task queued[:：](.+)$/)
-    if (queuedMatch) return `任务已加入队列：${translateTaskType(queuedMatch[1])}`
+    if (queuedMatch) return `任务已加入队列：${translateTaskType(queuedMatch[1].trim())}`
 
     const stepStartMatch = message.match(/^Step started[:：](.+)$/)
-    if (stepStartMatch) return `步骤开始：${translateStepName(stepStartMatch[1])}`
+    if (stepStartMatch) return `阶段开始：${translateStepName(stepStartMatch[1].trim())}`
 
     const stepDoneMatch = message.match(/^Step completed[:：](.+)$/)
-    if (stepDoneMatch) return `步骤完成：${translateStepName(stepDoneMatch[1])}`
+    if (stepDoneMatch) return `阶段完成：${translateStepName(stepDoneMatch[1].trim())}`
 
     const stepFailedMatch = message.match(/^Step failed[:：](.+)$/)
-    if (stepFailedMatch) return `步骤失败：${translateStepName(stepFailedMatch[1])}`
+    if (stepFailedMatch) return `阶段失败：${translateStepName(stepFailedMatch[1].trim())}`
 
     return /^[\x00-\x7F\s:._/-]+$/.test(message) ? UI_COPY.unknownSystemEventWithDetail : message
 }

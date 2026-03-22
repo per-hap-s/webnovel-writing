@@ -69,8 +69,7 @@ export function WorkbenchPage({
     }
 
     async function handleOpenProject(projectRoot, fallbackUrl = '') {
-        if (!projectRoot) return
-        if (!onOpenProject) return
+        if (!projectRoot || !onOpenProject) return
         const response = await onOpenProject(projectRoot, fallbackUrl)
         if (response?.opened) {
             setMessage('')
@@ -81,12 +80,8 @@ export function WorkbenchPage({
             setError(response.error)
             return
         }
-        if (response?.project_initialized !== false) { /*
-            setError(normalizeError(new Error(response?.next_recommended_action || '鎵撳紑椤圭洰澶辫触锛岃绋嶅悗鍐嶈瘯銆?)))
-            return */
-        }
         if (response?.project_initialized !== false) {
-            setError(normalizeError(new Error(response?.next_recommended_action || 'Open project failed. Please try again.')))
+            setError(normalizeError(new Error(response?.next_recommended_action || '打开项目失败，请稍后重试。')))
             return
         }
         setDraftRoot(projectRoot)
@@ -231,7 +226,7 @@ export function WorkbenchPage({
 
                     <section ref={createPanelRef} className="panel full-span workbench-panel">
                         <div className="panel-title">新建项目</div>
-                        <div className="workbench-section-copy">先选目录，再填写标题和题材。创建成功后会直接进入该项目 Dashboard。</div>
+                        <div className="workbench-section-copy">先选目录，再填写标题和题材。创建成功后会直接进入该项目工作台。</div>
                         <div className="task-row-actions workbench-inline-actions">
                             <button className="secondary-button workbench-button" onClick={startCreateFlow} disabled={busyKey === 'pick-create'}>
                                 {busyKey === 'pick-create' ? '选择中...' : '先选项目目录'}
@@ -276,7 +271,7 @@ export function WorkbenchPage({
             ) : (
                 <section className="panel full-span workbench-panel">
                     <div className="panel-title">工具页</div>
-                    <div className="workbench-section-copy">这里承接原启动器里的常用动作，统一做成可直接执行的按钮。</div>
+                    <div className="workbench-section-copy">这里承接旧启动器里的常用动作，统一做成可直接执行的按钮。</div>
                     <div className="summary-grid">
                         <WorkbenchToolCard
                             title="登录 Codex CLI"
@@ -296,8 +291,8 @@ export function WorkbenchPage({
                         />
                         <WorkbenchToolCard
                             title="开启局域网分享"
-                            description="以当前项目启动可局域网访问的 Dashboard。"
-                            actionLabel="开启 LAN 模式"
+                            description="以当前项目启动可局域网访问的创作工作台。"
+                            actionLabel="开启局域网模式"
                             disabled={!currentProject}
                             busy={busyKey === 'tool:start-lan-dashboard'}
                             onClick={() => runTool('start-lan-dashboard')}

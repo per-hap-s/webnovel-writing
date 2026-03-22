@@ -15,6 +15,10 @@ function normalizeText(value) {
     return String(value ?? '').trim()
 }
 
+function hasChineseText(value) {
+    return /[\u3400-\u9fff]/u.test(normalizeText(value))
+}
+
 function normalizeVariant(value, fallback = 'secondary') {
     const normalized = normalizeText(value)
     return normalized === 'primary' || normalized === 'secondary' ? normalized : fallback
@@ -27,16 +31,36 @@ function normalizeKind(value) {
     return CANONICAL_OPERATOR_ACTION_KINDS.has(normalized) ? normalized : ''
 }
 
-function defaultLabelForAction(action) {
+function buildLaunchActionLabel(action) {
+    if (action.taskType === 'repair') return '创建局部修稿任务'
+    if (action.taskType === 'guarded-batch-write') return '继续下一批护栏推进'
+    if (action.taskType === 'guarded-write') return '继续护栏推进下一章'
+    const chapter = Number(action.payload?.chapter || 0)
+    if (action.taskType === 'write' && chapter > 0) return `继续第 ${chapter} 章`
+    return '执行下一步'
+}
+
+function buildOpenActionLabel(action, rawLabel) {
+    const normalizedLabel = normalizeText(rawLabel).toLowerCase()
+    if (normalizedLabel.includes('blocked')) return '打开阻断子任务'
+    if (normalizedLabel.includes('failed')) return '打开失败子任务'
+    if (normalizedLabel.includes('approval')) return '打开待审批子任务'
+    if (normalizedLabel.includes('last')) return '查看最后子任务'
+    return '查看任务'
+}
+
+function defaultLabelForAction(action, rawLabel = '') {
     if (!action) return '执行下一步'
     if (action.kind === 'open-task' || action.kind === 'open-blocked-task') {
-        return '查看任务'
+        return buildOpenActionLabel(action, rawLabel)
     }
     if (action.kind === 'retry-task') {
-        return action.resumeFromStep === 'story-director' ? '刷新后续章节规划并重跑本章' : '按当前步骤重跑'
+        return action.resumeFromStep === 'story-director'
+            ? '刷新后续章节规划并重跑本章'
+            : '按当前阶段重跑'
     }
     if (action.kind === 'launch-task') {
-        return action.taskType === 'repair' ? '创建局部修稿任务' : '执行下一步'
+        return buildLaunchActionLabel(action)
     }
     if (action.kind === 'resume-existing-task') {
         return '恢复执行'
@@ -47,33 +71,42 @@ function defaultLabelForAction(action) {
     return '执行下一步'
 }
 
+function normalizeLabel(action, fallback) {
+    const rawLabel = normalizeText(action.label || action.actionLabel || fallback.label)
+    if (hasChineseText(rawLabel)) return rawLabel
+    return defaultLabelForAction(action, rawLabel)
+}
+
 export function normalizeOperatorAction(action, fallback = {}) {
     if (!isRecord(action)) return null
     const rawKind = normalizeText(action.kind ?? action.type ?? fallback.kind)
     const kind = normalizeKind(rawKind)
     if (!kind) return null
 
-    const normalized = {
-        id: normalizeText(action.id || fallback.id || `${kind}:${normalizeText(action.taskId || action.task_type || action.taskType || action.resumeFromStep || action.label || action.actionLabel || 'action')}`),
-        kind,
-        label: normalizeText(action.label || action.actionLabel || fallback.label) || defaultLabelForAction({ ...action, kind }),
-        variant: normalizeVariant(action.variant || fallback.variant),
-    }
-
     const taskId = normalizeText(action.taskId || action.task_id || fallback.taskId)
     const taskType = normalizeText(action.taskType || action.task_type || fallback.taskType)
     const resumeFromStep = normalizeText(action.resumeFromStep || action.resume_from_step || fallback.resumeFromStep || (rawKind === 'retry-story' ? 'story-director' : ''))
     const reason = normalizeText(action.reason || fallback.reason)
+    const payload = isRecord(action.payload) ? action.payload : (isRecord(fallback.payload) ? fallback.payload : undefined)
+
+    const normalized = {
+        id: normalizeText(
+            action.id
+            || fallback.id
+            || `${kind}:${normalizeText(taskId || taskType || resumeFromStep || action.label || action.actionLabel || 'action')}`,
+        ),
+        kind,
+        variant: normalizeVariant(action.variant || fallback.variant),
+    }
 
     if (taskId) normalized.taskId = taskId
     if (taskType) normalized.taskType = taskType
     if (resumeFromStep) normalized.resumeFromStep = resumeFromStep
     if (reason) normalized.reason = reason
-    if (isRecord(action.payload)) {
-        normalized.payload = action.payload
-    } else if (isRecord(fallback.payload)) {
-        normalized.payload = fallback.payload
-    }
+    if (payload) normalized.payload = payload
+
+    normalized.label = normalizeLabel(normalized, action)
+
     if (typeof action.disabled === 'boolean') {
         normalized.disabled = action.disabled
     } else if (typeof fallback.disabled === 'boolean') {
@@ -85,7 +118,9 @@ export function normalizeOperatorAction(action, fallback = {}) {
 
 export function normalizeOperatorActions(actions, fallback = {}) {
     const list = Array.isArray(actions) ? actions : (actions ? [actions] : [])
-    return list.map((action, index) => normalizeOperatorAction(action, { ...fallback, id: `${fallback.id || 'operator'}:${index}` })).filter(Boolean)
+    return list
+        .map((action, index) => normalizeOperatorAction(action, { ...fallback, id: `${fallback.id || 'operator'}:${index}` }))
+        .filter(Boolean)
 }
 
 function buildTaskLaunchPayload(task, chapter, taskType) {
@@ -147,7 +182,7 @@ function buildGuardedWriteFallbackActions(task, structuredOutput) {
             normalizeOperatorAction({
                 id: `guarded-write:open:${task?.id || nextChapter}`,
                 kind: 'open-task',
-                label: '打开子任务',
+                label: '查看子任务',
                 variant: 'secondary',
                 taskId: structuredOutput?.child_task_id || task?.id || '',
             }),
@@ -175,7 +210,7 @@ function buildGuardedWriteFallbackActions(task, structuredOutput) {
             normalizeOperatorAction({
                 id: `guarded-write:open:${task?.id || nextChapter}`,
                 kind: 'open-task',
-                label: '打开子任务',
+                label: '查看子任务',
                 variant: 'secondary',
                 taskId: structuredOutput?.child_task_id || task?.id || '',
             }),
@@ -187,7 +222,7 @@ function buildGuardedWriteFallbackActions(task, structuredOutput) {
             {
                 id: `guarded-write:open-review:${task?.id || nextChapter}`,
                 kind: 'open-task',
-                label: '打开阻塞子任务',
+                label: '打开阻断子任务',
                 variant: 'primary',
                 taskId: structuredOutput?.child_task_id || task?.id || '',
             },

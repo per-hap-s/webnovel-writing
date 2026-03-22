@@ -20,31 +20,29 @@ const postJSONMock = vi.fn()
 vi.mock('./api.js', () => ({
     fetchJSON: (...args) => fetchJSONMock(...args),
     postJSON: (...args) => postJSONMock(...args),
-    normalizeError: (error) => {
-        if (error?.displayMessage) return error
-        return {
-            displayMessage: error?.message || String(error),
-            code: 'REQUEST_FAILED',
-            rawMessage: error?.message || String(error),
-            details: null,
-        }
-    },
+    normalizeError: (error) => ({
+        displayMessage: error?.message || String(error),
+        code: 'REQUEST_FAILED',
+        rawMessage: error?.message || String(error),
+        details: null,
+    }),
 }))
 
 vi.mock('./operatorAction.js', () => ({
     resolveTaskOperatorActions: (task) => task.operatorActions || [],
+    normalizeOperatorActions: (actions) => (Array.isArray(actions) ? actions : []),
 }))
 
 import { TaskCenterPageSection } from './appSections.jsx'
 
-function renderTaskCenter(tasks, selectedTask, overrides = {}) {
+function renderTaskCenter(tasks, selectedTask) {
     return render(
         <TaskCenterPageSection
             tasks={tasks}
             selectedTask={selectedTask}
-            onSelectTask={overrides.onSelectTask || vi.fn()}
-            onMutated={overrides.onMutated || vi.fn()}
-            onNavigateOverview={overrides.onNavigateOverview || vi.fn()}
+            onSelectTask={vi.fn()}
+            onMutated={vi.fn()}
+            onNavigateOverview={vi.fn()}
             MetricCard={MetricCard}
             translateTaskType={translateTaskType}
             translateTaskStatus={translateTaskStatus}
@@ -89,8 +87,8 @@ test('repair task awaiting approval shows repair target and writeback actions', 
 
     renderTaskCenter([task], task)
 
-    expect(screen.getAllByText('第 2 章修稿').length).toBeGreaterThan(0)
-    expect(screen.getByText('等你批准回写')).not.toBeNull()
+    expect(screen.getAllByText('第 2 章局部修稿').length).toBeGreaterThan(0)
+    expect(screen.getByText('等待你确认回写')).not.toBeNull()
 
     await user.click(screen.getByRole('button', { name: '批准回写' }))
 

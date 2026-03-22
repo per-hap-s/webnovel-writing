@@ -1,4 +1,4 @@
-import { resolveTaskOperatorActions } from './operatorAction.js'
+import { normalizeOperatorActions, resolveTaskOperatorActions } from './operatorAction.js'
 
 function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -81,10 +81,12 @@ export function resolveStoryPlanSlot(storyPlan, chapter) {
 export function deriveWritingTaskContext(task, { operatorActions = null } = {}) {
     const storyPlan = resolveStoryPlan(task)
     const writeback = task?.artifacts?.writeback || {}
-    const resolvedOperatorActions = Array.isArray(operatorActions)
-        ? operatorActions
-        : Array.isArray(task?.operatorActions)
-            ? task.operatorActions
+    const normalizedProvidedActions = normalizeOperatorActions(operatorActions)
+    const normalizedTaskActions = normalizeOperatorActions(task?.operatorActions)
+    const resolvedOperatorActions = normalizedProvidedActions.length
+        ? normalizedProvidedActions
+        : normalizedTaskActions.length
+            ? normalizedTaskActions
             : resolveTaskOperatorActions(task)
     return {
         storyPlan,

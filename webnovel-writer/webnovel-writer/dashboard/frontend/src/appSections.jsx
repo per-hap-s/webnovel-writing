@@ -699,7 +699,7 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
             <section className="panel full-span">
                 <div className="panel-title">Story Plans</div>
                 {storyPlans.length === 0 ? (
-                    <div className="tiny">当前还没有可展示的多章滚动规划；请先运行带 `story-director` 的写作任务。</div>
+                    <div className="tiny">当前还没有可展示的多章滚动规划；请先运行带“多章规划”的写作任务。</div>
                 ) : (
                     <div className="summary-grid">
                         {storyPlans.map((plan) => (
@@ -1193,3 +1193,4 @@ function formatFileSize(size) {
     if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
     return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
+

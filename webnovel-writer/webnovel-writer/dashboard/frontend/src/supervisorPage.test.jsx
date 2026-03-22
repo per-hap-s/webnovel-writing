@@ -1,4 +1,4 @@
-import { beforeEach, expect, test, vi } from 'vitest'
+﻿import { beforeEach, expect, test, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 
 const fetchJSONMock = vi.fn()
@@ -91,9 +91,11 @@ test('keeps supervisor data visible when a later refresh fails', async () => {
 
     await waitFor(async () => {
         const alert = await screen.findByRole('alert')
-        expect(alert.textContent || '').toContain('Supervisor 数据刷新失败')
+        expect(alert.textContent || '').toContain('督办台数据刷新失败')
         expect(alert.textContent || '').toContain('REQUEST_FAILED')
         expect(screen.getAllByText('Stable Item').length).toBeGreaterThan(0)
         expect(screen.getAllByText('Initial Checklist').length).toBeGreaterThan(0)
     })
 })
+
+

@@ -35,7 +35,7 @@ function buildRequestActionKey(path, body = {}) {
 
 function resolveRepairWritebackLabel(candidate) {
     const action = candidate?.operator_action?.payload || candidate?.operatorAction?.payload || {}
-    return action?.require_manual_approval ? '需人工确认后写回' : '会自动写回正文'
+    return action?.require_manual_approval ? '需要人工确认后回写' : '会自动写回正文'
 }
 
 function ActionButton({ className, onClick, disabled, loading, children, loadingLabel }) {
@@ -143,13 +143,9 @@ export function TaskCenterTaskDetail({
                         </div>
 
                         <div className="planning-warning detail-action-bar">
-                            <div className="subsection-title">待处理动作</div>
+                            <div className="subsection-title">首要动作</div>
                             <div className="button-row">
-                                <ActionButton
-                                    className="secondary-button"
-                                    onClick={() => onSelectTask(liveSelectedTask.id)}
-                                    disabled={false}
-                                >
+                                <ActionButton className="secondary-button" onClick={() => onSelectTask(liveSelectedTask.id)} disabled={false}>
                                     查看任务
                                 </ActionButton>
                                 {primaryAction ? (
@@ -169,7 +165,7 @@ export function TaskCenterTaskDetail({
                                         disabled={Boolean(pendingActionKey)}
                                         loading={pendingActionKey === retryActionKey}
                                     >
-                                        按当前步骤重跑
+                                        按当前阶段重跑
                                     </ActionButton>
                                 ) : null}
                                 {liveSelectedTask.status === 'awaiting_chapter_brief_approval' && chapter > 0 ? (
@@ -190,13 +186,13 @@ export function TaskCenterTaskDetail({
                                             className="danger-button"
                                             onClick={() => onPerform(
                                                 `/api/chapters/${chapter}/brief/reject`,
-                                                { reason: '由仪表盘驳回 brief' },
+                                                { reason: '由仪表盘驳回章节简报' },
                                                 { actionKey: briefRejectActionKey, focusTaskId: liveSelectedTask.id },
                                             )}
                                             disabled={Boolean(pendingActionKey)}
                                             loading={pendingActionKey === briefRejectActionKey}
                                         >
-                                            驳回重做 brief
+                                            驳回重做章节简报
                                         </ActionButton>
                                     </>
                                 ) : null}
@@ -262,10 +258,7 @@ export function TaskCenterTaskDetail({
                             />
                         ) : null}
 
-                        <ReviewSummarySection
-                            summary={reviewSummary}
-                            MetricCard={MetricCard}
-                        />
+                        <ReviewSummarySection summary={reviewSummary} MetricCard={MetricCard} />
 
                         {repairCandidates.length ? (
                             <div className="subsection">
@@ -366,7 +359,7 @@ export function TaskCenterTaskDetail({
                                 <div className="event-list">
                                     {events.map((event) => (
                                         <div key={event.id} className={`event-card ${event.level}`}>
-                                            <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} · {formatTimestampShort(event.timestamp)}</div>
+                                            <div className="event-meta">[{translateEventLevel(event.level)}] {translateStepName(event.step_name || 'task')} / {formatTimestampShort(event.timestamp)}</div>
                                             <div>{translateEventMessage(event.message)}</div>
                                             <div className="event-payload-row">
                                                 {buildEventPayloadTags(event.payload || {}).map((tag) => (

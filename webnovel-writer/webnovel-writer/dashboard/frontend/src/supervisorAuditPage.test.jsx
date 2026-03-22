@@ -1,4 +1,4 @@
-import { beforeEach, expect, test, vi } from 'vitest'
+﻿import { beforeEach, expect, test, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { buildSupervisorAuditQueryString } from './supervisorAuditState.js'
@@ -158,7 +158,7 @@ test('keeps audit data visible when a later refresh fails', async () => {
 
     await waitFor(async () => {
         const alert = await screen.findByRole('alert')
-        expect(alert.textContent || '').toContain('Supervisor Audit 数据刷新失败')
+        expect(alert.textContent || '').toContain('督办审计数据刷新失败')
         expect(alert.textContent || '').toContain('REQUEST_FAILED')
         expect(screen.getAllByText('Stable Audit Item').length).toBeGreaterThan(0)
         expect(screen.getAllByText('Stable Checklist').length).toBeGreaterThan(0)
@@ -227,3 +227,5 @@ test('executes launch, retry, and open actions from audit groups', async () => {
     await user.click(screen.getByRole('button', { name: 'Open Task' }))
     expect(onOpenTask).toHaveBeenCalledWith('task-9')
 })
+
+

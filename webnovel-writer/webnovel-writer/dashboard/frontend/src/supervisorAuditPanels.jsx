@@ -16,27 +16,27 @@ export function SupervisorAuditHealthPanel({
 }) {
     return (
         <section className="panel full-span">
-            <div className="panel-title">{'\u5ba1\u8ba1\u4f53\u68c0'}</div>
-            {!auditHealth ? <div className="empty-state">{'\u6682\u65f6\u672a\u62ff\u5230 audit health \u4fe1\u606f\u3002'}</div> : (
+            <div className="panel-title">审计体检</div>
+            {!auditHealth ? <div className="empty-state">暂时未拿到审计体检信息。</div> : (
                 <>
                     <div className="button-row">
                         <span className={`runtime-badge ${auditHealth.healthy ? 'success' : 'warning'}`}>
-                            {auditHealth.healthy ? '\u65e5\u5fd7\u4f53\u68c0\u901a\u8fc7' : '\u65e5\u5fd7\u4f53\u68c0\u5f02\u5e38'}
+                            {auditHealth.healthy ? '日志体检通过' : '日志体检异常'}
                         </span>
-                        <span className="runtime-badge muted">{`\u626b\u63cf ${formatNumber(auditHealth.nonempty_lines || 0)} / ${formatNumber(auditHealth.total_lines || 0)} \u884c`}</span>
-                        <span className="runtime-badge muted">{`\u6709\u6548\u4e8b\u4ef6 ${formatNumber(auditHealth.valid_entries || 0)}`}</span>
-                        {auditHealth.latestTimestamp ? <span className="runtime-badge muted">{`\u6700\u65b0\u8bb0\u5f55\uff1a${formatTimestampShort(auditHealth.latestTimestamp)}`}</span> : null}
+                        <span className="runtime-badge muted">{`扫描 ${formatNumber(auditHealth.nonempty_lines || 0)} / ${formatNumber(auditHealth.total_lines || 0)} 行`}</span>
+                        <span className="runtime-badge muted">{`有效事件 ${formatNumber(auditHealth.valid_entries || 0)}`}</span>
+                        {auditHealth.latestTimestamp ? <span className="runtime-badge muted">{`最新记录：${formatTimestampShort(auditHealth.latestTimestamp)}`}</span> : null}
                     </div>
                     <div className="button-row">
                         <button className="secondary-button" onClick={handleDownloadAuditHealthMarkdown}>
-                            {'\u5bfc\u51fa\u4f53\u68c0 Markdown'}
+                            导出体检 Markdown
                         </button>
                         <button className="secondary-button" onClick={handleDownloadAuditHealthJson}>
-                            {'\u5bfc\u51fa\u4f53\u68c0 JSON'}
+                            导出体检 JSON
                         </button>
                     </div>
                     {auditHealth.exists === false ? (
-                        <div className="empty-state">{'\u5f53\u524d\u9879\u76ee\u8fd8\u6ca1\u6709 audit-log.jsonl\u3002'}</div>
+                        <div className="empty-state">当前项目还没有 audit-log.jsonl。</div>
                     ) : null}
                     {auditHealth.issue_count ? (
                         <div className="supervisor-grid">
@@ -47,7 +47,7 @@ export function SupervisorAuditHealthPanel({
                                             <span>{formatSupervisorAuditHealthIssueLabel(item.code)}</span>
                                         </div>
                                         <span className={`runtime-badge ${item.severity === 'danger' ? 'danger' : 'warning'}`}>
-                                            {item.line ? `Line ${item.line}` : '\u5168\u5c40'}
+                                            {item.line ? `第 ${item.line} 行` : '全局'}
                                         </span>
                                     </div>
                                     <div className="tiny">{item.message}</div>
@@ -56,7 +56,7 @@ export function SupervisorAuditHealthPanel({
                             ))}
                         </div>
                     ) : (
-                        <div className="empty-state">{'\u672a\u53d1\u73b0\u574f JSON\u3001\u7f3a\u5173\u952e\u5b57\u6bb5\u6216\u672a\u6765 schema \u95ee\u9898\u3002'}</div>
+                        <div className="empty-state">未发现坏 JSON、缺关键字段或未来 schema 问题。</div>
                     )}
                 </>
             )}
@@ -74,24 +74,24 @@ export function SupervisorAuditRepairPreviewPanel({
 }) {
     return (
         <section className="panel full-span">
-            <div className="panel-title">{'\u4fee\u590d\u9884\u6f14'}</div>
-            {!auditRepairPreview ? <div className="empty-state">{'\u6682\u65f6\u672a\u62ff\u5230 repair preview \u4fe1\u606f\u3002'}</div> : (
+            <div className="panel-title">修复预演</div>
+            {!auditRepairPreview ? <div className="empty-state">暂时未拿到修复预演信息。</div> : (
                 <>
                     <div className="button-row">
-                        <span className="runtime-badge muted">{`\u53ef\u76f4\u63a5\u4fee\u590d ${formatNumber(auditRepairPreview.repairable_count || 0)}`}</span>
-                        <span className="runtime-badge warning">{`\u9700\u4eba\u5de5\u590d\u6838 ${formatNumber(auditRepairPreview.manual_review_count || 0)}`}</span>
-                        <span className="runtime-badge muted">{`\u626b\u63cf ${formatNumber(auditRepairPreview.nonempty_lines || 0)} \u884c`}</span>
+                        <span className="runtime-badge muted">{`可直接修复 ${formatNumber(auditRepairPreview.repairable_count || 0)}`}</span>
+                        <span className="runtime-badge warning">{`需人工复核 ${formatNumber(auditRepairPreview.manual_review_count || 0)}`}</span>
+                        <span className="runtime-badge muted">{`扫描 ${formatNumber(auditRepairPreview.nonempty_lines || 0)} 行`}</span>
                     </div>
                     <div className="button-row">
                         <button className="secondary-button" onClick={handleDownloadAuditRepairPreviewMarkdown}>
-                            {'\u5bfc\u51fa\u9884\u6f14 Markdown'}
+                            导出预演 Markdown
                         </button>
                         <button className="secondary-button" onClick={handleDownloadAuditRepairPreviewJson}>
-                            {'\u5bfc\u51fa\u9884\u6f14 JSON'}
+                            导出预演 JSON
                         </button>
                     </div>
                     {auditRepairPreview.exists === false ? (
-                        <div className="empty-state">{'\u5f53\u524d\u9879\u76ee\u8fd8\u6ca1\u6709 audit-log.jsonl\u3002'}</div>
+                        <div className="empty-state">当前项目还没有 audit-log.jsonl。</div>
                     ) : null}
                     {(auditRepairPreview.proposals || []).length ? (
                         <div className="supervisor-grid">
@@ -102,19 +102,19 @@ export function SupervisorAuditRepairPreviewPanel({
                                             <span>{formatSupervisorAuditRepairActionLabel(item.action)}</span>
                                         </div>
                                         <span className={`runtime-badge ${item.severity === 'danger' ? 'danger' : 'warning'}`}>
-                                            {item.line ? `Line ${item.line}` : '\u5168\u5c40'}
+                                            {item.line ? `第 ${item.line} 行` : '全局'}
                                         </span>
                                     </div>
                                     <div className="tiny">{item.reason || '-'}</div>
-                                    {item.stableKey ? <div className="tiny">{`\u5efa\u8bae\u952e\uff1a${item.stableKey}`}</div> : null}
-                                    {(item.issueCodes || []).length ? <div className="tiny">{`\u95ee\u9898\uff1a${item.issueCodes.map((code) => formatSupervisorAuditHealthIssueLabel(code)).join(' / ')}`}</div> : null}
+                                    {item.stableKey ? <div className="tiny">{`建议键：${item.stableKey}`}</div> : null}
+                                    {(item.issueCodes || []).length ? <div className="tiny">{`问题：${item.issueCodes.map((code) => formatSupervisorAuditHealthIssueLabel(code)).join(' / ')}`}</div> : null}
                                     {item.preview ? <pre>{item.preview}</pre> : null}
                                     {item.proposedEvent ? <pre>{JSON.stringify(item.proposedEvent, null, 2)}</pre> : null}
                                 </div>
                             ))}
                         </div>
                     ) : (
-                        <div className="empty-state">{'\u5f53\u524d\u6ca1\u6709\u53ef\u9884\u6f14\u7684\u4fee\u590d\u52a8\u4f5c\u3002'}</div>
+                        <div className="empty-state">当前没有可预演的修复动作。</div>
                     )}
                 </>
             )}
@@ -147,10 +147,10 @@ export function SupervisorAuditFilterPanel({
 }) {
     return (
         <section className="panel full-span">
-            <div className="panel-title">{'审计筛选'}</div>
+            <div className="panel-title">审计筛选</div>
             <div className="detail-grid">
                 <label className="field">
-                    <span>{'建议类型'}</span>
+                    <span>建议类型</span>
                     <select value={auditCategoryFilter} onChange={(event) => setAuditCategoryFilter(event.target.value)}>
                         {auditCategoryOptions.map((option) => (
                             <option key={option.value} value={option.value}>{option.label}</option>
@@ -158,7 +158,7 @@ export function SupervisorAuditFilterPanel({
                     </select>
                 </label>
                 <label className="field">
-                    <span>{'审计动作'}</span>
+                    <span>审计动作</span>
                     <select value={auditActionFilter} onChange={(event) => setAuditActionFilter(event.target.value)}>
                         {auditActionOptions.map((option) => (
                             <option key={option.value} value={option.value}>{option.label}</option>
@@ -166,7 +166,7 @@ export function SupervisorAuditFilterPanel({
                     </select>
                 </label>
                 <label className="field">
-                    <span>{'状态'}</span>
+                    <span>状态</span>
                     <select value={auditStatusFilter} onChange={(event) => setAuditStatusFilter(event.target.value)}>
                         {SUPERVISOR_STATUS_FILTER_OPTIONS.map((option) => (
                             <option key={option.value} value={option.value}>{option.label}</option>
@@ -174,7 +174,7 @@ export function SupervisorAuditFilterPanel({
                     </select>
                 </label>
                 <label className="field">
-                    <span>{'章节'}</span>
+                    <span>章节</span>
                     <select value={auditChapterFilter} onChange={(event) => setAuditChapterFilter(event.target.value)}>
                         {auditChapterOptions.map((option) => (
                             <option key={option.value} value={option.value}>{option.label}</option>
@@ -182,14 +182,14 @@ export function SupervisorAuditFilterPanel({
                     </select>
                 </label>
                 <label className="field">
-                    <span>{'查看方式'}</span>
+                    <span>查看方式</span>
                     <select value={auditViewMode} onChange={(event) => setAuditViewMode(event.target.value)}>
-                        <option value="grouped">{'按建议分组'}</option>
-                        <option value="events">{'原始事件流'}</option>
+                        <option value="grouped">按建议分组</option>
+                        <option value="events">原始事件流</option>
                     </select>
                 </label>
                 <label className="field">
-                    <span>{'工作台筛选'}</span>
+                    <span>工作台聚焦</span>
                     <select value={auditGroupFocus} onChange={(event) => setAuditGroupFocus(event.target.value)} disabled={auditViewMode !== 'grouped'}>
                         {auditGroupFocusOptions.map((option) => (
                             <option key={option.value} value={option.value}>{option.label}</option>
@@ -200,14 +200,14 @@ export function SupervisorAuditFilterPanel({
             <div className="button-row">
                 {auditFocusedStableKey ? (
                     <button className="secondary-button" onClick={() => setAuditFocusedStableKey('')}>
-                        {'清除聚焦'}
+                        清除聚焦
                     </button>
                 ) : null}
                 <button className="secondary-button" onClick={handleDownloadAuditMarkdown}>
-                    {'导出当前筛选 Markdown'}
+                    导出当前筛选 Markdown
                 </button>
                 <button className="secondary-button" onClick={handleDownloadAuditJson}>
-                    {'导出当前筛选 JSON'}
+                    导出当前筛选 JSON
                 </button>
             </div>
         </section>
@@ -251,30 +251,30 @@ export function SupervisorAuditTimelinePanel({
 }) {
     return (
         <section className="panel full-span">
-            <div className="panel-title">{'审计时间线'}</div>
-            <div className="empty-state">{'这里显示 Supervisor 的状态变更、忽略 / 恢复、清单保存等审计事件。'}</div>
+            <div className="panel-title">审计时间线</div>
+            <div className="empty-state">这里显示督办建议的状态变更、忽略/恢复、清单保存等审计事件。</div>
             {auditFocusState ? (
                 <div className="error-panel">
-                    <div className="error-title">{'深链接聚焦失败'}</div>
+                    <div className="error-title">深链接聚焦失败</div>
                     <div className="error-details">{auditFocusState.message}</div>
                     <div className="button-row">
                         {auditFocusState.kind === 'view_mode_conflict' ? (
                             <button className="secondary-button" onClick={() => setAuditViewMode('grouped')}>
-                                {'切回按建议分组'}
+                                切回按建议分组
                             </button>
                         ) : null}
                         {auditFocusState.kind === 'event_filters_conflict' ? (
                             <button className="secondary-button" onClick={handleResetAuditEventFilters}>
-                                {'清除基础筛选'}
+                                清除基础筛选
                             </button>
                         ) : null}
                         {auditFocusState.kind === 'group_focus_conflict' ? (
                             <button className="secondary-button" onClick={handleResetAuditGroupFilters}>
-                                {'清除工作台筛选'}
+                                清除工作台聚焦
                             </button>
                         ) : null}
                         <button className="secondary-button" onClick={() => setAuditFocusedStableKey('')}>
-                            {'移除这条深链接聚焦'}
+                            移除这条深链接聚焦
                         </button>
                     </div>
                 </div>
@@ -348,7 +348,7 @@ export function SupervisorAuditTimelinePanel({
                         />
                     )
                 })}
-                {(auditViewMode === 'grouped' ? filteredGroupedAuditLogEntries.length === 0 : filteredAuditLogEntries.length === 0) ? <div className="empty-state">{'当前筛选条件下暂无审计事件。'}</div> : null}
+                {(auditViewMode === 'grouped' ? filteredGroupedAuditLogEntries.length === 0 : filteredAuditLogEntries.length === 0) ? <div className="empty-state">当前筛选条件下暂无审计事件。</div> : null}
             </div>
             {auditError ? <ErrorNotice error={auditError} /> : null}
         </section>
@@ -374,19 +374,19 @@ export function SupervisorAuditRepairArchivePanel({
     return (
         <>
             <section className="panel full-span">
-                <div className="panel-title">{'修复归档'}</div>
+                <div className="panel-title">修复归档</div>
                 <div className="detail-grid">
                     <label className="field">
-                        <span>{'归档筛选'}</span>
+                        <span>归档筛选</span>
                         <select value={auditRepairReportFilter} onChange={(event) => setAuditRepairReportFilter(event.target.value)}>
-                            <option value="all">{'全部批次'}</option>
-                            <option value="changed">{'已改动日志'}</option>
-                            <option value="manual_only">{'仅人工复核'}</option>
-                            <option value="unchanged">{'无文件改动'}</option>
+                            <option value="all">全部批次</option>
+                            <option value="changed">已改动日志</option>
+                            <option value="manual_only">仅人工复核</option>
+                            <option value="unchanged">无文件改动</option>
                         </select>
                     </label>
                     <label className="field">
-                        <span>{'排序方式'}</span>
+                        <span>排序方式</span>
                         <select value={auditRepairReportSortMode} onChange={(event) => setAuditRepairReportSortMode(event.target.value)}>
                             {AUDIT_REPAIR_REPORT_SORT_OPTIONS.map((option) => (
                                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -396,24 +396,24 @@ export function SupervisorAuditRepairArchivePanel({
                 </div>
                 <div className="summary-grid">
                     <div className="summary-card">
-                        <div className="summary-card-title">{'当前命中'}</div>
+                        <div className="summary-card-title">当前命中</div>
                         <div className="summary-card-meta">{`${formatNumber(auditRepairReportSummary.visible)} 份报告`}</div>
                         <div className="summary-card-meta">{`全部归档 ${formatNumber(auditRepairReports.length)} 份`}</div>
                     </div>
                     <div className="summary-card">
-                        <div className="summary-card-title">{'已改动日志'}</div>
+                        <div className="summary-card-title">已改动日志</div>
                         <div className="summary-card-meta">{`${formatNumber(auditRepairReportSummary.changed)} 份`}</div>
-                        <div className="summary-card-meta">{'至少包含自动修复写回'}</div>
+                        <div className="summary-card-meta">至少包含自动修复写回</div>
                     </div>
                     <div className="summary-card">
-                        <div className="summary-card-title">{'仅人工复核'}</div>
+                        <div className="summary-card-title">仅人工复核</div>
                         <div className="summary-card-meta">{`${formatNumber(auditRepairReportSummary.manualOnly)} 份`}</div>
-                        <div className="summary-card-meta">{'没有自动改写，仅保留人工处理项'}</div>
+                        <div className="summary-card-meta">没有自动改写，仅保留人工处理项</div>
                     </div>
                     <div className="summary-card">
-                        <div className="summary-card-title">{'无文件改动'}</div>
+                        <div className="summary-card-title">无文件改动</div>
                         <div className="summary-card-meta">{`${formatNumber(auditRepairReportSummary.unchanged)} 份`}</div>
-                        <div className="summary-card-meta">{'包含 manual-only 与纯记录批次'}</div>
+                        <div className="summary-card-meta">包含 manual-only 与纯记录批次</div>
                     </div>
                 </div>
                 <div className="supervisor-grid">
@@ -421,7 +421,7 @@ export function SupervisorAuditRepairArchivePanel({
                         <div key={`audit-repair-report:${item.relativePath}`} className={`supervisor-card ${item.changed ? 'warning' : 'success'}`}>
                             <div className="supervisor-card-header">
                                 <div className="supervisor-title">
-                                    <span>{item.filename || 'repair report'}</span>
+                                    <span>{item.filename || '修复报告'}</span>
                                 </div>
                                 <span className="runtime-badge">{formatTimestampShort(item.generatedAt)}</span>
                             </div>
@@ -437,12 +437,12 @@ export function SupervisorAuditRepairArchivePanel({
                                     {selectedVisibleAuditRepairReport?.relativePath === item.relativePath ? '已在查看' : '查看报告'}
                                 </button>
                                 <button className="secondary-button" onClick={() => handleDownloadAuditRepairReport(item)}>
-                                    {'下载报告'}
+                                    下载报告
                                 </button>
                             </div>
                         </div>
                     ))}
-                    {sortedAuditRepairReports.length === 0 ? <div className="empty-state">{'当前筛选下没有 repair report。'}</div> : null}
+                    {sortedAuditRepairReports.length === 0 ? <div className="empty-state">当前筛选下没有修复报告。</div> : null}
                 </div>
             </section>
             {selectedVisibleAuditRepairReport ? (
@@ -467,7 +467,7 @@ export function SupervisorAuditChecklistArchivePanel({
     return (
         <>
             <section className="panel full-span">
-                <div className="panel-title">{'清单归档'}</div>
+                <div className="panel-title">清单归档</div>
                 <div className="supervisor-grid">
                     {auditChecklists.map((item) => (
                         <div key={`audit-checklist:${item.relativePath}`} className="supervisor-card success">
@@ -479,18 +479,18 @@ export function SupervisorAuditChecklistArchivePanel({
                             </div>
                             <div className="tiny">{`路径：${item.relativePath}`}</div>
                             {item.note ? <div className="tiny">{`备注：${item.note}`}</div> : null}
-                            <div className="supervisor-meta">{item.summary || '已保存的 Supervisor 清单'}</div>
+                            <div className="supervisor-meta">{item.summary || '已保存的督办清单'}</div>
                             <div className="button-row">
                                 <button className="secondary-button" onClick={() => setSelectedAuditChecklistPath(item.relativePath)}>
                                     {selectedAuditChecklist?.relativePath === item.relativePath ? '已在查看' : '查看内容'}
                                 </button>
                                 <button className="secondary-button" onClick={() => handleDownloadAuditChecklist(item)}>
-                                    {'下载清单'}
+                                    下载清单
                                 </button>
                             </div>
                         </div>
                     ))}
-                    {auditChecklists.length === 0 ? <div className="empty-state">{'暂时还没有可用的审计清单。'}</div> : null}
+                    {auditChecklists.length === 0 ? <div className="empty-state">暂时还没有可用的审计清单。</div> : null}
                 </div>
             </section>
             {selectedAuditChecklist ? (

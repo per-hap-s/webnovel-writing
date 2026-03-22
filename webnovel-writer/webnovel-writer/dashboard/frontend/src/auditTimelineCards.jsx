@@ -56,7 +56,7 @@ export function SupervisorAuditGroupCard({
             {group.latestTimestamp ? <div className="tiny">{`最新变更：${formatTimestampShort(group.latestTimestamp)}`}</div> : null}
             {group.earliestTimestamp ? <div className="tiny">{`首次记录：${formatTimestampShort(group.earliestTimestamp)}`}</div> : null}
             {group.eventCount !== group.compactedEventCount ? <div className="tiny">{`已压缩展示：${formatNumber(group.eventCount - group.compactedEventCount)} 条 tracking 更新`}</div> : null}
-            <div className="tiny">{`当前建议状态：${currentAuditItem ? currentAuditItem.dismissed ? '已从 Inbox 移除' : '可直接执行' : '建议已不存在'}`}</div>
+            <div className="tiny">{`当前建议状态：${currentAuditItem ? currentAuditItem.dismissed ? '已从建议列表移除' : '可直接执行' : '建议已不存在'}`}</div>
             {latestEntry.rationale ? <div className="tiny">{`当时推荐理由：${latestEntry.rationale}`}</div> : null}
             {latestEntry.actionLabel ? <div className="tiny">{`当时建议动作：${latestEntry.actionLabel}`}</div> : null}
             {recoverySemantics ? <div className="tiny">{`恢复语义：${recoverySemantics.label}`}</div> : null}

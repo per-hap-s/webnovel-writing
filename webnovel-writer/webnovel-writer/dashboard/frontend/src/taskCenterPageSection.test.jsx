@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+﻿import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
@@ -34,6 +34,7 @@ vi.mock('./api.js', () => ({
 
 vi.mock('./operatorAction.js', () => ({
     resolveTaskOperatorActions: (task) => task.operatorActions || [],
+    normalizeOperatorActions: (actions) => (Array.isArray(actions) ? actions : []),
 }))
 
 import { TaskCenterPageSection } from './appSections.jsx'
@@ -275,9 +276,24 @@ test('chapter brief approval tasks surface approve and reject actions in the fir
     renderTaskCenter([task], task)
 
     expect(await screen.findByRole('button', { name: '批准开写' })).not.toBeNull()
-    expect(screen.getByRole('button', { name: '驳回重做 brief' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: '驳回重做章节简报' })).not.toBeNull()
 })
 
+
+test('central translation helpers expose final pure-Chinese writing terms', () => {
+    expect(translateTaskStatus('awaiting_chapter_brief_approval')).toBe('等待确认开写')
+    expect(translateStepName('story-director')).toBe('多章规划')
+    expect(translateStepName('chapter-director')).toBe('单章指挥')
+    expect(translateStepName('chapter-brief-approval')).toBe('章节简报确认')
+    expect(translateEventMessage('Waiting for chapter brief approval')).toBe('等待确认章节简报')
+    expect(translateEventMessage('Chapter brief approved')).toBe('章节简报已批准，可开始正文写作')
+    expect(resolveApprovalStatusLabel({
+        task_type: 'write',
+        status: 'awaiting_chapter_brief_approval',
+        approval_status: 'pending',
+        request: { require_manual_approval: false },
+    })).toBe('等待确认章节简报')
+})
 afterEach(() => {
     cleanup()
 })
@@ -301,7 +317,7 @@ test('task list and detail share the same continuation outcome and primary actio
             },
         },
         operatorActions: [
-            { kind: 'launch-task', taskType: 'write', payload: { chapter: 9 }, label: 'Launch continuation', variant: 'primary' },
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 9 }, label: '继续第 9 章', variant: 'primary' },
         ],
     }
 
@@ -312,9 +328,9 @@ test('task list and detail share the same continuation outcome and primary actio
     const taskItem = screen.getByRole('button', { name: /撰写章节/ })
     expect(within(taskItem).getByText(WRITING_CONTINUATION.continuable)).not.toBeNull()
     expect(screen.getByText(/当前可继续下一章/)).not.toBeNull()
-    expect(screen.getAllByText('Launch continuation').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('继续第 9 章').length).toBeGreaterThanOrEqual(2)
 
-    await user.click(screen.getAllByRole('button', { name: 'Launch continuation' })[0])
+    await user.click(screen.getAllByRole('button', { name: '继续第 9 章' })[0])
 
     await waitFor(() => {
         expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/write', { chapter: 9 }, {})
@@ -347,7 +363,7 @@ test('guarded review block renders the same blocked reason in task list and deta
 
     renderTaskCenter([task], task)
 
-    const taskItem = screen.getByRole('button', { name: /护栏推进/ })
+    const taskItem = screen.getByRole('button', { name: /护栏推进单章/ })
     expect(within(taskItem).getByText(WRITING_CONTINUATION.blocked)).not.toBeNull()
     expect(within(taskItem).getByText(/记录了 2 个问题/)).not.toBeNull()
     expect(screen.getByText('继续前必须处理审查阻断')).not.toBeNull()
@@ -409,7 +425,7 @@ test('clicking task list action button does not trigger card selection for the c
 
     renderTaskCenter([task], task, { onSelectTask })
 
-    const taskItem = screen.getByRole('button', { name: /护栏推进/ })
+    const taskItem = screen.getByRole('button', { name: /护栏推进单章/ })
     const taskCard = taskItem.closest('.task-item')
     expect(taskCard).not.toBeNull()
 
@@ -471,7 +487,7 @@ test('plan blocked task renders dedicated stopped-for-input copy', () => {
 
     renderTaskCenter([task], task)
 
-    expect(screen.getAllByText('待补资料 / 已停止').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('待补资料 / 已暂停').length).toBeGreaterThan(0)
     expect(screen.getByText('规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行 plan。')).not.toBeNull()
     expect(screen.getByText('故事一句话')).not.toBeNull()
     expect(screen.getByText('第 1 卷核心冲突')).not.toBeNull()
@@ -486,7 +502,7 @@ test('recoverable invalid step output task renders system fluctuation guidance f
         updated_at: '2026-03-21T10:05:00Z',
         runtime_status: {
             phase_label: '连续性审查',
-            phase_detail: '系统波动导致步骤结构化输出无效，建议从连续性审查重试。 当前解析阶段：json_truncated。',
+            phase_detail: '系统波动导致步骤结构化输出无效，建议从连续性审查重试。当前解析阶段：json_truncated。',
             error_code: 'INVALID_STEP_OUTPUT',
             retryable: true,
             suggested_resume_step: 'continuity-review',
@@ -506,5 +522,7 @@ test('recoverable invalid step output task renders system fluctuation guidance f
     renderTaskCenter([task], task)
 
     expect(screen.getAllByText(/系统波动导致步骤结构化输出无效/).length).toBeGreaterThan(0)
-    expect(screen.getByRole('button', { name: '按当前步骤重跑' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: '按当前阶段重跑' })).not.toBeNull()
 })
+
+

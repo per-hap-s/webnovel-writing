@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 import { ErrorNotice } from './appSections.jsx'
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
@@ -73,7 +73,7 @@ function buildSupervisorChecklistMarkdown({ projectInfo, items, categoryFilter, 
     const activeItems = (items || []).filter((item) => !item?.dismissed)
     const dismissedItems = (items || []).filter((item) => item?.dismissed)
     const lines = [
-        '# Supervisor 处理清单',
+        '# 督办处理清单',
         '',
         `- 当前章节：第 ${currentChapter} 章`,
         `- 项目总字数：${formatNumber(totalWords)}`,
@@ -514,7 +514,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
     return (
         <div className="page-grid">
             <section className="panel hero-panel">
-                <div className="panel-title">Supervisor 督办台</div>
+                <div className="panel-title">督办台</div>
                 <div className="metric-grid">
                     <MetricCard label="待处理建议" value={formatNumber(supervisorStatusSummary.open)} />
                     <MetricCard label="处理中" value={formatNumber(supervisorStatusSummary.in_progress)} />
@@ -524,7 +524,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
                     <MetricCard label="项目总字数" value={formatNumber(projectInfo?.progress?.total_words || 0)} />
                 </div>
             </section>
-            <ErrorNotice error={supervisorLoadError} title="Supervisor 数据刷新失败" />
+            <ErrorNotice error={supervisorLoadError} title="督办台数据刷新失败" />
             <section className="panel full-span">
                 <div className="panel-title">筛选与排序</div>
                 <div className="detail-grid">
@@ -573,7 +573,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
             </section>
             <section className="panel full-span">
                 <div className="panel-title">本轮处理清单</div>
-                <div className="empty-state">{selectedSupervisorKeys.length > 0 ? '当前导出的是已选中建议。若没有选中，则导出当前筛选结果。' : '当前未选中具体建议，将导出当前筛选后的全部建议。'}</div>
+                <div className="empty-state">{selectedSupervisorKeys.length > 0 ? '当前导出的是已选中的建议。若没有选中，则导出当前筛选结果。' : '当前未选中具体建议，将导出当前筛选后的全部建议。'}</div>
                 <div className="detail-grid">
                     <label className="field">
                         <span>清单标题</span>
@@ -594,7 +594,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
             </section>
             <section className="panel full-span">
                 <div className="panel-title">最近已保存清单</div>
-                <div className="empty-state">这里展示最近几轮已落盘的 Supervisor 清单，便于回溯和复用。</div>
+                <div className="empty-state">这里展示最近几轮已落盘的督办清单，便于回溯和复用。</div>
                 {recentChecklists.length === 0 ? (
                     <div className="empty-state">暂时还没有已保存的清单。</div>
                 ) : (
@@ -610,7 +610,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
                                     <div className="tiny">{`筛选：${item.categoryFilter || 'all'} / 排序：${item.sortMode || 'priority'}`}</div>
                                     <div className="tiny">{`选中项：${formatNumber(item.selectedCount || 0)}`}</div>
                                     {item.note ? <div className="tiny">{`备注：${item.note}`}</div> : null}
-                                    <div className="supervisor-meta">{item.summary || '已保存的 Supervisor 清单'}</div>
+                                    <div className="supervisor-meta">{item.summary || '已保存的督办清单'}</div>
                                     <div className="button-row">
                                         <button className="secondary-button" onClick={() => setSelectedChecklistPath(item.relativePath)}>{selectedChecklist?.relativePath === item.relativePath ? '已在查看' : '查看内容'}</button>
                                         <button className="secondary-button" onClick={() => handleDownloadSavedChecklist(item)}>下载副本</button>
@@ -625,7 +625,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
                 )}
             </section>
             <section className="panel full-span">
-                <div className="panel-title">Supervisor 建议</div>
+                <div className="panel-title">督办建议</div>
                 <div className="empty-state">这里只放当前需要优先处理的建议。忽略时需要填写原因，便于后续追溯。</div>
                 <div className="supervisor-grid">
                     {supervisorItems.map((item) => {
@@ -663,7 +663,7 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
                 </div>
             </section>
             <section className="panel full-span">
-                <div className="panel-title">Supervisor Inbox</div>
+                <div className="panel-title">已忽略建议</div>
                 <div className="empty-state">这里显示已忽略的建议和忽略理由，可以恢复到待处理列表。</div>
                 <div className="supervisor-grid">
                     {dismissedSupervisorItems.map((item) => {
@@ -695,3 +695,4 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
         </div>
     )
 }
+

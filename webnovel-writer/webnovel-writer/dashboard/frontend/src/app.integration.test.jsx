@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+﻿import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
@@ -69,7 +69,7 @@ vi.mock('./appSections.jsx', async () => {
                         },
                     },
                     operatorActions: [
-                        { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
+                        { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: '继续第 10 章', variant: 'primary' },
                     ],
                 })}
             >
@@ -272,7 +272,7 @@ test('overview task creation refreshes into tasks page with derived explanation 
             },
         },
         operatorActions: [
-            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: '继续第 10 章', variant: 'primary' },
         ],
     }]
 
@@ -280,7 +280,7 @@ test('overview task creation refreshes into tasks page with derived explanation 
 
     await user.click(await screen.findByRole('button', { name: 'launch-write' }))
 
-    expect(await screen.findByText('selected:task-overview;count:1;summary:可以继续|Continue chapter 10')).not.toBeNull()
+    expect(await screen.findByText('selected:task-overview;count:1;summary:可以继续|继续第 10 章')).not.toBeNull()
 })
 
 test('overview primary action button launches the next task through operator runtime', async () => {
@@ -301,14 +301,14 @@ test('overview primary action button launches the next task through operator run
             },
         },
         operatorActions: [
-            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: '继续第 10 章', variant: 'primary' },
         ],
     }]
     postJSONMock.mockResolvedValue({ id: 'task-next', task_type: 'write', status: 'queued', request: { chapter: 10 }, runtime_status: { target_label: '第 10 章' } })
 
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: 'Continue chapter 10' }))
+    await user.click(await screen.findByRole('button', { name: '继续第 10 章' }))
 
     await waitFor(() => {
         expect(postJSONMock).toHaveBeenCalledWith('/api/tasks/write', { chapter: 10 })
@@ -330,13 +330,13 @@ test('overview renders disabled primary action label instead of falling back to 
             },
         },
         operatorActions: [
-            { kind: 'open-blocked-task', label: 'Open blocked task', variant: 'primary', disabled: true, reason: 'missing target_task_id' },
+            { kind: 'open-blocked-task', label: '打开阻断子任务', variant: 'primary', disabled: true, reason: 'missing target_task_id' },
         ],
     }]
 
     render(<App />)
 
-    const actionButton = await screen.findByRole('button', { name: 'Open blocked task' })
+    const actionButton = await screen.findByRole('button', { name: '打开阻断子任务' })
     expect(actionButton.getAttribute('disabled')).not.toBeNull()
     expect(actionButton.getAttribute('title')).toBe('missing target_task_id')
 })
@@ -346,7 +346,9 @@ test('control overview renders director hub guidance from the backend snapshot',
 
     render(<App />)
 
-    expect(await screen.findByText('Lead with scene action')).not.toBeNull()
+    expect(await screen.findByText('创作指挥台')).not.toBeNull()
+    expect(screen.getByText('章节简报')).not.toBeNull()
+    expect(screen.getByText('Lead with scene action')).not.toBeNull()
     expect(screen.getByText('The protagonist must decide before the clue disappears.')).not.toBeNull()
     expect(screen.getByText('Keep the rain archive line under pressure.')).not.toBeNull()
     expect(screen.getAllByText('Archive thread').length).toBeGreaterThan(0)
@@ -371,14 +373,14 @@ test('overview primary action surfaces request errors', async () => {
             },
         },
         operatorActions: [
-            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: 'Continue chapter 10', variant: 'primary' },
+            { kind: 'launch-task', taskType: 'write', payload: { chapter: 10 }, label: '继续第 10 章', variant: 'primary' },
         ],
     }]
     postJSONMock.mockRejectedValue(new Error('launch failed'))
 
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: 'Continue chapter 10' }))
+    await user.click(await screen.findByRole('button', { name: '继续第 10 章' }))
 
     expect(await screen.findByText('launch failed')).not.toBeNull()
 })
@@ -432,7 +434,7 @@ test('auto last preference redirects into the remembered project', async () => {
 
     render(<App />)
 
-    expect(await screen.findByText('项目概览')).not.toBeNull()
+    expect(await screen.findByRole('button', { name: '项目总览' })).not.toBeNull()
     expect(window.location.search).toContain('project_root=C%3A%2Fnovel')
     expect(window.location.search).not.toContain('page=')
 })
@@ -473,7 +475,7 @@ test('bootstrap success from workbench opens the new project and keeps planning 
                 created: true,
                 project_root: 'D:\\tmp\\novel',
                 suggested_dashboard_url: '/?project_root=D%3A%5Ctmp%5Cnovel&bootstrap_hint=planning',
-                next_recommended_action: '项目已初始化。下一步请先确认规划信息，再运行 plan。',
+                next_recommended_action: '项目已初始化。下一步请先确认规划信息，再运行多章规划。',
             })
         }
         return Promise.resolve({})
@@ -521,7 +523,7 @@ test('planning profile save flushes project and task summaries immediately', asy
         }
         if (path === '/api/project/planning-profile') {
             return Promise.resolve({
-                profile: { story_logline: '旧概括' },
+                profile: { story_logline: '旧的概括' },
                 field_specs: [
                     { name: 'story_logline', label: '故事一句话', multiline: false, required: true },
                 ],
@@ -549,7 +551,7 @@ test('planning profile save flushes project and task summaries immediately', asy
 
     render(<App />)
 
-    const input = await screen.findByDisplayValue('旧概括')
+    const input = await screen.findByDisplayValue('旧的概括')
     await user.clear(input)
     await user.type(input, '新的概括')
     await user.click(screen.getByRole('button', { name: '保存规划信息' }))
@@ -723,3 +725,5 @@ test('removing the current project refreshes hub without stale project_root cont
         expect(window.location.search).not.toContain('project_root=')
     })
 })
+
+

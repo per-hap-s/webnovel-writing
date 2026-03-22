@@ -10,7 +10,7 @@ Supervisor Audit currently covers five read-only workflows:
 4. Offline repair execution
 5. Repair report and checklist browsing
 
-The Dashboard only renders and deep-links these views. It does not provide a repair write API.
+前端创作工作台只负责渲染这些视图并提供深链接，不提供修复写回 API。
 
 ## Storage Layout
 
@@ -26,7 +26,7 @@ The Dashboard only renders and deep-links these views. It does not provide a rep
 - `GET /api/supervisor/audit-repair-reports`
 - `GET /api/supervisor/checklists`
 
-Repair reports already expose enough fields for the Dashboard to summarize results without a backend summary field:
+修复报告已经暴露了足够的字段，前端创作工作台无需额外后端摘要字段也能完成结果汇总：
 
 - `changed`
 - `droppedCount`
@@ -36,7 +36,7 @@ Repair reports already expose enough fields for the Dashboard to summarize resul
 - `appliedCount`
 - `skippedCount`
 
-## Dashboard Behavior
+## 前端行为
 
 The Supervisor Audit page uses two state layers:
 

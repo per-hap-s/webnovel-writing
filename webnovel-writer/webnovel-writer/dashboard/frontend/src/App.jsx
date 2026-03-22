@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON, subscribeSSE } from './api.js'
 import {
     ApiSettingsSection,
@@ -35,10 +35,10 @@ import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './
 
 const PROJECT_NAV_ITEMS = [
     { id: 'workbench', label: '项目工作台' },
-    { id: 'control', label: '总览' },
-    { id: 'supervisor', label: '督办' },
+    { id: 'control', label: '项目总览' },
+    { id: 'supervisor', label: '督办台' },
     { id: 'supervisor-audit', label: '督办审计' },
-    { id: 'tasks', label: '任务' },
+    { id: 'tasks', label: '任务中心' },
     { id: 'data', label: '数据' },
     { id: 'files', label: '文件' },
     { id: 'quality', label: '质量' },
@@ -55,10 +55,10 @@ const MODE_OPTIONS = [
 ]
 
 const TASK_TEMPLATES = [
-    { key: 'init', title: '补种项目骨架（旧入口）', fields: ['project_root'] },
-    { key: 'plan', title: '规划卷', fields: ['volume', 'mode'] },
+    { key: 'init', title: '补齐旧项目骨架', fields: ['project_root'] },
+    { key: 'plan', title: '创建多章规划', fields: ['volume', 'mode'] },
     { key: 'write', title: '撰写章节', fields: ['chapter', 'mode', 'require_manual_approval'] },
-    { key: 'guarded-write', title: '护栏推进一章', fields: ['chapter', 'mode', 'require_manual_approval'] },
+    { key: 'guarded-write', title: '护栏推进单章', fields: ['chapter', 'mode', 'require_manual_approval'] },
     { key: 'guarded-batch-write', title: '护栏批量推进', fields: ['start_chapter', 'max_chapters', 'mode', 'require_manual_approval'] },
     { key: 'review', title: '执行审查', fields: ['chapter_range', 'mode'] },
     { key: 'resume', title: '恢复任务', fields: ['mode'] },
@@ -76,13 +76,13 @@ const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'awaiting_chapter_bri
 
 const UI_COPY = {
     overviewPlanningTitle: '规划必填信息',
-    projectCreateHint: '双击启动后会先进入工作台，在这里打开已有项目或新建项目。',
-    taskEntryHint: '主链建议按“规划卷 -> 撰写章节 -> 执行审查 / 恢复任务”使用；“补种项目骨架（旧入口）”只用于兼容旧项目。',
-    planningHint: '先把这里的规划信息补齐，再运行“规划卷”。如果信息不足，系统会提示你回到这里继续补资料。',
+    projectCreateHint: '启动后会先进入项目工作台。你可以在这里打开已有项目，或创建新的创作项目。',
+    taskEntryHint: '主线任务建议按“多章规划 -> 撰写章节 -> 执行审查 / 恢复任务”的顺序使用；“补齐旧项目骨架”只用于兼容旧项目。',
+    planningHint: '先补齐这里的规划信息，再运行“多章规划”。如果信息不足，系统会提示你回到这里继续补资料。',
     writingEngine: '写作引擎',
     retrievalEngine: '检索引擎',
     overviewMainlineTitle: '主线任务',
-    overviewMainlineEmpty: '暂无可展示的主线任务；创建 write / guarded / resume 任务后会在这里显示下一步建议。',
+    overviewMainlineEmpty: '暂时没有可展示的主线任务。创建写作、护栏推进或恢复任务后，这里会显示推荐动作。',
     viewTask: '查看任务',
     suggestedNextStep: '建议下一步',
 }
@@ -398,7 +398,7 @@ export default function App() {
         <div className="shell">
             <aside className="sidebar">
                 <div className="sidebar-header">
-                    <div className="brand">小说控制台</div>
+                    <div className="brand">小说创作台</div>
                     <div className="project-title">{projectTitle}</div>
                 </div>
                 <div className="sidebar-scroll">
@@ -450,7 +450,7 @@ export default function App() {
                             />
                             <SidebarProjectGroup
                                 title="最近项目"
-                                emptyText="打开已有项目后会出现在这里"
+                                emptyText="打开项目后会显示在这里"
                                 projects={recentWorkbenchProjects}
                                 onOpenProject={openWorkbenchProject}
                             />
@@ -473,7 +473,7 @@ export default function App() {
             <main className="content">
                 <ErrorNotice error={hubLoadError} title="工作台刷新失败" />
                 {projectMode ? <ErrorNotice error={coreLoadError} title="核心数据刷新失败" /> : null}
-                {projectMode ? <ErrorNotice error={statusLoadError} title="模型状态刷新失败" /> : null}
+                {projectMode ? <ErrorNotice error={statusLoadError} title="引擎状态刷新失败" /> : null}
                 {effectivePage === 'workbench' && (
                     <WorkbenchPage
                         hubData={hubData}
@@ -660,9 +660,9 @@ function formatWritingModelDetail(llmStatus) {
     if (!llmStatus?.installed) return '未配置'
     const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
     const statusSuffix = effectiveStatus === 'connected'
-        ? '（已联通）'
+        ? '（已连通）'
         : effectiveStatus === 'degraded'
-            ? '（探活异常，最近执行成功）'
+            ? '（探活异常，但最近执行成功）'
             : effectiveStatus === 'failed'
                 ? '（连接失败）'
                 : '（已配置）'
@@ -697,7 +697,7 @@ function formatRagStatusLabel(ragStatus) {
 function formatRagDetail(ragStatus) {
     if (!ragStatus?.configured) return '未配置'
     if (ragStatus?.connection_status === 'failed') return '连接失败'
-    if (ragStatus?.connection_status === 'connected') return '已联通'
+    if (ragStatus?.connection_status === 'connected') return '已连通'
     return '已配置'
 }
 
@@ -874,7 +874,7 @@ function ControlPage({ projectInfo, directorHub, llmStatus, ragStatus, tasks, bo
     return (
         <div className="page-grid">
             <section className="panel hero-panel">
-                <div className="panel-title">项目概览</div>
+                <div className="panel-title">项目总览</div>
                 <div className="metric-grid">
                     <MetricCard label="总字数" value={formatNumber(projectInfo?.progress?.total_words || 0)} />
                     <MetricCard label="当前章节" value={`第 ${projectInfo?.progress?.current_chapter || 0} 章`} />
@@ -945,7 +945,7 @@ function ControlPage({ projectInfo, directorHub, llmStatus, ragStatus, tasks, bo
                 {bootstrapHint === 'planning' ? (
                     <div className="planning-warning subtle">
                         <div className="subsection-title">下一步建议</div>
-                        <div className="tiny">项目已初始化。下一步先确认并保存规划信息，再运行 `plan`，不需要先手工改总纲。</div>
+                        <div className="tiny">项目已初始化。下一步先确认并保存规划信息，再运行“多章规划”。不需要先手工修改总纲。</div>
                     </div>
                 ) : null}
                 <div className="empty-state">{UI_COPY.planningHint}</div>
@@ -954,7 +954,7 @@ function ControlPage({ projectInfo, directorHub, llmStatus, ragStatus, tasks, bo
 
             <section className="panel full-span">
                 <div className="panel-title">API 接入设置</div>
-                <div className="empty-state">在这里填写写作模型和 RAG 接口配置，保存后会写入项目根目录 `.env` 并立即刷新当前面板状态。</div>
+                <div className="empty-state">在这里填写写作模型和检索接口配置。保存后会写入项目根目录的 `.env`，并立即刷新当前面板状态。</div>
                 <ApiSettingsSection llmStatus={llmStatus} ragStatus={ragStatus} onSaved={() => onApiSettingsSaved?.()} />
             </section>
         </div>
@@ -982,7 +982,7 @@ function WritingTaskOverviewCard({ task, summary, submitting, onOpenTask, onActi
                     className={summary.primaryAction ? 'primary-button' : 'secondary-button'}
                     onClick={() => summary.primaryAction && onAction(summary.primaryAction)}
                     disabled={!summary.primaryAction || submitting || summary.primaryAction.disabled}
-                    title={summary.primaryAction ? (summary.primaryAction.reason || summary.primaryAction.label) : '当前任务暂无可执行的下一步'}
+                    title={summary.primaryAction ? (summary.primaryAction.reason || summary.primaryAction.label) : '当前任务暂时没有可执行的下一步'}
                 >
                     {submitting ? '处理中...' : (summary.primaryActionLabel || '执行下一步')}
                 </button>
@@ -1005,7 +1005,7 @@ function DirectorHubPanel({ directorHub }) {
         const chapter = Number(item?.chapter || 0)
         const goal = trimText(item?.chapter_goal)
         if (chapter > 0 && goal) return `第 ${chapter} 章 / ${goal}`
-        if (chapter > 0) return `第 ${chapter} 章导演决策`
+        if (chapter > 0) return `第 ${chapter} 章指挥决策`
         return goal
     })
     const voiceItems = mapVoiceBibleItems(voiceBible)
@@ -1013,16 +1013,16 @@ function DirectorHubPanel({ directorHub }) {
 
     return (
         <section className="panel full-span">
-            <div className="panel-title">导演台</div>
+            <div className="panel-title">创作指挥台</div>
             <div className="director-hub-topline">
-                <span className="runtime-badge info">{`当前准备章：${currentChapter > 0 ? `第 ${currentChapter} 章` : '未确定'}`}</span>
-                <span className="runtime-badge muted">{`活跃线程 ${activeThreads.length}`}</span>
+                <span className="runtime-badge info">{`当前准备章节：${currentChapter > 0 ? `第 ${currentChapter} 章` : '未确定'}`}</span>
+                <span className="runtime-badge muted">{`活跃线索 ${activeThreads.length}`}</span>
                 <span className="runtime-badge muted">{`谜团 ${mysteryItems.length}`}</span>
                 <span className="runtime-badge muted">{`规则 ${ruleItems.length}`}</span>
             </div>
             <div className="director-hub-grid">
                 <section className="director-hub-card">
-                    <div className="subsection-title">当前章 brief</div>
+                    <div className="subsection-title">章节简报</div>
                     {currentBrief && Object.keys(currentBrief).length ? (
                         <>
                             <div className="director-hub-kv">
@@ -1031,18 +1031,18 @@ function DirectorHubPanel({ directorHub }) {
                                 <div><strong>揭示上限：</strong>{trimText(currentBrief.allowed_reveal_ceiling) || '未设定'}</div>
                                 <div><strong>章末钩子：</strong>{trimText(currentBrief.ending_hook_target) || '未设定'}</div>
                             </div>
-                            <DirectorChipGroup title="必须推进" items={currentBrief.must_advance_threads} emptyText="暂未指定必须推进的线程" />
-                            <DirectorChipGroup title="必须压住的信息" items={currentBrief.must_hold_back_facts} emptyText="暂无需要压住的事实" />
-                            <DirectorChipGroup title="声线约束" items={currentBrief.voice_constraints} emptyText="暂无声线约束" />
-                            <DirectorChipGroup title="禁用术语" items={currentBrief.forbidden_terms} emptyText="暂无禁用术语" />
+                            <DirectorChipGroup title="必须推进" items={currentBrief.must_advance_threads} emptyText="暂未指定必须推进的线索" />
+                            <DirectorChipGroup title="必须压住的信息" items={currentBrief.must_hold_back_facts} emptyText="暂时没有需要压住的事实" />
+                            <DirectorChipGroup title="人物声线约束" items={currentBrief.voice_constraints} emptyText="暂时没有声线约束" />
+                            <DirectorChipGroup title="禁用术语" items={currentBrief.forbidden_terms} emptyText="暂时没有禁用术语" />
                         </>
                     ) : (
-                        <div className="empty-state">当前还没有可展示的章节 brief。</div>
+                        <div className="empty-state">当前还没有可展示的章节简报。</div>
                     )}
                 </section>
 
                 <section className="director-hub-card">
-                    <div className="subsection-title">卷规划摘要</div>
+                    <div className="subsection-title">多章规划摘要</div>
                     {storyPlan && Object.keys(storyPlan).length ? (
                         <>
                             <div className="director-hub-kv">
@@ -1050,7 +1050,7 @@ function DirectorHubPanel({ directorHub }) {
                                 <div><strong>规划跨度：</strong>{Number(storyPlan.planning_horizon || 0) || '-'}</div>
                                 <div><strong>规划理由：</strong>{trimText(storyPlan.rationale) || '未提供'}</div>
                             </div>
-                            <DirectorChipGroup title="优先线程" items={storyPlan.priority_threads} emptyText="暂无优先线程" />
+                            <DirectorChipGroup title="优先线索" items={storyPlan.priority_threads} emptyText="暂时没有优先线索" />
                             <div className="director-mini-list">
                                 {chapterBeats.length ? chapterBeats.map((beat) => (
                                     <div key={`beat-${beat.chapter || beat.chapter_goal}`} className="director-mini-card">
@@ -1064,17 +1064,17 @@ function DirectorHubPanel({ directorHub }) {
                             </div>
                         </>
                     ) : (
-                        <div className="empty-state">当前还没有可展示的卷规划摘要。</div>
+                        <div className="empty-state">当前还没有可展示的多章规划摘要。</div>
                     )}
                 </section>
 
                 <section className="director-hub-card">
                     <div className="subsection-title">连续性账本</div>
-                    <DirectorChipGroup title="活跃线程" items={activeThreads} emptyText="暂无活跃线程" />
-                    <DirectorChipGroup title="未回收谜团" items={mysteryItems} emptyText="暂无待压住的谜团" />
-                    <DirectorChipGroup title="已坐实规则" items={ruleItems} emptyText="暂无已坐实规则" />
-                    <DirectorChipGroup title="关系变化" items={trustItems} emptyText="暂无关系变化" />
-                    <DirectorChipGroup title="最近导演决策" items={decisionItems} emptyText="暂无导演决策记录" />
+                    <DirectorChipGroup title="活跃线索" items={activeThreads} emptyText="暂时没有活跃线索" />
+                    <DirectorChipGroup title="未回收谜团" items={mysteryItems} emptyText="暂时没有待压住的谜团" />
+                    <DirectorChipGroup title="已坐实规则" items={ruleItems} emptyText="暂时没有已坐实规则" />
+                    <DirectorChipGroup title="关系变化" items={trustItems} emptyText="暂时没有关系变化" />
+                    <DirectorChipGroup title="最近指挥决策" items={decisionItems} emptyText="暂时没有指挥决策记录" />
                 </section>
 
                 <section className="director-hub-card">

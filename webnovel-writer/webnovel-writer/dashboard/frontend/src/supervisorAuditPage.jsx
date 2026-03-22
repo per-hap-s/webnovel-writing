@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 import {
     AUDIT_REPAIR_REPORT_SORT_OPTIONS,
@@ -431,7 +431,7 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
     return (
         <div className="page-grid">
             <section className="panel hero-panel">
-                <div className="panel-title">Supervisor Audit 审计视图</div>
+                <div className="panel-title">督办审计视图</div>
                 <div className="tiny">建议时间线与原始事件流在这里统一查看。</div>
                 <div className="metric-grid">
                     <MetricCard label="建议总数" value={formatNumber(auditSummary.total)} />
@@ -442,7 +442,7 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
                     <MetricCard label="已保存清单" value={formatNumber(auditChecklists.length)} />
                 </div>
             </section>
-            <ErrorNotice error={auditLoadError} title="Supervisor Audit 数据刷新失败" />
+            <ErrorNotice error={auditLoadError} title="督办审计数据刷新失败" />
             <SupervisorAuditFilterPanel
                 auditCategoryFilter={auditCategoryFilter}
                 setAuditCategoryFilter={setAuditCategoryFilter}
@@ -543,3 +543,4 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
         </div>
     )
 }
+

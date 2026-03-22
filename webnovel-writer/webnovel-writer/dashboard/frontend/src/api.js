@@ -158,8 +158,8 @@ function parseErrorPayload(text) {
 
 function buildHTMLResponseError(path, statusCode) {
     const rawMessage = path.startsWith('/api/settings/')
-        ? '当前 Dashboard 后端尚未重启，API 设置接口还未生效。请关闭启动窗口后重新启动 Dashboard。'
-        : '后端返回了页面内容而不是接口数据。请关闭并重新启动 Dashboard。'
+        ? '当前创作工作台后端尚未重启，API 设置接口还未生效。请关闭启动窗口后重新启动创作工作台。'
+        : '后端返回了页面内容而不是接口数据。请关闭并重新启动创作工作台。'
     return new AppError({
         displayMessage: CODE_MESSAGE_MAP.HTML_RESPONSE,
         code: 'HTML_RESPONSE',

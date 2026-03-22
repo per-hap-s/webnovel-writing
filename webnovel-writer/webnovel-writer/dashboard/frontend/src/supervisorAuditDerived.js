@@ -28,7 +28,7 @@ export const AUDIT_GROUP_FOCUS_OPTIONS = [
     { value: 'open', label: '待处理' },
     { value: 'in_progress', label: '处理中' },
     { value: 'completed', label: '已处理' },
-    { value: 'dismissed', label: '已从 Inbox 移除' },
+    { value: 'dismissed', label: '已从建议列表移除' },
     { value: 'archived', label: '仅历史归档' },
 ]
 
@@ -77,7 +77,7 @@ export function formatSupervisorAuditStatusSnapshot(value) {
         open: '待处理',
         in_progress: '处理中',
         completed: '已处理',
-        dismissed: '已从 Inbox 移除',
+        dismissed: '已从建议列表移除',
         archived: '仅历史归档',
     }
     return labels[value] || formatSupervisorTrackingStatus(value)
@@ -353,7 +353,7 @@ export function buildSupervisorAuditViewModel({
 
 export function buildSupervisorAuditMarkdown({ projectInfo, entries, tasks, filters }) {
     const lines = [
-        '# Supervisor Audit 导出',
+        '# 督办审计导出',
         '',
         `- 当前章节：第 ${projectInfo?.progress?.current_chapter || 0} 章`,
         `- 项目总字数：${formatNumber(projectInfo?.progress?.total_words || 0)}`,
@@ -408,7 +408,7 @@ export function buildSupervisorAuditMarkdown({ projectInfo, entries, tasks, filt
 
 export function buildSupervisorAuditHealthMarkdown({ projectInfo, health }) {
     const lines = [
-        '# Supervisor Audit Health',
+        '# 督办审计体检',
         '',
         `- 当前章节：第 ${projectInfo?.progress?.current_chapter || 0} 章`,
         `- 导出时间：${formatTimestampShort(new Date().toISOString())}`,
@@ -468,7 +468,7 @@ export function buildSupervisorAuditHealthMarkdown({ projectInfo, health }) {
 
 export function buildSupervisorAuditRepairPreviewMarkdown({ projectInfo, preview }) {
     const lines = [
-        '# Supervisor Audit Repair Preview',
+        '# 督办修复预演',
         '',
         `- 当前章节：第 ${projectInfo?.progress?.current_chapter || 0} 章`,
         `- 导出时间：${formatTimestampShort(new Date().toISOString())}`,
