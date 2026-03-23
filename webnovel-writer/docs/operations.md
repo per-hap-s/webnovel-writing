@@ -98,58 +98,53 @@ http://127.0.0.1:8765/?project_root=<url-encoded-project-root>&page=quality
 
 ### 督办 smoke 夹具 + 定向真实巡检
 
-当需要验证 `supervisor` 与 `supervisor-audit` 两页不再是“全空盲区”时，先生成独立的督办 smoke fixture（冒烟夹具），再做只覆盖这两页的 targeted real audit（定向真实巡检）。
+当需要验证 `supervisor` 与 `supervisor-audit` 两页不再是“全空盲区”时，统一使用仓库内正式脚本，不再直接复用 `output/verification` 里的临时脚本。
 
-推荐步骤：
-
-1. 先生成夹具项目：
+正式入口：
 
 ```powershell
-python (Join-Path $env:SCRIPTS_DIR "supervisor_smoke_fixture.py")
+& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1'
 ```
 
-默认输出到 `D:\CodexProjects\Project1\webnovel-writer\.tmp-playwright-YYYYMMDD\supervisor-smoke-<HHmmss>`；如需复跑固定目录，可显式传入：
+常用变体：
 
 ```powershell
-python (Join-Path $env:SCRIPTS_DIR "supervisor_smoke_fixture.py") --project-root 'D:\path\to\supervisor-smoke-project'
+& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -PreferredPort 8765
+& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -OutputRoot 'D:\CodexProjects\Project1\output\verification\readonly-audit\manual-run'
+& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -ProjectRoot 'D:\path\to\existing-supervisor-smoke-project'
 ```
 
-2. 再用项目模式启动 Dashboard（工作台）：
+脚本内部固定流程：
 
-```powershell
-& 'D:\CodexProjects\Project1\tools\Start-Webnovel-Writer.ps1' -Action dashboard -ProjectRoot '<fixture-project>' -NoBrowser
-```
+1. 通过 `supervisor_smoke_fixture.py` 生成或复用督办 smoke fixture（冒烟夹具）。
+2. 通过 `Start-Webnovel-Writer.ps1` 以项目模式启动 Dashboard（工作台）。
+3. 优先尝试 `8765`；若端口被占用，自动回退到 `8876..8895` 的隔离端口。
+4. 先做 6 个 supervisor API（接口）预检，全部命中阈值后才进入真实页面巡检。
+5. 通过 Playwright（浏览器自动化）抓取 `supervisor` 与 `supervisor-audit` 两页的快照、截图和操作转录。
 
-3. 启动后先做 6 个 HTTP（接口）预检，全部命中才进入真实页面：
-   - `GET /api/supervisor/recommendations?include_dismissed=true&project_root=...`：至少 2 条
-   - `GET /api/supervisor/checklists?project_root=...`：至少 1 条
-   - `GET /api/supervisor/audit-log?project_root=...`：非空
-   - `GET /api/supervisor/audit-health?project_root=...`：`exists=true` 且 `issue_count>=1`
-   - `GET /api/supervisor/audit-repair-preview?project_root=...`：`exists=true` 且 `manual_review_count>=1`
-   - `GET /api/supervisor/audit-repair-reports?project_root=...`：至少 1 条
-4. 只巡检两个真实页面：
-   - `http://127.0.0.1:8765/?project_root=<url-encoded-project-root>&page=supervisor`
-   - `http://127.0.0.1:8765/?project_root=<url-encoded-project-root>&page=supervisor-audit`
-5. 固定验收点：
-   - `supervisor` 页必须出现非空活动建议区与已保存清单区，且没有页级 `督办台数据刷新失败`
-   - `supervisor-audit` 页的时间线、审计体检、修复预演、修复归档、清单归档都不能落回空态，且没有页级 `督办审计数据刷新失败`
-   - 页面文案保持中文优先，不应暴露 `manual-only`、`approval-gate`、`hard blocking issue`、`Detected audit schema` 这类内部英文词
-6. 固定产物目录：`D:\CodexProjects\Project1\output\verification\supervisor-targeted-audit-20260323\`
-   - `fixture-result.json`
-   - `precheck.json`
-   - `playwright-transcript.txt`
-   - `snapshot-index.txt`
-   - `screenshot-index.txt`
-   - `result.json`
-   - 至少 2 张截图与对应 `.playwright-cli/page-*.yml`
-7. 若默认端口 `8765` 已被健康旧实例占用，复验脚本可以改用空闲隔离端口，但必须同时满足：
-   - 仍通过 `& 'D:\CodexProjects\Project1\tools\Start-Webnovel-Writer.ps1' -Action dashboard -ProjectRoot '<fixture-project>' -Port <isolated-port> -NoBrowser` 启动
-   - 在 `result.json` 中记录实际 `dashboard_port` 与 `base_url`
-   - 文档归档明确说明此次复验为何没有复用 `8765`
-8. 失败归因固定化：
-   - 预检未命中阈值：归类为“夹具失败”，先修夹具，不进入 UI 判断
-   - 预检全部命中但页面仍空、仍报页级错误、或暴露内部英文词：归类为“真实页面缺陷已复现”，只输出后续分包
-   - 页面通过但产物或文档未落档：归类为“验证完成、收口未完成”，不算闭环
+固定产物：
+
+- `fixture-result.json`
+- `precheck.json`
+- `playwright-transcript.txt`
+- `snapshot-index.txt`
+- `screenshot-index.txt`
+- `result.json`
+
+页面级固定验收点：
+
+- `supervisor` 页必须出现非空活动建议区与已保存清单区，且没有页级 `督办台数据刷新失败`
+- `supervisor-audit` 页的时间线、审计体检、修复预演、修复归档、清单归档都不能落回空态，且没有页级 `督办审计数据刷新失败`
+- 页面文案保持中文优先，不应暴露 `manual-only`、`approval-gate`、`hard blocking issue`、`Detected audit schema`、`through v2` 这类内部英文词
+
+失败归因固定使用 `result.json.classification`：
+
+- `fixture_failure`：预检未命中阈值，先修夹具或接口，不进入 UI 判断
+- `ui_defect_reproduced`：预检全部命中，但真实页面仍暴露空态、内部英文词或页级错误
+- `pass`：预检和真实页面检查全部通过
+- `verification_complete_docs_pending`：只跑了接口预检，跳过浏览器验收；不能作为正式放行结果
+
+详细参数、产物说明和归因口径见 `dashboard-readonly-audit.md`。
 
 ## 常用环境变量
 
