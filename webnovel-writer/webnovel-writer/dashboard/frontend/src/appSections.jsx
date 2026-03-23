@@ -40,6 +40,19 @@ const DEFAULT_LAUNCHER_FORM = {
     require_manual_approval: false,
 }
 
+const QUALITY_PAGE_COPY = {
+    invalidFactsEmptyTitle: '暂无待处理失效事实',
+    invalidFactsEmptyDescription: '当审查发现需要冻结或确认的失效事实时，这里会出现审批项。',
+    reviewMetricsEmptyTitle: '暂无审查指标',
+    reviewMetricsEmptyDescription: '运行审查任务后，这里会汇总各章节的评分。',
+    checklistScoresEmptyTitle: '暂无清单评分',
+    checklistScoresEmptyDescription: '当写作清单被执行后，这里会显示完成率与得分。',
+    ragQueriesEmptyTitle: '暂无检索记录',
+    ragQueriesEmptyDescription: '发生检索调用后，这里会显示查询类型、结果数和延迟。',
+    toolStatsEmptyTitle: '暂无工具统计',
+    toolStatsEmptyDescription: '工具链开始写入运行记录后，这里会显示调用次数和重试情况。',
+}
+
 export function TaskLauncherSection({ template, onCreated, onSuccess, MODE_OPTIONS, suggestedChapter }) {
     const [form, setForm] = useState(DEFAULT_LAUNCHER_FORM)
     const [lastSuggestedChapter, setLastSuggestedChapter] = useState(DEFAULT_LAUNCHER_FORM.chapter)
@@ -924,24 +937,24 @@ export function QualityPageSection({ refreshToken, onMutated, SimpleTable, trans
                             </div>
                         </div>
                     ))}
-                    {invalidFacts.length === 0 && <CompactEmptyCard title="暂无待处理失效事实" description="当审查发现需要冻结或确认的失效事实时，这里会出现审批项。" />}
+                    {invalidFacts.length === 0 && <CompactEmptyCard title={QUALITY_PAGE_COPY.invalidFactsEmptyTitle} description={QUALITY_PAGE_COPY.invalidFactsEmptyDescription} />}
                 </div>
             </section>
             <section className="panel">
                 <div className="panel-title">审查指标</div>
-                {reviewMetrics.length ? <SimpleTable rows={reviewMetrics} columns={['end_chapter', 'overall_score', 'created_at']} /> : <CompactEmptyCard title="暂无审查指标" description="运行审查任务后，这里会汇总各章节的评分。" />}
+                {reviewMetrics.length ? <SimpleTable rows={reviewMetrics} columns={['end_chapter', 'overall_score', 'created_at']} /> : <CompactEmptyCard title={QUALITY_PAGE_COPY.reviewMetricsEmptyTitle} description={QUALITY_PAGE_COPY.reviewMetricsEmptyDescription} />}
             </section>
             <section className="panel">
                 <div className="panel-title">清单评分</div>
-                {checklistScores.length ? <SimpleTable rows={checklistScores} columns={['chapter', 'template', 'score', 'completion_rate']} /> : <CompactEmptyCard title="暂无清单评分" description="当写作清单被执行后，这里会显示完成率与得分。" />}
+                {checklistScores.length ? <SimpleTable rows={checklistScores} columns={['chapter', 'template', 'score', 'completion_rate']} /> : <CompactEmptyCard title={QUALITY_PAGE_COPY.checklistScoresEmptyTitle} description={QUALITY_PAGE_COPY.checklistScoresEmptyDescription} />}
             </section>
             <section className="panel">
                 <div className="panel-title">RAG 查询</div>
-                {ragQueries.length ? <SimpleTable rows={ragQueries} columns={['query_type', 'query', 'results_count', 'latency_ms']} /> : <CompactEmptyCard title="暂无检索记录" description="发生检索调用后，这里会显示查询类型、结果数和延迟。" />}
+                {ragQueries.length ? <SimpleTable rows={ragQueries} columns={['query_type', 'query', 'results_count', 'latency_ms']} /> : <CompactEmptyCard title={QUALITY_PAGE_COPY.ragQueriesEmptyTitle} description={QUALITY_PAGE_COPY.ragQueriesEmptyDescription} />}
             </section>
             <section className="panel">
                 <div className="panel-title">工具统计</div>
-                {toolStats.length ? <SimpleTable rows={toolStats} columns={['tool_name', 'success', 'retry_count', 'created_at']} /> : <CompactEmptyCard title="暂无工具统计" description="工具链开始写入运行记录后，这里会显示调用次数和重试情况。" />}
+                {toolStats.length ? <SimpleTable rows={toolStats} columns={['tool_name', 'success', 'retry_count', 'created_at']} /> : <CompactEmptyCard title={QUALITY_PAGE_COPY.toolStatsEmptyTitle} description={QUALITY_PAGE_COPY.toolStatsEmptyDescription} />}
             </section>
         </div>
     )

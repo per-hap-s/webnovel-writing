@@ -3,6 +3,13 @@ import { ErrorNotice, ProjectBootstrapSection } from './appSections.jsx'
 import { formatNumber } from './dashboardPageCommon.jsx'
 import { normalizeError, postJSON } from './api.js'
 
+const WORKBENCH_COPY = {
+    openExisting: '打开已有项目',
+    openExistingBusy: '打开中...',
+    currentProjectEmpty: '暂无已打开项目。',
+    invalidRecordsEmpty: '暂无失效项目记录。',
+}
+
 export function readLandingPreference(key = 'webnovel.dashboard.landing') {
     if (typeof window === 'undefined') return 'hub'
     const value = String(window.localStorage.getItem(key) || '').trim()
@@ -230,17 +237,17 @@ export function WorkbenchPage({
                                 onRemove={() => mutateProject('remove-project', currentProject.project_root)}
                             />
                         ) : (
-                            <div className="empty-state">当前还没有打开任何项目。</div>
+                            <div className="empty-state">{WORKBENCH_COPY.currentProjectEmpty}</div>
                         )}
                     </section>
 
                     <section className="panel workbench-panel">
-                        <div className="panel-title">打开已有项目</div>
+                        <div className="panel-title">{WORKBENCH_COPY.openExisting}</div>
                         <div className="workbench-section-copy">
                             通过系统文件夹选择器打开已初始化项目；如果目录尚未初始化，工作台会把目录自动带入新建流程。
                         </div>
                         <button className="primary-button workbench-button" onClick={openPickedProject} disabled={busyKey === 'open-existing'}>
-                            {busyKey === 'open-existing' ? '打开中...' : '打开已有项目'}
+                            {busyKey === 'open-existing' ? WORKBENCH_COPY.openExistingBusy : WORKBENCH_COPY.openExisting}
                         </button>
                     </section>
 
@@ -275,7 +282,7 @@ export function WorkbenchPage({
                             这里只清理工作台登记，不会删除磁盘里的项目内容。
                         </div>
                         {missingCards.length === 0 ? (
-                            <div className="empty-state">没有失效项目记录。</div>
+                            <div className="empty-state">{WORKBENCH_COPY.invalidRecordsEmpty}</div>
                         ) : (
                             <div className="summary-grid">
                                 {missingCards.map((project) => (
@@ -353,7 +360,7 @@ function WorkbenchProjectCard({ project, busyKey, current = false, onOpen, onPin
             <div className="summary-card-meta">{normalizeProjectStatus(project)}</div>
             {project.last_opened_at ? <div className="summary-card-meta">{`最近打开：${project.last_opened_at}`}</div> : null}
             <div className="task-row-actions workbench-card-actions">
-                {onOpen ? <button className="primary-button workbench-button" onClick={onOpen}>进入项目</button> : null}
+                {onOpen ? <button className="primary-button workbench-button" onClick={onOpen}>{WORKBENCH_COPY.openExisting}</button> : null}
                 <button
                     className="secondary-button workbench-button"
                     onClick={onPinToggle}

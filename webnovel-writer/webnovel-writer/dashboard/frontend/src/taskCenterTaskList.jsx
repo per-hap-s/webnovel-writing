@@ -7,6 +7,14 @@ import {
     withLiveRuntimeStatus,
 } from './taskCenterRuntime.js'
 
+const TASK_CENTER_COPY = {
+    viewTask: '查看任务',
+    executeNextStep: '执行下一步',
+    noNextStep: '当前任务暂无可执行的下一步',
+    empty: '暂无任务',
+    busy: '处理中...',
+}
+
 function buildActionKey(action) {
     if (!action) return ''
     return action.id || `${action.kind}:${action.taskId || action.taskType || action.label || 'action'}`
@@ -59,22 +67,20 @@ export function TaskCenterTaskList({
                                 ) : null}
                             </button>
                             <div className="task-item-actions">
-                                <button className="secondary-button" onClick={() => onSelectTask(task.id)}>
-                                    查看任务
-                                </button>
+                                <button className="secondary-button" onClick={() => onSelectTask(task.id)}>{TASK_CENTER_COPY.viewTask}</button>
                                 <button
                                     className={primaryAction ? 'primary-button' : 'secondary-button'}
                                     onClick={(event) => onTaskPrimaryActionClick(event, liveTask, primaryAction)}
                                     disabled={!primaryAction || actionPending || primaryAction.disabled}
-                                    title={primaryAction ? (primaryAction.reason || primaryAction.label) : '当前任务暂无可执行的下一步'}
+                                    title={primaryAction ? (primaryAction.reason || primaryAction.label) : TASK_CENTER_COPY.noNextStep}
                                 >
-                                    {actionPending ? '处理中...' : (primaryAction?.label || '执行下一步')}
+                                    {actionPending ? TASK_CENTER_COPY.busy : (primaryAction?.label || TASK_CENTER_COPY.executeNextStep)}
                                 </button>
                             </div>
                         </div>
                     )
                 })}
-                {tasks.length === 0 && <div className="empty-state">暂无任务</div>}
+                {tasks.length === 0 && <div className="empty-state">{TASK_CENTER_COPY.empty}</div>}
             </div>
         </section>
     )
