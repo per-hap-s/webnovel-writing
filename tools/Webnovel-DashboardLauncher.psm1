@@ -62,6 +62,104 @@ function Get-WebnovelDashboardHealthProbeSpec {
     }
 }
 
+function Get-WebnovelDashboardModeInfo {
+    param([string]$ProjectRoot = '')
+
+    if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+        return [pscustomobject]@{
+            Mode = 'workbench'
+            ModeLabel = '工作台模式'
+            ProbeDescription = 'GET /api/workbench/hub'
+        }
+    }
+
+    return [pscustomobject]@{
+        Mode = 'project'
+        ModeLabel = '项目模式'
+        ProbeDescription = 'GET /api/project/director-hub?project_root=...'
+    }
+}
+
+function New-WebnovelDashboardDecisionRecord {
+    param(
+        [string]$Action,
+        [int]$Port,
+        [string]$BaseUrl,
+        [string]$WorkspaceRoot,
+        [string]$ProjectRoot,
+        [int]$ListenerProcessId,
+        [string]$ListenerProcessName,
+        [string]$ListenerCommandLine,
+        [bool]$SameService,
+        [pscustomobject]$Probe,
+        [string]$Reason
+    )
+
+    $modeInfo = Get-WebnovelDashboardModeInfo -ProjectRoot $ProjectRoot
+    $diagnosticCode = ''
+    $diagnosticSummary = ''
+    $diagnosticDetail = ''
+
+    switch ($Action) {
+        'start_new' {
+            $diagnosticCode = 'cold_start'
+            $diagnosticSummary = ('{0}：端口空闲，准备冷启动新的 Dashboard。' -f $modeInfo.ModeLabel)
+            $diagnosticDetail = ('Port {0} is free. The launcher will start a new listener and then probe {1}.' -f $Port, $modeInfo.ProbeDescription)
+        }
+        'reuse_existing' {
+            $diagnosticCode = 'healthy_reuse'
+            $diagnosticSummary = ('{0}：命中健康实例，继续复用当前 Dashboard。' -f $modeInfo.ModeLabel)
+            $probeReason = if ($Probe -and $Probe.Reason) { [string]$Probe.Reason } else { 'unknown' }
+            $diagnosticDetail = ('Probe {0} returned {1}. Listener PID={2}.' -f $modeInfo.ProbeDescription, $probeReason, $ListenerProcessId)
+        }
+        'restart_existing' {
+            $diagnosticCode = 'stale_restart'
+            $diagnosticSummary = ('{0}：健康探针未通过，需要替换当前监听器。' -f $modeInfo.ModeLabel)
+            $probeReason = if ($Probe -and $Probe.Reason) { [string]$Probe.Reason } else { 'unknown' }
+            $diagnosticDetail = ('Probe {0} returned {1}. Listener PID={2} will be replaced.' -f $modeInfo.ProbeDescription, $probeReason, $ListenerProcessId)
+        }
+        'abort_port_in_use' {
+            if ($Reason -eq 'port_in_use_unknown_owner') {
+                $diagnosticCode = 'blocked_unknown_owner'
+                $diagnosticSummary = ('{0}：端口占用方无法识别，启动器不会冒险清理。' -f $modeInfo.ModeLabel)
+                $diagnosticDetail = ('Port {0} is occupied, but the owner process metadata is unavailable.' -f $Port)
+            } else {
+                $processNameText = if ([string]::IsNullOrWhiteSpace($ListenerProcessName)) { 'unknown' } else { $ListenerProcessName }
+                $commandLineText = if ([string]::IsNullOrWhiteSpace($ListenerCommandLine)) { '' } else { $ListenerCommandLine }
+                $diagnosticCode = 'blocked_other_process'
+                $diagnosticSummary = ('{0}：端口被无关进程占用，启动器不会误杀。' -f $modeInfo.ModeLabel)
+                $diagnosticDetail = ('Port {0} is occupied by {1} (PID={2}). Command line: {3}' -f $Port, $processNameText, $ListenerProcessId, $commandLineText)
+            }
+        }
+        default {
+            $diagnosticCode = 'unknown_decision'
+            $diagnosticSummary = ('{0}：启动器得到了未知决策。' -f $modeInfo.ModeLabel)
+            $diagnosticDetail = ('Action={0}; Reason={1}' -f $Action, $Reason)
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = $Action
+        Port = $Port
+        BaseUrl = $BaseUrl
+        BrowserUrl = Get-WebnovelDashboardBrowserUrl -Host ([System.Uri]$BaseUrl).Host -Port $Port
+        ListenerProcessId = $ListenerProcessId
+        ListenerProcessName = $ListenerProcessName
+        ListenerCommandLine = $ListenerCommandLine
+        SameService = $SameService
+        Probe = $Probe
+        Reason = $Reason
+        WorkspaceRoot = $WorkspaceRoot
+        ProjectRoot = $ProjectRoot
+        Mode = $modeInfo.Mode
+        ModeLabel = $modeInfo.ModeLabel
+        ProbeDescription = $modeInfo.ProbeDescription
+        DiagnosticCode = $diagnosticCode
+        DiagnosticSummary = $diagnosticSummary
+        DiagnosticDetail = $diagnosticDetail
+    }
+}
+
 function Get-WebnovelDashboardListener {
     param([int]$Port)
 
@@ -366,34 +464,12 @@ function Resolve-WebnovelDashboardPortAction {
 
     $listener = Get-WebnovelDashboardListener -Port $Port
     if (-not $listener) {
-        return [pscustomobject]@{
-            Action = 'start_new'
-            Port = $Port
-            BaseUrl = $BaseUrl
-            BrowserUrl = Get-WebnovelDashboardBrowserUrl -Host ([System.Uri]$BaseUrl).Host -Port $Port
-            ListenerProcessId = $null
-            ListenerProcessName = ''
-            ListenerCommandLine = ''
-            SameService = $false
-            Probe = $null
-            Reason = 'port_free'
-        }
+        return New-WebnovelDashboardDecisionRecord -Action 'start_new' -Port $Port -BaseUrl $BaseUrl -WorkspaceRoot $WorkspaceRoot -ProjectRoot $ProjectRoot -ListenerProcessId 0 -ListenerProcessName '' -ListenerCommandLine '' -SameService $false -Probe $null -Reason 'port_free'
     }
 
     $processInfo = Get-WebnovelDashboardProcessInfo -ProcessId $listener.OwningProcess
     if (-not $processInfo) {
-        return [pscustomobject]@{
-            Action = 'abort_port_in_use'
-            Port = $Port
-            BaseUrl = $BaseUrl
-            BrowserUrl = Get-WebnovelDashboardBrowserUrl -Host ([System.Uri]$BaseUrl).Host -Port $Port
-            ListenerProcessId = $listener.OwningProcess
-            ListenerProcessName = ''
-            ListenerCommandLine = ''
-            SameService = $false
-            Probe = $null
-            Reason = 'port_in_use_unknown_owner'
-        }
+        return New-WebnovelDashboardDecisionRecord -Action 'abort_port_in_use' -Port $Port -BaseUrl $BaseUrl -WorkspaceRoot $WorkspaceRoot -ProjectRoot $ProjectRoot -ListenerProcessId $listener.OwningProcess -ListenerProcessName '' -ListenerCommandLine '' -SameService $false -Probe $null -Reason 'port_in_use_unknown_owner'
     }
 
     $sameService = Test-WebnovelDashboardProcessMatch -ProcessInfo $processInfo -WorkspaceRoot $WorkspaceRoot
@@ -409,18 +485,7 @@ function Resolve-WebnovelDashboardPortAction {
     }
 
     if (-not $sameService) {
-        return [pscustomobject]@{
-            Action = 'abort_port_in_use'
-            Port = $Port
-            BaseUrl = $BaseUrl
-            BrowserUrl = Get-WebnovelDashboardBrowserUrl -Host ([System.Uri]$BaseUrl).Host -Port $Port
-            ListenerProcessId = $processInfo.Id
-            ListenerProcessName = $processInfo.ProcessName
-            ListenerCommandLine = $processInfo.CommandLine
-            SameService = $false
-            Probe = $null
-            Reason = 'port_in_use_by_other_process'
-        }
+        return New-WebnovelDashboardDecisionRecord -Action 'abort_port_in_use' -Port $Port -BaseUrl $BaseUrl -WorkspaceRoot $WorkspaceRoot -ProjectRoot $ProjectRoot -ListenerProcessId $processInfo.Id -ListenerProcessName $processInfo.ProcessName -ListenerCommandLine $processInfo.CommandLine -SameService $false -Probe $null -Reason 'port_in_use_by_other_process'
     }
 
     if (-not $probe) {
@@ -428,31 +493,41 @@ function Resolve-WebnovelDashboardPortAction {
     }
     $action = if ($probe.Healthy) { 'reuse_existing' } else { 'restart_existing' }
 
-    return [pscustomobject]@{
-        Action = $action
-        Port = $Port
-        BaseUrl = $BaseUrl
-        BrowserUrl = Get-WebnovelDashboardBrowserUrl -Host ([System.Uri]$BaseUrl).Host -Port $Port
-        ListenerProcessId = $processInfo.Id
-        ListenerProcessName = $processInfo.ProcessName
-        ListenerCommandLine = $processInfo.CommandLine
-        SameService = $true
-        Probe = $probe
-        Reason = $probe.Reason
-    }
+    return New-WebnovelDashboardDecisionRecord -Action $action -Port $Port -BaseUrl $BaseUrl -WorkspaceRoot $WorkspaceRoot -ProjectRoot $ProjectRoot -ListenerProcessId $processInfo.Id -ListenerProcessName $processInfo.ProcessName -ListenerCommandLine $processInfo.CommandLine -SameService $true -Probe $probe -Reason $probe.Reason
 }
 
 function Stop-WebnovelDashboardProcess {
     param([int]$ProcessId)
 
     if (-not $ProcessId) {
-        return
+        return [pscustomobject]@{
+            Succeeded = $false
+            Status = 'missing_pid'
+            Message = 'missing process id'
+            ProcessId = 0
+            EnvironmentIssue = $false
+        }
     }
 
     try {
         Stop-Process -Id $ProcessId -Force -ErrorAction Stop
     } catch {
-        return
+        $message = [string]$_.Exception.Message
+        $isPermissionDenied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($message -match 'access is denied|permission|拒绝访问')
+        $status = if ($isPermissionDenied) { 'permission_denied' } else { 'stop_failed' }
+        $normalizedMessage = if ($isPermissionDenied) {
+            ('permission denied while stopping PID {0}: {1}' -f $ProcessId, $message)
+        } else {
+            ('failed to stop PID {0}: {1}' -f $ProcessId, $message)
+        }
+
+        return [pscustomobject]@{
+            Succeeded = $false
+            Status = $status
+            Message = $normalizedMessage
+            ProcessId = $ProcessId
+            EnvironmentIssue = $isPermissionDenied
+        }
     }
 
     $deadline = (Get-Date).AddSeconds(5)
@@ -461,8 +536,22 @@ function Stop-WebnovelDashboardProcess {
             Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null
             Start-Sleep -Milliseconds 200
         } catch {
-            return
+            return [pscustomobject]@{
+                Succeeded = $true
+                Status = 'stopped'
+                Message = ('stopped PID {0}' -f $ProcessId)
+                ProcessId = $ProcessId
+                EnvironmentIssue = $false
+            }
         }
+    }
+
+    return [pscustomobject]@{
+        Succeeded = $false
+        Status = 'timed_out'
+        Message = ('timed out while waiting for PID {0} to exit' -f $ProcessId)
+        ProcessId = $ProcessId
+        EnvironmentIssue = $false
     }
 }
 

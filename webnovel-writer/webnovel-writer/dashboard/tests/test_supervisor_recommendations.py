@@ -97,6 +97,37 @@ def test_supervisor_recommendations_return_prioritized_actions(tmp_path: Path):
     assert any(item["operator_actions"][0]["kind"] == "launch-task" for item in items if item["action"]["type"] == "create-task")
 
 
+def test_supervisor_recommendation_copy_is_chinese_first(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root)
+
+    approval = _store_task(
+        service,
+        "write",
+        {"chapter": 3, "mode": "standard", "require_manual_approval": True},
+        status="awaiting_writeback_approval",
+        updated_at="2026-03-19T10:00:00+00:00",
+    )
+    review = _store_task(
+        service,
+        "write",
+        {"chapter": 4},
+        status="failed",
+        error={"code": "REVIEW_GATE_BLOCKED", "message": "blocked"},
+        updated_at="2026-03-19T09:00:00+00:00",
+    )
+
+    items = service.list_supervisor_recommendations(limit=10)
+
+    approval_item = next(item for item in items if item["sourceTaskId"] == approval["id"])
+    review_item = next(item for item in items if item["sourceTaskId"] == review["id"])
+
+    assert "approval-gate" not in approval_item["summary"]
+    assert "等待人工确认后再继续回写" in approval_item["summary"]
+    assert "hard blocking issue" not in review_item["summary"]
+    assert "当前章节存在必须先处理的审查阻断问题" in review_item["summary"]
+
+
 def test_supervisor_recommendations_dedupe_story_refresh_by_chapter(tmp_path: Path):
     project_root = make_project(tmp_path)
     service = OrchestrationService(project_root)

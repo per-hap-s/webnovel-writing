@@ -1,0 +1,14 @@
+﻿{
+    "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-192718",
+    "recommendation_count":  2,
+    "checklist_count":  1,
+    "audit_log_count":  6,
+    "audit_health":  {
+                         "exists":  true,
+                         "issue_count":  2
+                     },
+    "repair_preview":  {
+                           "manual_review_count":  2
+                       },
+    "repair_report_count":  1
+}

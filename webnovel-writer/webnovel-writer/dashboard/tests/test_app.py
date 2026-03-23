@@ -297,7 +297,7 @@ def test_create_resume_task_calls_orchestrator(client: TestClient, mock_orchestr
             "chapter_range": None,
             "volume": None,
             "mode": "standard",
-            "require_manual_approval": True,
+            "require_manual_approval": False,
             "options": {},
         },
     )
@@ -502,7 +502,7 @@ def test_supervisor_recommendations_endpoint_returns_backend_payload(client: Tes
             "tone": "warning",
             "badge": "先处理",
             "title": "第 3 章待回写审批",
-            "summary": "当前 write 子任务已经停在 approval-gate。",
+            "summary": "当前任务正在等待人工确认后再继续回写。",
             "detail": "不先处理这个审批，护栏推进无法安全往后继续。",
             "rationale": "人工审批是硬阻断。",
             "sourceTaskId": "task-1",
@@ -521,6 +521,8 @@ def test_supervisor_recommendations_endpoint_returns_backend_payload(client: Tes
     payload = response.json()
     assert payload[0]["stableKey"] == "approval:task-1"
     assert payload[0]["action"]["type"] == "open-task"
+    assert "approval-gate" not in payload[0]["summary"]
+    assert "等待人工确认后再继续回写" in payload[0]["summary"]
     assert "secondaryAction" in payload[0]
     mock_orchestrator.list_supervisor_recommendations.assert_called_once_with(limit=4)
 

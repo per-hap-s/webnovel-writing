@@ -35,6 +35,9 @@ Describe 'Resolve-WebnovelDashboardPortAction' {
         $result = Resolve-WebnovelDashboardPortAction -Port 8765 -BaseUrl 'http://127.0.0.1:8765' -WorkspaceRoot 'D:\CodexProjects\Project1'
 
         $result.Action | Should Be 'reuse_existing'
+        $result.Mode | Should Be 'workbench'
+        $result.ProbeDescription | Should Be 'GET /api/workbench/hub'
+        $result.DiagnosticCode | Should Be 'healthy_reuse'
     }
 
     It 'passes workbench mode into the shared health probe when no project root is selected' {
@@ -100,6 +103,8 @@ Describe 'Resolve-WebnovelDashboardPortAction' {
 
         $result.Action | Should Be 'restart_existing'
         $result.Reason | Should Be 'html_response'
+        $result.DiagnosticCode | Should Be 'stale_restart'
+        $result.DiagnosticDetail | Should Match 'html_response'
     }
 
     It 'passes project mode into the shared health probe when a project is selected' {
@@ -134,6 +139,9 @@ Describe 'Resolve-WebnovelDashboardPortAction' {
         $result.Action | Should Be 'reuse_existing'
         $result.Probe.Uri | Should Match '/api/project/director-hub'
         $result.Probe.Uri | Should Match 'project_root='
+        $result.Mode | Should Be 'project'
+        $result.ProbeDescription | Should Match 'GET /api/project/director-hub\?project_root='
+        $result.DiagnosticCode | Should Be 'healthy_reuse'
         Assert-MockCalled Invoke-WebnovelDashboardHealthProbe -ModuleName $launcherModule.Name -Times 1 -Exactly -Scope It -ParameterFilter {
             $BaseUrl -eq 'http://127.0.0.1:8765' -and $ProjectRoot -eq 'D:\CodexProjects\Project1\webnovel-writer\.tmp-playwright-20260322-062539\smoke-project'
         }
@@ -247,6 +255,27 @@ Describe 'Resolve-WebnovelDashboardPortAction' {
         $result = Resolve-WebnovelDashboardPortAction -Port 8765 -BaseUrl 'http://127.0.0.1:8765' -WorkspaceRoot 'D:\CodexProjects\Project1'
 
         $result.Action | Should Be 'abort_port_in_use'
+        $result.DiagnosticCode | Should Be 'blocked_other_process'
+        $result.DiagnosticDetail | Should Match 'nginx'
+    }
+}
+
+Describe 'Stop-WebnovelDashboardProcess' {
+    BeforeAll {
+        $script:launcherModule = Import-Module $modulePath -Force -PassThru
+    }
+
+    It 'returns a readable environment issue when the shell cannot stop the process' {
+        Mock -ModuleName $launcherModule.Name Stop-Process {
+            throw [System.UnauthorizedAccessException]::new('Access is denied')
+        }
+
+        $result = Stop-WebnovelDashboardProcess -ProcessId 4242
+
+        $result.Succeeded | Should Be $false
+        $result.Status | Should Be 'permission_denied'
+        $result.Message | Should Match 'permission'
+        $result.EnvironmentIssue | Should Be $true
     }
 }
 

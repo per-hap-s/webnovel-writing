@@ -325,7 +325,7 @@ class OrchestrationService:
                     tone="warning",
                     badge="先处理",
                     title=f"第 {chapter or '-'} 章待回写审批",
-                    summary="当前任务已经停在 approval-gate。",
+                    summary="当前任务正在等待人工确认后再继续回写。",
                     detail=detail,
                     rationale=rationale,
                     source_task=pending_approval,
@@ -361,7 +361,7 @@ class OrchestrationService:
                     tone="danger",
                     badge="已阻断",
                     title=f"第 {chapter or '-'} 章被审查关卡拦截",
-                    summary="当前章节存在 hard blocking issue。",
+                    summary="当前章节存在必须先处理的审查阻断问题。",
                     detail="先修复审查问题，再考虑继续下一章。",
                     rationale="审查硬阻断说明本章还不满足安全推进条件。",
                     source_task=review_blocked,
@@ -991,7 +991,7 @@ class OrchestrationService:
                 _record_issue(
                     "future_schema",
                     "warning",
-                    str(normalized.get("schemaWarning") or normalized.get("schema_warning") or "Audit event uses a future schema version."),
+                    str(normalized.get("schemaWarning") or normalized.get("schema_warning") or "审计事件使用了当前版本尚未完全兼容的未来数据结构。"),
                     line_number=line_number,
                 )
 
@@ -1500,8 +1500,8 @@ class OrchestrationService:
         if schema_version > SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION:
             schema_state = "future"
             schema_warning = (
-                f"Detected audit schema v{schema_version}; current compatibility is only verified "
-                f"through v{SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION}."
+                f"检测到审计结构版本 v{schema_version}；当前仅确认兼容到 "
+                f"v{SUPERVISOR_AUDIT_MAX_SUPPORTED_SCHEMA_VERSION}，请人工复核。"
             )
         elif uses_legacy_aliases or not declared_schema:
             schema_state = "legacy"

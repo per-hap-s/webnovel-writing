@@ -40,6 +40,10 @@ function Start-DashboardWindow([switch]$LanMode) {
     $decision = Resolve-WebnovelDashboardPortAction -Port $Port -BaseUrl $baseUrl -WorkspaceRoot $workspaceRoot -ProjectRoot $resolvedProjectRoot
 
     if ($decision.Action -eq 'reuse_existing') {
+        Write-Host $decision.DiagnosticSummary
+        if ($decision.DiagnosticDetail) {
+            Write-Host ('Detail: ' + $decision.DiagnosticDetail)
+        }
         Write-Host 'Dashboard already running and healthy. Reusing the existing instance.'
         if (-not $NoBrowser) {
             Start-Process -FilePath $decision.BrowserUrl | Out-Null
@@ -48,7 +52,7 @@ function Start-DashboardWindow([switch]$LanMode) {
     }
 
     if ($decision.Action -eq 'abort_port_in_use') {
-        throw ('Port {0} is occupied by another process. Dashboard launch aborted.' -f $Port)
+        throw ('Port {0} is occupied by another process. Dashboard launch aborted. {1}' -f $Port, $decision.DiagnosticDetail)
     }
 
     $argList = @(

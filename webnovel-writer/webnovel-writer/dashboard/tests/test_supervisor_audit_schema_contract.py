@@ -37,7 +37,10 @@ def test_supervisor_audit_log_future_schema_marks_compatibility_warning(tmp_path
     assert entries[0]["schema_supported"] is False
     assert entries[0]["schemaSupported"] is False
     assert "v3" in entries[0]["schema_warning"]
-    assert "through v2" in entries[0]["schema_warning"]
+    assert "v2" in entries[0]["schema_warning"]
+    assert "Detected audit schema" not in entries[0]["schema_warning"]
+    assert "through v2" not in entries[0]["schema_warning"]
+    assert "当前仅确认兼容到" in entries[0]["schema_warning"]
     assert entries[0]["schemaWarning"] == entries[0]["schema_warning"]
 
 

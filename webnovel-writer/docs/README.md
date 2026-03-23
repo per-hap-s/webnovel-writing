@@ -31,6 +31,10 @@
 
 ## 真实回归
 
+- `dashboard-launcher-ui-real-verification-2026-03-23.md`：启动器复用路径、隔离端口冷重启旁证、质量页低数据 smoke，以及项目总览/数据页中文收口复验
+- `dashboard-supervisor-targeted-audit-2026-03-23.md`：督办 smoke 夹具首次定向真实巡检；保留 `ui_defect_reproduced` 历史事实与原始失败归档
+- `dashboard-supervisor-language-fix-verification-2026-03-23.md`：督办页面英文泄漏修复后的复验记录，确认 `supervisor` / `supervisor-audit` 两页重新达到 `pass`
+- `dashboard-readonly-audit-2026-03-23.md`：启动入口、核心页面与窄屏的只读巡检归档
 - `dashboard-api-real-test-3ch-phase3-2026-03-21.md`：第三阶段后 `bootstrap -> plan -> write 1-3 -> review 1-3` 真实回归结果
 
 建议阅读顺序：

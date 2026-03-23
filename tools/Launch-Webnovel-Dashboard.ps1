@@ -87,6 +87,13 @@ if ($ListenHost -eq '0.0.0.0') {
     }
 }
 Write-Host
+Write-Host ('Launch mode: ' + $launchDecision.ModeLabel)
+Write-Host ('Probe target: ' + $launchDecision.ProbeDescription)
+Write-Host ('Decision: ' + $launchDecision.DiagnosticSummary)
+if ($launchDecision.DiagnosticDetail) {
+    Write-Host ('Decision detail: ' + $launchDecision.DiagnosticDetail)
+}
+Write-Host
 
 switch ($launchDecision.Action) {
     'reuse_existing' {
@@ -97,11 +104,18 @@ switch ($launchDecision.Action) {
         exit 0
     }
     'abort_port_in_use' {
-        throw ('Port {0} is already occupied by another process. Dashboard will not overwrite it.' -f $Port)
+        throw ('Port {0} is already occupied by another process. Dashboard will not overwrite it. {1}' -f $Port, $launchDecision.DiagnosticDetail)
     }
     'restart_existing' {
         Write-Host ('Found a stale dashboard listener ({0}). Restarting it.' -f $launchDecision.ListenerProcessId)
-        Stop-WebnovelDashboardProcess -ProcessId $launchDecision.ListenerProcessId
+        $stopResult = Stop-WebnovelDashboardProcess -ProcessId $launchDecision.ListenerProcessId
+        if (-not $stopResult.Succeeded) {
+            if ($stopResult.EnvironmentIssue) {
+                throw ('Environment issue while stopping stale dashboard listener: {0}' -f $stopResult.Message)
+            }
+            throw ('Failed to stop stale dashboard listener: {0}' -f $stopResult.Message)
+        }
+        Write-Host ('Stop result: ' + $stopResult.Message)
     }
 }
 
