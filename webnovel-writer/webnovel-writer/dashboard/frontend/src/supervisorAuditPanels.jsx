@@ -413,7 +413,7 @@ export function SupervisorAuditRepairArchivePanel({
                     <div className="summary-card">
                         <div className="summary-card-title">无文件改动</div>
                         <div className="summary-card-meta">{`${formatNumber(auditRepairReportSummary.unchanged)} 份`}</div>
-                        <div className="summary-card-meta">包含 manual-only 与纯记录批次</div>
+                        <div className="summary-card-meta">包含仅人工复核与纯记录批次</div>
                     </div>
                 </div>
                 <div className="supervisor-grid">

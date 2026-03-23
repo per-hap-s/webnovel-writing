@@ -1,10 +1,10 @@
 ﻿{
     "classification":  "pass",
-    "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-192718",
+    "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-194816",
     "dashboard_port":  8876,
     "base_url":  "http://127.0.0.1:8876",
     "fixture_result":  {
-                           "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-192718",
+                           "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-194816",
                            "recommendation_count":  2,
                            "checklist_count":  1,
                            "audit_log_count":  6,
@@ -18,37 +18,37 @@
                            "repair_report_count":  1
                        },
     "precheck":  {
-                     "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-192718",
+                     "project_root":  "D:\\CodexProjects\\Project1\\webnovel-writer\\.tmp-playwright-20260323\\supervisor-smoke-194816",
                      "checks":  {
                                     "recommendations":  {
-                                                            "url":  "http://127.0.0.1:8876/api/supervisor/recommendations?include_dismissed=true\u0026project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718",
+                                                            "url":  "http://127.0.0.1:8876/api/supervisor/recommendations?include_dismissed=true\u0026project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816",
                                                             "count":  2,
                                                             "passed":  true
                                                         },
                                     "checklists":  {
-                                                       "url":  "http://127.0.0.1:8876/api/supervisor/checklists?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718",
+                                                       "url":  "http://127.0.0.1:8876/api/supervisor/checklists?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816",
                                                        "count":  1,
                                                        "passed":  true
                                                    },
                                     "audit_log":  {
-                                                      "url":  "http://127.0.0.1:8876/api/supervisor/audit-log?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718",
+                                                      "url":  "http://127.0.0.1:8876/api/supervisor/audit-log?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816",
                                                       "count":  6,
                                                       "passed":  true
                                                   },
                                     "audit_health":  {
-                                                         "url":  "http://127.0.0.1:8876/api/supervisor/audit-health?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718",
+                                                         "url":  "http://127.0.0.1:8876/api/supervisor/audit-health?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816",
                                                          "exists":  true,
                                                          "issue_count":  2,
                                                          "passed":  true
                                                      },
                                     "audit_repair_preview":  {
-                                                                 "url":  "http://127.0.0.1:8876/api/supervisor/audit-repair-preview?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718",
+                                                                 "url":  "http://127.0.0.1:8876/api/supervisor/audit-repair-preview?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816",
                                                                  "exists":  true,
                                                                  "manual_review_count":  2,
                                                                  "passed":  true
                                                              },
                                     "audit_repair_reports":  {
-                                                                 "url":  "http://127.0.0.1:8876/api/supervisor/audit-repair-reports?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718",
+                                                                 "url":  "http://127.0.0.1:8876/api/supervisor/audit-repair-reports?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816",
                                                                  "count":  1,
                                                                  "passed":  true
                                                              }
@@ -58,9 +58,9 @@
     "page_results":  [
                          {
                              "page":  "supervisor",
-                             "url":  "http://127.0.0.1:8876/?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718\u0026page=supervisor",
-                             "snapshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-27-38-287Z.yml",
-                             "screenshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-27-40-543Z.png",
+                             "url":  "http://127.0.0.1:8876/?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816\u0026page=supervisor",
+                             "snapshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-48-34-622Z.yml",
+                             "screenshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-48-36-855Z.png",
                              "passed":  true,
                              "issues":  [
 
@@ -68,9 +68,9 @@
                          },
                          {
                              "page":  "supervisor-audit",
-                             "url":  "http://127.0.0.1:8876/?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-192718\u0026page=supervisor-audit",
-                             "snapshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-27-46-215Z.yml",
-                             "screenshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-27-48-364Z.png",
+                             "url":  "http://127.0.0.1:8876/?project_root=D%3A%5CCodexProjects%5CProject1%5Cwebnovel-writer%5C.tmp-playwright-20260323%5Csupervisor-smoke-194816\u0026page=supervisor-audit",
+                             "snapshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-48-42-554Z.yml",
+                             "screenshot":  "D:\\CodexProjects\\Project1\\.playwright-cli\\page-2026-03-23T11-48-44-685Z.png",
                              "passed":  true,
                              "issues":  [
 
