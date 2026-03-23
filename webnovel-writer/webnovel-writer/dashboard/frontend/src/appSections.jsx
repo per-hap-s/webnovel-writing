@@ -3,6 +3,7 @@ import { fetchJSON, normalizeError, postJSON } from './api.js'
 import { formatTimestampShort } from './dashboardPageCommon.jsx'
 
 import { TaskCenterPageSection as TaskCenterPageSectionImpl } from './taskCenterPageSection.jsx'
+import { buildVisibleTaskCenterTasks } from './taskCenterVisibleTasks.js'
 
 const RELATIONSHIP_TYPE_LABELS = {
     family: '家庭',
@@ -620,6 +621,7 @@ function translateConnection(status) {
 
 export function TaskCenterPageSection({
     tasks,
+    rawTasks,
     selectedTask,
     selectedTaskId,
     currentProjectRoot,
@@ -637,9 +639,13 @@ export function TaskCenterPageSection({
     resolveApprovalStatusLabel,
     resolveTargetLabel,
 }) {
+    const effectiveRawTasks = rawTasks || tasks
+    const visibleTasks = rawTasks ? tasks : buildVisibleTaskCenterTasks(tasks)
+
     return (
         <TaskCenterPageSectionImpl
-            tasks={tasks}
+            tasks={visibleTasks}
+            rawTasks={effectiveRawTasks}
             selectedTask={selectedTask}
             selectedTaskId={selectedTaskId}
             currentProjectRoot={currentProjectRoot}

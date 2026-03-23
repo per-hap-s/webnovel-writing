@@ -17,6 +17,7 @@ function buildRequestActionKey(path, body = {}) {
 
 export function TaskCenterPageSection({
     tasks,
+    rawTasks,
     selectedTask,
     selectedTaskId,
     currentProjectRoot,
@@ -41,6 +42,7 @@ export function TaskCenterPageSection({
     const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
     const [pendingActionKey, setPendingActionKey] = useState('')
     const liveSelectedTask = detailTask || selectedTask || null
+    const detailTasks = rawTasks || tasks
     const requestParams = useMemo(
         () => (currentProjectRoot ? { project_root: currentProjectRoot } : {}),
         [currentProjectRoot],
@@ -61,11 +63,11 @@ export function TaskCenterPageSection({
     const canCancelTask = ['queued', 'running', 'awaiting_chapter_brief_approval', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask?.status)
 
     useEffect(() => {
-        if (!tasks.some(isRuntimeActiveTask) && !isRuntimeActiveTask(liveSelectedTask)) return undefined
+        if (!detailTasks.some(isRuntimeActiveTask) && !isRuntimeActiveTask(liveSelectedTask)) return undefined
         setRuntimeNow(Date.now())
         const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000)
         return () => window.clearInterval(timer)
-    }, [tasks, liveSelectedTask])
+    }, [detailTasks, liveSelectedTask])
 
     useEffect(() => {
         let cancelled = false
@@ -187,7 +189,7 @@ export function TaskCenterPageSection({
                 resolveTargetLabel={resolveTargetLabel}
             />
             <TaskCenterTaskDetail
-                tasks={tasks}
+                tasks={detailTasks}
                 selectedTask={liveSelectedTask}
                 events={events}
                 runtimeNow={runtimeNow}

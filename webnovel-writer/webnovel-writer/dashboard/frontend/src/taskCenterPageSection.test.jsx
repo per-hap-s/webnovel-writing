@@ -339,6 +339,96 @@ test('task list and detail share the same continuation outcome and primary actio
     })
 })
 
+test('completed resume helper task is deduped behind its resumed target in task list', async () => {
+    const resumedTask = {
+        id: 'task-write-9',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'data-sync',
+        updated_at: '2026-03-22T10:00:00Z',
+        runtime_status: {},
+        request: { chapter: 9 },
+    }
+    const resumeTask = {
+        id: 'task-resume-9',
+        task_type: 'resume',
+        status: 'completed',
+        current_step: 'resume',
+        updated_at: '2026-03-22T10:05:00Z',
+        runtime_status: {},
+        resume_target_task_id: 'task-write-9',
+        request: { chapter: 9 },
+        artifacts: {
+            resume: {
+                target_task_id: 'task-write-9',
+            },
+        },
+    }
+
+    const view = renderTaskCenter([resumeTask, resumedTask], resumeTask)
+
+    await waitFor(() => {
+        expect(view.container.querySelectorAll('.task-item')).toHaveLength(1)
+    })
+    expect(screen.getByRole('button', { name: /撰写章节/ })).not.toBeNull()
+    expect(screen.queryByRole('button', { name: /恢复任务/ })).toBeNull()
+    expect(screen.getByText('任务详情')).not.toBeNull()
+})
+
+test('completed tasks sharing one root task keep only the latest business card in task list', async () => {
+    const rootTask = {
+        id: 'task-root-1',
+        task_type: 'guarded-batch-write',
+        status: 'completed',
+        current_step: 'guarded-batch-runner',
+        updated_at: '2026-03-22T09:30:00Z',
+        runtime_status: {},
+        root_task_id: 'task-root-1',
+        request: { start_chapter: 8, max_chapters: 2 },
+    }
+    const childOlder = {
+        id: 'task-child-older',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'data-sync',
+        updated_at: '2026-03-22T09:40:00Z',
+        runtime_status: {},
+        parent_task_id: 'task-root-1',
+        root_task_id: 'task-root-1',
+        request: { chapter: 8 },
+    }
+    const childLatest = {
+        id: 'task-child-latest',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'data-sync',
+        updated_at: '2026-03-22T09:50:00Z',
+        runtime_status: {},
+        parent_task_id: 'task-root-1',
+        root_task_id: 'task-root-1',
+        request: { chapter: 9 },
+    }
+    const activeTask = {
+        id: 'task-running-1',
+        task_type: 'review',
+        status: 'running',
+        current_step: 'continuity-review',
+        updated_at: '2026-03-22T09:55:00Z',
+        runtime_status: { step_state: 'running' },
+        request: { chapter_range: '8-9' },
+    }
+
+    const view = renderTaskCenter([rootTask, childOlder, childLatest, activeTask], childLatest)
+
+    await waitFor(() => {
+        expect(view.container.querySelectorAll('.task-item')).toHaveLength(2)
+    })
+    expect(screen.getAllByRole('button', { name: /撰写章节|执行审查/ }).length).toBeGreaterThan(0)
+    expect(screen.getByText('任务详情')).not.toBeNull()
+    expect(screen.getByRole('button', { name: /执行审查/ })).not.toBeNull()
+    expect(screen.getByRole('button', { name: /撰写章节/ })).not.toBeNull()
+})
+
 test('guarded review block renders the same blocked reason in task list and detail', () => {
     const task = {
         id: 'task-guarded-1',

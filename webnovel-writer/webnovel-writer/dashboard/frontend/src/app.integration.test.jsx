@@ -194,6 +194,44 @@ test('app refreshes task state and jumps to task detail after page-level task cr
     expect(await screen.findByText('selected:task-new;count:1;summary:等待完成|none')).not.toBeNull()
 })
 
+test('task center receives deduped completed cards while keeping active tasks visible', async () => {
+    tasksResponse = [
+        {
+            id: 'task-write-9',
+            task_type: 'write',
+            status: 'completed',
+            current_step: 'data-sync',
+            updated_at: '2026-03-22T10:00:00Z',
+            request: { chapter: 9 },
+            runtime_status: { target_label: '第 9 章' },
+        },
+        {
+            id: 'task-resume-9',
+            task_type: 'resume',
+            status: 'completed',
+            current_step: 'resume',
+            updated_at: '2026-03-22T10:05:00Z',
+            request: { chapter: 9 },
+            runtime_status: { target_label: '第 9 章' },
+            resume_target_task_id: 'task-write-9',
+        },
+        {
+            id: 'task-review-1',
+            task_type: 'review',
+            status: 'running',
+            current_step: 'continuity-review',
+            updated_at: '2026-03-22T10:06:00Z',
+            request: { chapter_range: '8-9' },
+            runtime_status: { target_label: '第 8-9 章', step_state: 'running' },
+        },
+    ]
+    setProjectModeUrl('tasks')
+
+    render(<App />)
+
+    expect(await screen.findByText('selected:task-review-1;count:2;summary:none|none')).not.toBeNull()
+})
+
 test('sse refreshes are debounced and remain single-flight while in progress', async () => {
     vi.useFakeTimers()
     let pendingTaskResolve = null

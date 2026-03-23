@@ -32,6 +32,7 @@ import { SupervisorPage } from './supervisorPage.jsx'
 import { SupervisorAuditPage } from './supervisorAuditPage.jsx'
 import { WorkbenchPage, readLandingPreference, syncDashboardQuery } from './workbenchPage.jsx'
 import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
+import { buildVisibleTaskCenterTasks } from './taskCenterVisibleTasks.js'
 
 const PROJECT_NAV_ITEMS = [
     { id: 'workbench', label: '项目工作台' },
@@ -1174,9 +1175,12 @@ function DirectorChipGroup({ title, items, emptyText }) {
 }
 
 function TaskCenterPage({ tasks, selectedTask, selectedTaskId, currentProjectRoot, onSelectTask, onMutated, onNavigateOverview }) {
+    const visibleTasks = useMemo(() => buildVisibleTaskCenterTasks(tasks), [tasks])
+
     return (
         <TaskCenterPageSection
-            tasks={tasks}
+            tasks={visibleTasks}
+            rawTasks={tasks}
             selectedTask={selectedTask}
             selectedTaskId={selectedTaskId}
             currentProjectRoot={currentProjectRoot}
