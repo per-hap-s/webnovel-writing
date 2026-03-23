@@ -488,7 +488,7 @@ test('plan blocked task renders dedicated stopped-for-input copy', () => {
     renderTaskCenter([task], task)
 
     expect(screen.getAllByText('待补资料 / 已暂停').length).toBeGreaterThan(0)
-    expect(screen.getByText('规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行 plan。')).not.toBeNull()
+    expect(screen.getByText('规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行规划任务。')).not.toBeNull()
     expect(screen.getByText('故事一句话')).not.toBeNull()
     expect(screen.getByText('第 1 卷核心冲突')).not.toBeNull()
 })

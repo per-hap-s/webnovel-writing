@@ -12,6 +12,7 @@ $workspaceRoot = Split-Path $PSScriptRoot -Parent
 $repoRoot = Join-Path $workspaceRoot 'webnovel-writer'
 $appRoot = Join-Path $repoRoot 'webnovel-writer'
 $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
+$modulePath = Join-Path $PSScriptRoot 'Webnovel-DashboardLauncher.psm1'
 $codexBin = Join-Path $env:APPDATA 'npm'
 $nodeDir = Join-Path $env:LOCALAPPDATA 'Programs\NodePortable'
 $env:Path = $codexBin + ';' + $nodeDir + ';' + $env:Path
@@ -24,6 +25,8 @@ $env:WEBNOVEL_WORKSPACE_ROOT = $workspaceRoot
 if ($Lan -and -not $PSBoundParameters.ContainsKey('ListenHost')) {
     $ListenHost = '0.0.0.0'
 }
+
+Import-Module $modulePath -Force
 
 function Get-LocalIPv4 {
     $routes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
@@ -68,9 +71,13 @@ if ($resolvedProjectRoot) {
     Write-Host 'Mode: workbench shell'
     Remove-Item Env:WEBNOVEL_PROJECT_ROOT -ErrorAction SilentlyContinue
 }
-Write-Host 'Starting dashboard...'
-Write-Host 'Keep this window open while the dashboard is running.'
-Write-Host ('Local URL: http://127.0.0.1:' + $Port)
+
+$baseUrl = Get-WebnovelDashboardBaseUrl -Host $ListenHost -Port $Port
+$browserUrl = Get-WebnovelDashboardBrowserUrl -Host $ListenHost -Port $Port
+$healthProbeSpec = Get-WebnovelDashboardHealthProbeSpec -BaseUrl $baseUrl -ProjectRoot $resolvedProjectRoot
+$launchDecision = Resolve-WebnovelDashboardPortAction -Port $Port -BaseUrl $baseUrl -WorkspaceRoot $workspaceRoot -ProjectRoot $resolvedProjectRoot
+
+Write-Host ('Local URL: ' + $browserUrl)
 if ($ListenHost -eq '0.0.0.0') {
     $lanIp = Get-LocalIPv4
     if ($lanIp) {
@@ -81,17 +88,50 @@ if ($ListenHost -eq '0.0.0.0') {
 }
 Write-Host
 
-Set-Location $appRoot
-$args = @('-m', 'dashboard.server', '--workspace-root', $workspaceRoot, '--host', $ListenHost, '--port', "$Port")
-if ($resolvedProjectRoot) {
-    $args += @('--project-root', $resolvedProjectRoot)
-}
-if ($NoBrowser) {
-    $args += '--no-browser'
+switch ($launchDecision.Action) {
+    'reuse_existing' {
+        Write-Host 'An existing dashboard instance is healthy. Reusing it.'
+        if (-not $NoBrowser) {
+            Start-Process -FilePath $browserUrl | Out-Null
+        }
+        exit 0
+    }
+    'abort_port_in_use' {
+        throw ('Port {0} is already occupied by another process. Dashboard will not overwrite it.' -f $Port)
+    }
+    'restart_existing' {
+        Write-Host ('Found a stale dashboard listener ({0}). Restarting it.' -f $launchDecision.ListenerProcessId)
+        Stop-WebnovelDashboardProcess -ProcessId $launchDecision.ListenerProcessId
+    }
 }
 
-& $pythonExe @args
-$exitCode = $LASTEXITCODE
+Write-Host 'Starting dashboard...'
+Write-Host 'Keep this window open while the dashboard is running.'
+Write-Host ('Health probe: ' + $healthProbeSpec.Path)
+Write-Host
+
+Set-Location $appRoot
+$serverProcess = Start-WebnovelDashboardServer -PythonExe $pythonExe -AppRoot $appRoot -WorkspaceRoot $workspaceRoot -ProjectRoot $resolvedProjectRoot -ListenHost $ListenHost -Port $Port
+
+try {
+    $probe = Wait-WebnovelDashboardHealthy -BaseUrl $baseUrl -ProjectRoot $resolvedProjectRoot -ProcessId $serverProcess.Id -TimeoutSeconds 45
+    Write-Host ('Dashboard health check passed: ' + $probe.Reason)
+} catch {
+    if ($serverProcess -and -not $serverProcess.HasExited) {
+        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+    throw
+}
+
+if (-not $NoBrowser) {
+    Start-Process -FilePath $browserUrl | Out-Null
+}
+
+Write-Host
+Write-Host ('Dashboard started with process id: ' + $serverProcess.Id)
+Wait-Process -Id $serverProcess.Id
+$serverProcess.Refresh()
+$exitCode = $serverProcess.ExitCode
 Write-Host
 Write-Host ('Dashboard stopped with exit code: ' + $exitCode)
 exit $exitCode

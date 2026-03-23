@@ -142,7 +142,7 @@ beforeEach(() => {
                 },
                 story_plan: {
                     anchor_chapter: 9,
-                    rationale: 'Keep the rain archive line under pressure.',
+                    rationale: 'This story plan uses active foreshadowing, knowledge conflicts and hooks to keep the rain archive line under pressure.',
                     priority_threads: ['Archive thread', 'Memory cost'],
                     chapters: [
                         {
@@ -350,9 +350,109 @@ test('control overview renders director hub guidance from the backend snapshot',
     expect(screen.getByText('章节简报')).not.toBeNull()
     expect(screen.getByText('Lead with scene action')).not.toBeNull()
     expect(screen.getByText('The protagonist must decide before the clue disappears.')).not.toBeNull()
-    expect(screen.getByText('Keep the rain archive line under pressure.')).not.toBeNull()
+    expect(screen.getByText(/当前多章规划会根据活跃伏笔、知识冲突与最近指挥结果生成/)).not.toBeNull()
     expect(screen.getAllByText('Archive thread').length).toBeGreaterThan(0)
     expect(screen.getByText('One rewind burns one memory')).not.toBeNull()
+    expect(screen.queryByText(/story plan/i)).toBeNull()
+    expect(screen.queryByText(/active foreshadowing/i)).toBeNull()
+    expect(screen.queryByText(/knowledge conflicts/i)).toBeNull()
+    expect(screen.queryByText(/\bhooks\b/i)).toBeNull()
+})
+
+test('director hub failure degrades only the panel and keeps overview usable', async () => {
+    setProjectModeUrl()
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') {
+            return Promise.resolve({
+                project_info: { title: 'Night Rain Archive', genre: '都市异能' },
+                dashboard_context: { project_initialized: true, project_root: 'C:/novel' },
+                progress: { current_chapter: 1, total_words: 3607 },
+            })
+        }
+        if (path === '/api/project/director-hub') {
+            return Promise.reject({
+                displayMessage: '创作工作台服务暂未返回有效接口数据，请刷新或重新启动工作台。',
+                code: 'HTML_RESPONSE',
+                rawMessage: '后端返回了页面内容而不是接口数据。',
+                details: { path: '/api/project/director-hub' },
+            })
+        }
+        if (path === '/api/tasks/summary') return Promise.resolve([])
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    expect((await screen.findAllByText('项目总览')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('核心数据刷新失败')).toBeNull()
+    expect(screen.getByText('创作指挥台暂时无法刷新，请稍后重试。')).not.toBeNull()
+    expect(screen.queryByText(/HTML_RESPONSE/)).toBeNull()
+    expect(screen.getByText('总字数')).not.toBeNull()
+})
+
+test('workbench tools page uses pure-Chinese labels for user-facing actions', async () => {
+    const user = userEvent.setup()
+
+    window.history.replaceState({}, '', '/')
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '工具页' }))
+
+    expect(screen.getByText('登录创作命令行')).not.toBeNull()
+    expect(screen.getByText('打开当前项目终端')).not.toBeNull()
+    expect(screen.queryByText(/Codex CLI/)).toBeNull()
+    expect(screen.queryByText(/PowerShell/)).toBeNull()
+})
+
+test('status probe failures stay local to status pills instead of showing a global banner', async () => {
+    setProjectModeUrl()
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') {
+            return Promise.resolve({
+                project_info: { title: 'Night Rain Archive', genre: '都市异能' },
+                dashboard_context: { project_initialized: true, project_root: 'C:/novel' },
+                progress: { current_chapter: 1, total_words: 3607 },
+            })
+        }
+        if (path === '/api/project/director-hub') {
+            return Promise.resolve({
+                current_chapter: 2,
+                current_brief: {},
+                story_plan: {
+                    anchor_chapter: 1,
+                    planning_horizon: 4,
+                    rationale: 'This story plan uses active foreshadowing, knowledge conflicts and hooks.',
+                },
+                continuity: {},
+                voice_bible: {},
+            })
+        }
+        if (path === '/api/tasks/summary') return Promise.resolve([])
+        if (path === '/api/llm/status') {
+            return Promise.reject({
+                displayMessage: '浏览器等待接口返回超时，后台任务可能仍在继续执行。',
+                code: 'CLIENT_TIMEOUT',
+            })
+        }
+        if (path === '/api/rag/status') {
+            return Promise.reject({
+                displayMessage: '浏览器等待接口返回超时，后台任务可能仍在继续执行。',
+                code: 'CLIENT_TIMEOUT',
+            })
+        }
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    expect((await screen.findAllByText('项目总览')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('引擎状态刷新失败')).toBeNull()
+    expect(screen.getByText('写作引擎探活异常，请稍后重试')).not.toBeNull()
+    expect(screen.getByText('检索引擎探活异常，请稍后重试')).not.toBeNull()
 })
 
 test('overview primary action surfaces request errors', async () => {

@@ -35,7 +35,7 @@ function buildRequestActionKey(path, body = {}) {
 
 function resolveRepairWritebackLabel(candidate) {
     const action = candidate?.operator_action?.payload || candidate?.operatorAction?.payload || {}
-    return action?.require_manual_approval ? '需要人工确认后回写' : '会自动写回正文'
+    return action?.require_manual_approval ? '需要人工确认后回写' : '将自动回写正文'
 }
 
 function ActionButton({ className, onClick, disabled, loading, children, loadingLabel }) {
@@ -75,7 +75,7 @@ export function TaskCenterTaskDetail({
     return (
         <section className="panel detail-panel">
             <div className="panel-title">任务详情</div>
-            {!selectedTask && <div className="empty-state">请选择任务查看详情</div>}
+            {!selectedTask && <div className="empty-state">请选择一个任务查看详情</div>}
             {selectedTask && (() => {
                 const liveSelectedTask = withLiveRuntimeStatus(selectedTask, runtimeNow)
                 const writingContext = deriveWritingTaskContext(liveSelectedTask)
@@ -113,7 +113,7 @@ export function TaskCenterTaskDetail({
                     : null
                 const canRefreshStoryPlan = Boolean(
                     storyRefresh?.should_refresh
-                    && !['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask.status)
+                    && !['queued', 'running', 'awaiting_writeback_approval', 'retrying', 'resuming_writeback'].includes(liveSelectedTask.status),
                 )
                 const reviewSummary = guardedRun?.review_summary || guardedBatchRun?.review_summary || liveSelectedTask.artifacts?.review_summary || null
                 const repairCandidates = Array.isArray(reviewSummary?.repair_candidates) ? reviewSummary.repair_candidates : []
@@ -137,9 +137,9 @@ export function TaskCenterTaskDetail({
                             <MetricCard label="状态" value={resolveTaskStatusLabel ? resolveTaskStatusLabel(liveSelectedTask) : translateTaskStatus(liveSelectedTask.status)} />
                             <MetricCard label="目标" value={resolveTargetLabel ? resolveTargetLabel(liveSelectedTask) : (liveSelectedTask.runtime_status?.target_label || '-')} />
                             <MetricCard label="当前阶段" value={resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle')} />
-                            <MetricCard label="审批" value={resolveApprovalStatusLabel ? resolveApprovalStatusLabel(liveSelectedTask) : (liveSelectedTask.approval_status || '-')} />
-                            <MetricCard label="类型" value={translateTaskType(liveSelectedTask.task_type)} />
-                            <MetricCard label="实时状态" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
+                            <MetricCard label="确认状态" value={resolveApprovalStatusLabel ? resolveApprovalStatusLabel(liveSelectedTask) : (liveSelectedTask.approval_status || '-')} />
+                            <MetricCard label="任务类型" value={translateTaskType(liveSelectedTask.task_type)} />
+                            <MetricCard label="实时运行" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
                         </div>
 
                         <div className="planning-warning detail-action-bar">
@@ -222,7 +222,7 @@ export function TaskCenterTaskDetail({
                                         onClick={() => onCancelTask(liveSelectedTask)}
                                         disabled={Boolean(pendingActionKey)}
                                         loading={pendingActionKey === cancelActionKey}
-                                        loadingLabel="停止中..."
+                                        loadingLabel="正在停止..."
                                     >
                                         停止任务
                                     </ActionButton>
@@ -235,7 +235,7 @@ export function TaskCenterTaskDetail({
                         {liveSelectedTask?.artifacts?.plan_blocked ? (
                             <div className="planning-warning">
                                 <div className="subsection-title">当前阻断原因</div>
-                                <div className="tiny">规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行 plan。</div>
+                                <div className="tiny">规划任务已停止，当前输入不足。请先补齐规划信息，再重新运行规划任务。</div>
                                 {blockingItems.length ? (
                                     <div className="alignment-list">
                                         {blockingItems.map((item, index) => (
@@ -245,7 +245,7 @@ export function TaskCenterTaskDetail({
                                         ))}
                                     </div>
                                 ) : null}
-                                {onNavigateOverview ? <div className="button-row"><button className="secondary-button" onClick={onNavigateOverview}>前往项目总览补录</button></div> : null}
+                                {onNavigateOverview ? <div className="button-row"><button className="secondary-button" onClick={onNavigateOverview}>前往项目总览</button></div> : null}
                             </div>
                         ) : null}
 
@@ -317,7 +317,7 @@ export function TaskCenterTaskDetail({
                                     <MetricCard label="当前尝试" value={formatCountValue(liveSelectedTask.runtime_status?.attempt)} />
                                     <MetricCard label="重试次数" value={formatCountValue(liveSelectedTask.runtime_status?.retry_count, true)} />
                                     <MetricCard label="超时预算" value={formatTimeoutValue(liveSelectedTask.runtime_status?.timeout_seconds)} />
-                                    <MetricCard label="最近更新" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_event_at || liveSelectedTask.updated_at || '-')} />
+                                    <MetricCard label="最近更新时间" value={formatTimestampShort(liveSelectedTask.runtime_status?.last_event_at || liveSelectedTask.updated_at || '-')} />
                                     <MetricCard label="是否可重试" value={formatRetryableValue(liveSelectedTask.runtime_status?.retryable)} />
                                 </div>
                             </div>

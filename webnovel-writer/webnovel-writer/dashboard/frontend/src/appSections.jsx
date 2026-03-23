@@ -697,7 +697,7 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
                 )}
             </section>
             <section className="panel full-span">
-                <div className="panel-title">Story Plans</div>
+                <div className="panel-title">多章规划摘要</div>
                 {storyPlans.length === 0 ? (
                     <div className="tiny">当前还没有可展示的多章滚动规划；请先运行带“多章规划”的写作任务。</div>
                 ) : (
@@ -706,9 +706,9 @@ export function DataPageSection({ SimpleTable, refreshToken }) {
                             <div key={plan.path || plan.anchor_chapter} className="summary-card">
                                 <div className="summary-card-title">锚点第 {plan.anchor_chapter} 章</div>
                                 <div className="tiny">窗口 {plan.planning_horizon || '-'} 章 · 更新时间 {formatTimestampShort(plan.updated_at_display || plan.updated_at || '-')}</div>
-                                <div className="summary-card-meta">当前槽位：{plan.current_role || 'progression'}</div>
-                                <div className="summary-card-meta">{plan.current_goal || '-'}</div>
-                                <div className="summary-card-meta">Hook：{plan.current_hook || '-'}</div>
+                                <div className="summary-card-meta">当前定位：{translatePlanRole(plan.current_role)}</div>
+                                <div className="summary-card-meta">本轮目标：{plan.current_goal || '-'}</div>
+                                <div className="summary-card-meta">章末钩子：{plan.current_hook || '-'}</div>
                                 {Array.isArray(plan.priority_threads) && plan.priority_threads.length ? (
                                     <div className="planning-tags">
                                         {plan.priority_threads.slice(0, 4).map((item) => (
@@ -816,7 +816,7 @@ export function FilesPageSection({ refreshToken }) {
     const selectedNode = findTreeNode(tree, selectedPath)
     const fileMeta = resolveFileDisplayMeta(selectedPath || fileDetail.path, selectedNode, fileDetail)
     const previewText = !selectedPath
-        ? (missingNotice || '请选择左侧文件')
+        ? ''
         : loading
             ? '读取中...'
             : fileDetail.is_binary
@@ -861,7 +861,14 @@ export function FilesPageSection({ refreshToken }) {
                 ) : null}
                 {selectedPath && fileDetail.internal_hint ? <div className="tiny">{fileDetail.internal_hint}</div> : null}
                 <ErrorNotice error={error} />
-                <pre className="code-block file-preview">{previewText}</pre>
+                {!selectedPath ? (
+                    <div className="file-empty-state">
+                        <div className="subsection-title">请选择左侧文件</div>
+                        <div className="tiny">{missingNotice || '选中文件后，这里会显示文件摘要、元信息和正文预览。'}</div>
+                    </div>
+                ) : (
+                    <pre className="code-block file-preview">{previewText}</pre>
+                )}
             </section>
         </div>
     )
@@ -911,24 +918,24 @@ export function QualityPageSection({ refreshToken, onMutated, SimpleTable, trans
                             </div>
                         </div>
                     ))}
-                    {invalidFacts.length === 0 && <div className="empty-state">暂无待处理失效事实</div>}
+                    {invalidFacts.length === 0 && <CompactEmptyCard title="暂无待处理失效事实" description="当审查发现需要冻结或确认的失效事实时，这里会出现审批项。" />}
                 </div>
             </section>
             <section className="panel">
                 <div className="panel-title">审查指标</div>
-                <SimpleTable rows={reviewMetrics} columns={['end_chapter', 'overall_score', 'created_at']} />
+                {reviewMetrics.length ? <SimpleTable rows={reviewMetrics} columns={['end_chapter', 'overall_score', 'created_at']} /> : <CompactEmptyCard title="暂无审查指标" description="运行审查任务后，这里会汇总各章节的评分。" />}
             </section>
             <section className="panel">
                 <div className="panel-title">清单评分</div>
-                <SimpleTable rows={checklistScores} columns={['chapter', 'template', 'score', 'completion_rate']} />
+                {checklistScores.length ? <SimpleTable rows={checklistScores} columns={['chapter', 'template', 'score', 'completion_rate']} /> : <CompactEmptyCard title="暂无清单评分" description="当写作清单被执行后，这里会显示完成率与得分。" />}
             </section>
             <section className="panel">
                 <div className="panel-title">RAG 查询</div>
-                <SimpleTable rows={ragQueries} columns={['query_type', 'query', 'results_count', 'latency_ms']} />
+                {ragQueries.length ? <SimpleTable rows={ragQueries} columns={['query_type', 'query', 'results_count', 'latency_ms']} /> : <CompactEmptyCard title="暂无检索记录" description="发生检索调用后，这里会显示查询类型、结果数和延迟。" />}
             </section>
             <section className="panel">
                 <div className="panel-title">工具统计</div>
-                <SimpleTable rows={toolStats} columns={['tool_name', 'success', 'retry_count', 'created_at']} />
+                {toolStats.length ? <SimpleTable rows={toolStats} columns={['tool_name', 'success', 'retry_count', 'created_at']} /> : <CompactEmptyCard title="暂无工具统计" description="工具链开始写入运行记录后，这里会显示调用次数和重试情况。" />}
             </section>
         </div>
     )
@@ -957,6 +964,7 @@ function Field({ label, children }) {
 }
 
 export function ErrorNotice({ error, title = '操作失败' }) {
+    const [showDetails, setShowDetails] = useState(false)
     if (!error) return null
 
     const normalized = normalizeError(error)
@@ -966,11 +974,10 @@ export function ErrorNotice({ error, title = '操作失败' }) {
         <div className="error-panel" role="alert">
             <div className="error-title">{title}</div>
             <div className="error-text">{normalized.displayMessage}</div>
-            <div className="error-meta">错误码：{normalized.code || 'REQUEST_FAILED'}</div>
             {detailText ? (
-                <details className="error-details">
-                    <summary>查看原始详情</summary>
-                    <pre className="error-details-block">{detailText}</pre>
+                <details className="error-details" onToggle={(event) => setShowDetails(event.currentTarget.open)}>
+                    <summary>查看诊断详情</summary>
+                    {showDetails ? <pre className="error-details-block">{detailText}</pre> : null}
                 </details>
             ) : null}
         </div>
@@ -980,6 +987,9 @@ export function ErrorNotice({ error, title = '操作失败' }) {
 function buildErrorDetailText(error) {
     const lines = []
 
+    if (error.code) {
+        lines.push(`错误码：${error.code}`)
+    }
     if (error.statusCode) {
         lines.push(`HTTP 状态：${error.statusCode}`)
     }
@@ -994,6 +1004,26 @@ function buildErrorDetailText(error) {
     }
 
     return lines.join('\n\n')
+}
+
+function translatePlanRole(value) {
+    const text = String(value || '').trim()
+    if (!text) return '未设置'
+    if (text === 'current-execution') return '当前执行'
+    if (text === 'progression') return '主线推进'
+    if (text === 'setup') return '铺垫'
+    if (text === 'payoff') return '兑现'
+    if (text === 'transition') return '过渡'
+    return text
+}
+
+function CompactEmptyCard({ title, description }) {
+    return (
+        <div className="compact-empty-card">
+            <div className="subsection-title">{title}</div>
+            <div className="tiny">{description}</div>
+        </div>
+    )
 }
 
 function FileTree({ tree, onSelect }) {

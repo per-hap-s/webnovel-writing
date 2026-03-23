@@ -96,13 +96,15 @@ export default function App() {
     const [hubLoadError, setHubLoadError] = useState(null)
     const [projectInfo, setProjectInfo] = useState(null)
     const [directorHub, setDirectorHub] = useState(null)
+    const [directorHubError, setDirectorHubError] = useState(null)
     const [llmStatus, setLlmStatus] = useState(null)
     const [ragStatus, setRagStatus] = useState(null)
+    const [llmStatusError, setLlmStatusError] = useState(null)
+    const [ragStatusError, setRagStatusError] = useState(null)
     const [tasks, setTasks] = useState([])
     const [selectedTaskId, setSelectedTaskId] = useState(null)
     const [coreRefreshVersion, setCoreRefreshVersion] = useState(0)
     const [coreLoadError, setCoreLoadError] = useState(null)
-    const [statusLoadError, setStatusLoadError] = useState(null)
     const [connected, setConnected] = useState(false)
     const coreRefreshTimerRef = useRef(null)
     const coreRefreshInFlightRef = useRef(false)
@@ -140,12 +142,14 @@ export default function App() {
             lastSseActivityAtRef.current = 0
             setProjectInfo(null)
             setDirectorHub(null)
+            setDirectorHubError(null)
             setLlmStatus(null)
             setRagStatus(null)
+            setLlmStatusError(null)
+            setRagStatusError(null)
             setTasks([])
             setSelectedTaskId(null)
             setCoreLoadError(null)
-            setStatusLoadError(null)
             setConnected(false)
             return
         }
@@ -273,9 +277,10 @@ export default function App() {
 
         if (directorHubResult.status === 'fulfilled') {
             setDirectorHub(directorHubResult.value)
+            setDirectorHubError(null)
         } else {
             setDirectorHub(null)
-            errors.push(normalizeError(directorHubResult.reason))
+            setDirectorHubError(normalizeError(directorHubResult.reason))
         }
 
         setCoreLoadError(errors[0] || null)
@@ -290,20 +295,19 @@ export default function App() {
         ])
         if (refreshId !== statusRefreshSeqRef.current) return
 
-        const errors = []
         if (llmResult.status === 'fulfilled') {
             setLlmStatus(llmResult.value)
+            setLlmStatusError(null)
         } else {
-            errors.push(normalizeError(llmResult.reason))
+            setLlmStatusError(normalizeError(llmResult.reason))
         }
 
         if (ragResult.status === 'fulfilled') {
             setRagStatus(ragResult.value)
+            setRagStatusError(null)
         } else {
-            errors.push(normalizeError(ragResult.reason))
+            setRagStatusError(normalizeError(ragResult.reason))
         }
-
-        setStatusLoadError(errors[0] || null)
     }
 
     async function reloadHub(options = {}) {
@@ -461,8 +465,8 @@ export default function App() {
                     {projectMode ? (
                         <>
                             <StatusPill tone={connected ? 'good' : 'danger'} label={connected ? '实时同步已连接' : '实时同步已断开'} />
-                            <StatusPill tone={getWritingModelTone(llmStatus)} label={formatWritingModelPill(llmStatus)} />
-                            <StatusPill tone={getRagTone(ragStatus)} label={formatRagStatusLabel(ragStatus)} />
+                            <StatusPill tone={getWritingModelTone(llmStatus, llmStatusError)} label={formatWritingModelPill(llmStatus, llmStatusError)} />
+                            <StatusPill tone={getRagTone(ragStatus, ragStatusError)} label={formatRagStatusLabel(ragStatus, ragStatusError)} />
                         </>
                     ) : (
                         <StatusPill tone="warning" label="工作台模式：尚未打开项目" />
@@ -473,7 +477,6 @@ export default function App() {
             <main className="content">
                 <ErrorNotice error={hubLoadError} title="工作台刷新失败" />
                 {projectMode ? <ErrorNotice error={coreLoadError} title="核心数据刷新失败" /> : null}
-                {projectMode ? <ErrorNotice error={statusLoadError} title="引擎状态刷新失败" /> : null}
                 {effectivePage === 'workbench' && (
                     <WorkbenchPage
                         hubData={hubData}
@@ -491,8 +494,9 @@ export default function App() {
                     <ControlPage
                         projectInfo={projectInfo}
                         directorHub={directorHub}
-                        llmStatus={llmStatus}
-                        ragStatus={ragStatus}
+                        directorHubError={directorHubError}
+                        llmStatus={mergeServiceStatusWithError(llmStatus, llmStatusError)}
+                        ragStatus={mergeServiceStatusWithError(ragStatus, ragStatusError)}
                         tasks={tasks}
                         bootstrapHint={bootstrapHint}
                         onTaskCreated={handleTaskCreated}
@@ -624,7 +628,8 @@ function dedupeWorkbenchProjects(items, blockedRoots = []) {
     })
 }
 
-function getWritingModelTone(llmStatus) {
+function getWritingModelTone(llmStatus, loadError) {
+    if (loadError) return 'warning'
     if (!llmStatus?.installed) return 'warning'
     const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
     if (effectiveStatus === 'failed') return 'danger'
@@ -633,7 +638,11 @@ function getWritingModelTone(llmStatus) {
     return 'warning'
 }
 
-function formatWritingModelPill(llmStatus) {
+function formatWritingModelPill(llmStatus, loadError) {
+    if (loadError) {
+        const suffix = llmStatus ? ` ${formatWritingModelValue(llmStatus)}` : ''
+        return `${UI_COPY.writingEngine}探活异常，请稍后重试${suffix}`
+    }
     if (!llmStatus?.installed) return '未配置可用的写作引擎'
     const effectiveStatus = llmStatus?.effective_status || llmStatus?.connection_status
     if (effectiveStatus === 'failed') return `${UI_COPY.writingEngine}连接失败 ${formatWritingModelValue(llmStatus)}`
@@ -645,7 +654,7 @@ function formatWritingModelPill(llmStatus) {
 function formatWritingModelValue(llmStatus) {
     if (!llmStatus) return '未配置'
     if (llmStatus.mode === 'cli') {
-        return llmStatus.version ? `本地 CLI（${llmStatus.version}）` : '本地 CLI'
+        return llmStatus.version ? `本地命令行（${llmStatus.version}）` : '本地命令行'
     }
     if (llmStatus.mode === 'api') {
         return `模型：${llmStatus.model || '未指定模型'}`
@@ -667,7 +676,7 @@ function formatWritingModelDetail(llmStatus) {
                 ? '（连接失败）'
                 : '（已配置）'
     if (llmStatus.mode === 'cli') {
-        const base = llmStatus.binary ? `本地 CLI（${llmStatus.binary}）` : '本地 CLI'
+        const base = llmStatus.binary ? `本地命令行（${llmStatus.binary}）` : '本地命令行'
         return `${base}${statusSuffix}`
     }
     if (llmStatus.mode === 'api') {
@@ -676,14 +685,19 @@ function formatWritingModelDetail(llmStatus) {
     return `${llmStatus.provider || '已配置'}${statusSuffix}`
 }
 
-function getRagTone(ragStatus) {
+function getRagTone(ragStatus, loadError) {
+    if (loadError) return 'warning'
     if (!ragStatus?.configured) return 'warning'
     if (ragStatus?.connection_status === 'failed') return 'danger'
     if (ragStatus?.connection_status === 'connected') return 'good'
     return 'warning'
 }
 
-function formatRagStatusLabel(ragStatus) {
+function formatRagStatusLabel(ragStatus, loadError) {
+    if (loadError) {
+        const suffix = ragStatus?.embed_model ? ` ${ragStatus.embed_model}` : ''
+        return `${UI_COPY.retrievalEngine}探活异常，请稍后重试${suffix}`.trim()
+    }
     if (!ragStatus?.configured) return `${UI_COPY.retrievalEngine}未配置`
     if (ragStatus?.connection_status === 'failed') {
         return `${UI_COPY.retrievalEngine}连接失败：${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`
@@ -746,9 +760,23 @@ function sortTaskSummaries(items) {
 function forceProjectDashboardUrl(nextUrl, page = 'control') {
     const parsed = new URL(nextUrl, window.location.origin)
     if (parsed.searchParams.get('project_root')) {
-        parsed.searchParams.set(DASHBOARD_PAGE_QUERY_KEY, page)
+        if (!page || page === 'control') {
+            parsed.searchParams.delete(DASHBOARD_PAGE_QUERY_KEY)
+        } else {
+            parsed.searchParams.set(DASHBOARD_PAGE_QUERY_KEY, page)
+        }
     }
     return `${parsed.pathname}${parsed.search}${parsed.hash || ''}`
+}
+
+function mergeServiceStatusWithError(status, error) {
+    if (!error) return status
+    return {
+        ...(status || {}),
+        effective_status: 'degraded',
+        connection_status: 'degraded',
+        last_error: error,
+    }
 }
 
 function mergeFetchedTasksWithOptimistic(items, optimisticTasks) {
@@ -776,7 +804,34 @@ function mapContinuationToneToBadgeTone(tone) {
 }
 
 function trimText(value) {
-    return String(value || '').trim()
+    return localizeUserFacingText(String(value || '').trim())
+}
+
+function localizeUserFacingText(value) {
+    let text = String(value || '').trim()
+    if (!text) return ''
+
+    const exactRewrites = [
+        [
+            /^This story plan uses active foreshadowing, knowledge conflicts and hooks to keep the rain archive line under pressure\.?$/i,
+            '当前多章规划会根据活跃伏笔、知识冲突与最近指挥结果生成，用于持续给雨档案线施压。',
+        ],
+        [
+            /^当前 story plan 根据 active foreshadowing、knowledge conflicts、最近导演执行结果生成，用于稳定未来几章的推进顺序。本轮仍以当前大纲切片为硬约束。?$/i,
+            '当前多章规划会根据活跃伏笔、知识冲突与最近指挥结果生成，用于稳定未来几章的推进顺序。本轮仍以当前大纲切片为硬约束。',
+        ],
+    ]
+
+    for (const [pattern, replacement] of exactRewrites) {
+        if (pattern.test(text)) return replacement
+    }
+
+    return text
+        .replace(/\bstory plan\b/gi, '多章规划')
+        .replace(/\bactive foreshadowing\b/gi, '活跃伏笔')
+        .replace(/\bknowledge conflicts\b/gi, '知识冲突')
+        .replace(/\bhooks?\b/gi, '章末钩子')
+        .replace(/最近导演执行结果/gi, '最近指挥结果')
 }
 
 function mapDirectorItems(items, resolver) {
@@ -827,7 +882,7 @@ function coerceUniqueTextList(items) {
     return values
 }
 
-function ControlPage({ projectInfo, directorHub, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onApiSettingsSaved, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
+function ControlPage({ projectInfo, directorHub, directorHubError, llmStatus, ragStatus, tasks, bootstrapHint, onTaskCreated, onProjectBootstrapped, onApiSettingsSaved, onOpenTask, onTasksMutated, onPlanningProfileSaved }) {
     const projectMeta = projectInfo?.project_info || projectInfo || {}
     const dashboardContext = projectInfo?.dashboard_context || {}
     const [submittingActionKey, setSubmittingActionKey] = useState('')
@@ -887,7 +942,7 @@ function ControlPage({ projectInfo, directorHub, llmStatus, ragStatus, tasks, bo
                 )}
             </section>
 
-            <DirectorHubPanel directorHub={directorHub} />
+            <DirectorHubPanel directorHub={directorHub} error={directorHubError} />
 
             <section className="panel">
                 <div className="panel-title">项目创建</div>
@@ -991,7 +1046,7 @@ function WritingTaskOverviewCard({ task, summary, submitting, onOpenTask, onActi
     )
 }
 
-function DirectorHubPanel({ directorHub }) {
+function DirectorHubPanel({ directorHub, error }) {
     const currentBrief = directorHub?.current_brief || {}
     const storyPlan = directorHub?.story_plan || {}
     const continuity = directorHub?.continuity || {}
@@ -1014,6 +1069,17 @@ function DirectorHubPanel({ directorHub }) {
     return (
         <section className="panel full-span">
             <div className="panel-title">创作指挥台</div>
+            {error ? (
+                <div className="planning-warning subtle">
+                    <div className="subsection-title">创作指挥台暂时无法刷新，请稍后重试。</div>
+                    <div className="tiny">接口未返回有效数据。项目总览其他区域仍可继续使用。</div>
+                </div>
+            ) : null}
+            {!error && !directorHub ? (
+                <div className="empty-state">当前还没有可展示的创作指挥台数据。</div>
+            ) : null}
+            {!directorHub || error ? null : (
+                <>
             <div className="director-hub-topline">
                 <span className="runtime-badge info">{`当前准备章节：${currentChapter > 0 ? `第 ${currentChapter} 章` : '未确定'}`}</span>
                 <span className="runtime-badge muted">{`活跃线索 ${activeThreads.length}`}</span>
@@ -1082,6 +1148,8 @@ function DirectorHubPanel({ directorHub }) {
                     <DirectorChipGroup title="声线摘要" items={voiceItems} emptyText="当前还没有结构化声线约束。" />
                 </section>
             </div>
+                </>
+            )}
         </section>
     )
 }

@@ -11,9 +11,11 @@ $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path $PSScriptRoot -Parent
 $repoRoot = Join-Path $workspaceRoot 'webnovel-writer'
 $dashboardLauncher = Join-Path $PSScriptRoot 'Launch-Webnovel-Dashboard.ps1'
+$launcherModule = Join-Path $PSScriptRoot 'Webnovel-DashboardLauncher.psm1'
 $loginLauncher = Join-Path $PSScriptRoot 'Login-Codex-CLI.ps1'
 $guideSourcePath = Join-Path $repoRoot 'Quick-Start-CN.txt'
 $guidePath = Join-Path $env:TEMP 'webnovel-writer-quick-start-cn.txt'
+Import-Module $launcherModule -Force
 
 function Test-LauncherExists([string]$Path, [string]$Label) {
     if (-not (Test-Path $Path)) {
@@ -23,6 +25,31 @@ function Test-LauncherExists([string]$Path, [string]$Label) {
 
 function Start-DashboardWindow([switch]$LanMode) {
     Test-LauncherExists $dashboardLauncher 'dashboard launcher'
+
+    $listenHost = if ($LanMode) { '0.0.0.0' } else { '127.0.0.1' }
+    $baseUrl = Get-WebnovelDashboardBaseUrl -Host $listenHost -Port $Port
+    $resolvedProjectRoot = $null
+    if ($ProjectRoot -and (Test-Path $ProjectRoot)) {
+        $candidateRoot = (Resolve-Path $ProjectRoot).Path
+        $stateFile = Join-Path $candidateRoot '.webnovel\state.json'
+        if (Test-Path $stateFile) {
+            $resolvedProjectRoot = $candidateRoot
+        }
+    }
+
+    $decision = Resolve-WebnovelDashboardPortAction -Port $Port -BaseUrl $baseUrl -WorkspaceRoot $workspaceRoot -ProjectRoot $resolvedProjectRoot
+
+    if ($decision.Action -eq 'reuse_existing') {
+        Write-Host 'Dashboard already running and healthy. Reusing the existing instance.'
+        if (-not $NoBrowser) {
+            Start-Process -FilePath $decision.BrowserUrl | Out-Null
+        }
+        return
+    }
+
+    if ($decision.Action -eq 'abort_port_in_use') {
+        throw ('Port {0} is occupied by another process. Dashboard launch aborted.' -f $Port)
+    }
 
     $argList = @(
         '-NoExit',

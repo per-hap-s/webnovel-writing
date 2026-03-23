@@ -1,5 +1,5 @@
 const TASK_TYPE_LABELS = {
-    init: '旧项目补齐',
+    init: '补齐旧项目骨架',
     plan: '多章规划',
     write: '撰写章节',
     'guarded-write': '护栏推进单章',
@@ -30,7 +30,7 @@ const APPROVAL_STATUS_LABELS = {
 }
 
 const STEP_LABELS = {
-    init: '初始化',
+    init: '项目初始化',
     plan: '规划',
     resume: '恢复',
     'guarded-chapter-runner': '护栏推进单章',
@@ -39,10 +39,10 @@ const STEP_LABELS = {
     'chapter-director': '单章指挥',
     'chapter-brief-approval': '章节简报确认',
     context: '上下文准备',
-    draft: '草稿生成',
+    draft: '正文起草',
     'consistency-review': '一致性审查',
     'continuity-review': '连续性审查',
-    'ooc-review': '角色一致性审查',
+    'ooc-review': '人物声线审查',
     'review-summary': '问题汇总',
     polish: '定向润色',
     'approval-gate': '人工确认回写',
@@ -110,6 +110,14 @@ const RELATIONSHIP_TYPE_LABELS = {
     warned_by: '预警来源',
 }
 
+const ROLE_LABELS = {
+    'current-execution': '当前执行',
+    progression: '主线推进',
+    setup: '铺垫',
+    payoff: '兑现',
+    transition: '过渡',
+}
+
 const EXACT_EVENT_MESSAGES = {
     'Retry requested': '已请求重试',
     'Writeback approved': '已批准回写',
@@ -122,12 +130,12 @@ const EXACT_EVENT_MESSAGES = {
     'Chapter brief approved': '章节简报已批准，可开始正文写作',
     'Chapter brief rejected': '章节简报已驳回，需要重新生成',
     'Waiting for chapter brief approval': '等待确认章节简报',
-    'Context story contract synced': '上下文已同步创作合同',
+    'Context story contract synced': '上下文已同步创作约束',
     'Story plan refresh suggested': '建议刷新后续章节规划',
-    'Guarded runner blocked by story refresh': '护栏推进因刷新建议而暂停',
+    'Guarded runner blocked by story refresh': '护栏推进因重规划建议而暂停',
     'Guarded runner child task created': '护栏推进已创建写作子任务',
     'Guarded runner stopped at approval gate': '护栏推进停在人工确认回写',
-    'Guarded runner blocked by review gate': '护栏推进被审查阻断',
+    'Guarded runner blocked by review gate': '护栏推进被审查关卡阻断',
     'Guarded runner child task failed': '护栏推进子任务失败',
     'Guarded runner completed one chapter': '护栏推进已完成一章',
     'Guarded batch child task created': '护栏批量推进已创建子任务',
@@ -135,7 +143,7 @@ const EXACT_EVENT_MESSAGES = {
     'Guarded batch child task failed': '护栏批量推进子任务失败',
     'Guarded batch completed requested chapters': '护栏批量推进已完成请求章节',
     'Review summary persisted': '问题汇总已写入',
-    'Review gate blocked execution': '审查阻断后续执行',
+    'Review gate blocked execution': '审查阻断了后续执行',
     'Waiting for writeback approval': '等待人工确认回写',
     'Write target normalized': '已校正回写目标',
     'Data sync completed': '数据同步完成',
@@ -190,7 +198,7 @@ const UI_COPY = {
     approvalApprovedCompleted: '已批准，回写已完成',
     approvalRejected: '已拒绝回写',
     unknownSystemEvent: '系统事件',
-    unknownSystemEventWithDetail: '系统事件（请查看详情）',
+    unknownSystemEventWithDetail: '系统事件，请查看详情',
 }
 
 export function MetricCard({ label, value }) {
@@ -303,35 +311,21 @@ export function resolveApprovalStatusLabel(task) {
 export function resolveTaskTargetLabel(task) {
     if (task?.runtime_status?.target_label) return task.runtime_status.target_label
     const request = task?.request || {}
-    if (task?.task_type === 'plan') {
-        return `第 ${request.volume || 1} 卷`
-    }
-    if (task?.task_type === 'write' && request.chapter) {
-        return `第 ${request.chapter} 章`
-    }
-    if (task?.task_type === 'repair' && request.chapter) {
-        return `第 ${request.chapter} 章局部修稿`
-    }
-    if (task?.task_type === 'guarded-write' && request.chapter) {
-        return `护栏推进第 ${request.chapter} 章`
-    }
+    if (task?.task_type === 'plan') return `第 ${request.volume || 1} 卷`
+    if (task?.task_type === 'write' && request.chapter) return `第 ${request.chapter} 章`
+    if (task?.task_type === 'repair' && request.chapter) return `第 ${request.chapter} 章局部修稿`
+    if (task?.task_type === 'guarded-write' && request.chapter) return `护栏推进第 ${request.chapter} 章`
     if (task?.task_type === 'guarded-batch-write') {
         const startChapter = Number(request.start_chapter || request.chapter || 0)
         const maxChapters = Math.max(1, Number(request.max_chapters || 1))
         if (startChapter > 0) {
             const endChapter = startChapter + maxChapters - 1
-            return endChapter > startChapter
-                ? `护栏推进第 ${startChapter}-${endChapter} 章`
-                : `护栏推进第 ${startChapter} 章`
+            return endChapter > startChapter ? `护栏推进第 ${startChapter}-${endChapter} 章` : `护栏推进第 ${startChapter} 章`
         }
         return `护栏批量推进 ${maxChapters} 章`
     }
-    if (task?.task_type === 'review' && request.chapter_range) {
-        return `第 ${request.chapter_range} 章`
-    }
-    if (task?.task_type === 'resume') {
-        return request.chapter ? `恢复第 ${request.chapter} 章` : '恢复最近中断任务'
-    }
+    if (task?.task_type === 'review' && request.chapter_range) return `第 ${request.chapter_range} 章`
+    if (task?.task_type === 'resume') return request.chapter ? `恢复第 ${request.chapter} 章` : '恢复最近中断任务'
     return '-'
 }
 
@@ -351,6 +345,7 @@ export function translateKnownValue(value) {
     if (STEP_LABELS[value]) return STEP_LABELS[value]
     if (EVENT_LEVEL_LABELS[value]) return EVENT_LEVEL_LABELS[value]
     if (RELATIONSHIP_TYPE_LABELS[value]) return RELATIONSHIP_TYPE_LABELS[value]
+    if (ROLE_LABELS[value]) return ROLE_LABELS[value]
     if (value === 'plot') return '剧情模板'
     return value
 }

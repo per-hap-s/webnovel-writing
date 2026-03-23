@@ -144,7 +144,7 @@ test('review summary repair candidate can launch repair task from task detail', 
                 rewrite_goal: '补足空间与动作过渡，使读者可直接验证移动路径。',
                 guardrails: ['仅修复当前章节局部连续性问题'],
             },
-        })
+        }, {})
         expect(onSelectTask).toHaveBeenCalledWith('task-repair-2')
         expect(onMutated).toHaveBeenCalled()
     })

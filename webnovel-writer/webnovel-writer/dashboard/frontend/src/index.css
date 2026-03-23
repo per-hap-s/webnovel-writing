@@ -573,6 +573,16 @@ pre {
     height: 100%;
     max-height: none;
 }
+.file-empty-state {
+    display: grid;
+    gap: 8px;
+    align-content: start;
+    min-height: 220px;
+    padding: 18px 20px;
+    border-radius: 18px;
+    border: 1px dashed rgba(31, 27, 24, 0.14);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(248, 242, 233, 0.78));
+}
 .file-meta-card {
     margin-bottom: 12px;
     padding: 12px 14px;
@@ -677,6 +687,14 @@ th, td {
     color: var(--muted);
     padding: 20px 0;
 }
+.compact-empty-card {
+    display: grid;
+    gap: 6px;
+    padding: 14px 16px;
+    border-radius: 16px;
+    border: 1px dashed rgba(31, 27, 24, 0.14);
+    background: rgba(255, 255, 255, 0.64);
+}
 .full-span {
     grid-column: 1 / -1;
 }
@@ -695,23 +713,23 @@ th, td {
         border-right: none;
         border-bottom: 1px solid rgba(31, 27, 24, 0.08);
         min-height: auto;
-        padding: 12px 14px;
-        gap: 12px;
+        padding: 10px 12px;
+        gap: 10px;
     }
     .sidebar-header {
         gap: 4px;
         padding-bottom: 0;
     }
     .brand {
-        font-size: 1.2rem;
+        font-size: 1.08rem;
     }
     .sidebar-scroll {
-        max-height: 26vh;
-        gap: 12px;
+        max-height: 19vh;
+        gap: 8px;
         padding-right: 0;
     }
     .sidebar-section {
-        gap: 8px;
+        gap: 6px;
     }
     .nav {
         flex-direction: row;
@@ -719,35 +737,36 @@ th, td {
         gap: 8px;
     }
     .nav-button {
-        padding: 9px 12px;
+        padding: 8px 10px;
         border-radius: 12px;
     }
     .sidebar-project-groups {
         display: flex;
-        gap: 10px;
+        gap: 8px;
         overflow-x: auto;
-        padding-bottom: 4px;
+        padding-bottom: 2px;
         scroll-snap-type: x proximity;
     }
     .sidebar-project-group {
-        min-width: 220px;
-        flex: 0 0 220px;
+        min-width: 178px;
+        flex: 0 0 178px;
         scroll-snap-align: start;
     }
     .sidebar-project-list {
-        gap: 6px;
-    }
-    .sidebar-project-card {
-        padding: 10px 11px;
         gap: 4px;
     }
+    .sidebar-project-card {
+        padding: 8px 9px;
+        gap: 3px;
+    }
     .status-stack {
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 8px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
     }
     .status-pill {
-        padding: 8px 10px;
-        font-size: 0.82rem;
+        padding: 6px 8px;
+        font-size: 0.76rem;
+        line-height: 1.2;
     }
     .split-layout:not(.files-layout) > .detail-panel {
         order: -1;
@@ -764,6 +783,13 @@ th, td {
     }
     .file-tree-scroll, .file-preview {
         min-height: auto;
+    }
+    .panel {
+        padding: 16px;
+        border-radius: 20px;
+    }
+    .panel-title, .subsection-title {
+        margin-bottom: 10px;
     }
 }
 

@@ -20,7 +20,7 @@ const CODE_MESSAGE_MAP = {
     INTERNAL_ERROR: '服务器内部错误，请稍后重试。',
     PROJECT_BOOTSTRAP_FAILED: '项目初始化失败。',
     PROJECT_BOOTSTRAP_INCOMPLETE: '项目初始化未完成，未生成必要文件。',
-    PLAN_INPUT_BLOCKED: '规划输入待补齐，请先完善规划信息后再运行 plan。',
+    PLAN_INPUT_BLOCKED: '规划信息待补齐，请先完善规划信息后再继续。',
     LLM_NOT_CONFIGURED: '写作引擎尚未完成配置。',
     LLM_HTTP_ERROR: '写作引擎接口请求失败。',
     LLM_REQUEST_FAILED: '写作引擎接口连接失败。',
@@ -28,15 +28,15 @@ const CODE_MESSAGE_MAP = {
     LLM_TIMEOUT: '写作引擎请求超时。',
     LLM_CONNECTION_ERROR: '写作引擎接口连接失败。',
     LLM_INVALID_RESPONSE: '写作引擎返回的数据格式无效。',
-    CODEX_CLI_NOT_FOUND: '未找到 Codex CLI 可执行文件。',
-    CODEX_AUTH_REQUIRED: 'Codex CLI 尚未登录。',
-    CODEX_TIMEOUT: 'Codex 步骤执行超时。',
-    CODEX_EXEC_ERROR: 'Codex CLI 调用失败。',
-    CODEX_STEP_FAILED: 'Codex 步骤执行失败。',
+    CODEX_CLI_NOT_FOUND: '未找到创作命令行可执行文件。',
+    CODEX_AUTH_REQUIRED: '创作命令行尚未登录。',
+    CODEX_TIMEOUT: '创作命令行步骤执行超时。',
+    CODEX_EXEC_ERROR: '创作命令行调用失败。',
+    CODEX_STEP_FAILED: '创作命令行步骤执行失败。',
     INVALID_STEP_OUTPUT: '步骤输出格式无效。',
     REVIEW_GATE_BLOCKED: '审查关卡阻止了继续执行。',
     NETWORK_ERROR: '网络请求失败，请检查连接后重试。',
-    HTML_RESPONSE: '后端返回了页面内容而不是接口数据。',
+    HTML_RESPONSE: '创作工作台服务暂未返回有效接口数据，请刷新或重新启动工作台。',
     INVALID_JSON_RESPONSE: '接口返回了无效的 JSON 数据。',
     REQUEST_FAILED: '请求失败，请稍后重试。',
 }
@@ -71,10 +71,9 @@ const STATUS_CODE_MAP = {
     504: 'REQUEST_TIMEOUT',
 }
 
-CODE_MESSAGE_MAP.REPAIR_NOT_ELIGIBLE = '当前问题类型不在局部修稿白名单内，需人工处理。'
-CODE_MESSAGE_MAP.REPAIR_REVIEW_BLOCKED = '修稿复审未通过，当前版本不会自动写回。'
+CODE_MESSAGE_MAP.REPAIR_NOT_ELIGIBLE = '当前问题类型不在局部修稿白名单内，需要人工处理。'
+CODE_MESSAGE_MAP.REPAIR_REVIEW_BLOCKED = '修稿复审未通过，当前版本不会自动回写。'
 CODE_MESSAGE_MAP.REPAIR_INPUT_INVALID = '修稿任务输入不完整，请重新从审查候选入口发起。'
-
 CODE_MESSAGE_MAP.CLIENT_TIMEOUT = '浏览器等待接口返回超时，后台任务可能仍在继续执行。'
 
 class AppError extends Error {
@@ -158,8 +157,8 @@ function parseErrorPayload(text) {
 
 function buildHTMLResponseError(path, statusCode) {
     const rawMessage = path.startsWith('/api/settings/')
-        ? '当前创作工作台后端尚未重启，API 设置接口还未生效。请关闭启动窗口后重新启动创作工作台。'
-        : '后端返回了页面内容而不是接口数据。请关闭并重新启动创作工作台。'
+        ? '当前创作工作台后端尚未返回设置接口数据，请关闭并重新启动工作台。'
+        : '后端返回了页面内容而不是接口数据，请关闭并重新启动工作台。'
     return new AppError({
         displayMessage: CODE_MESSAGE_MAP.HTML_RESPONSE,
         code: 'HTML_RESPONSE',
@@ -195,18 +194,10 @@ function inferTimeoutMs(path, timeoutMs) {
     if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) {
         return timeoutMs
     }
-    if (path === '/api/tasks/summary') {
-        return TASK_SUMMARY_REQUEST_TIMEOUT_MS
-    }
-    if (path === '/api/project/info') {
-        return PROJECT_INFO_REQUEST_TIMEOUT_MS
-    }
-    if (/^\/api\/tasks\/[^/]+\/detail$/.test(path)) {
-        return TASK_DETAIL_REQUEST_TIMEOUT_MS
-    }
-    if (path === '/api/llm/status' || path === '/api/rag/status') {
-        return STATUS_REQUEST_TIMEOUT_MS
-    }
+    if (path === '/api/tasks/summary') return TASK_SUMMARY_REQUEST_TIMEOUT_MS
+    if (path === '/api/project/info') return PROJECT_INFO_REQUEST_TIMEOUT_MS
+    if (/^\/api\/tasks\/[^/]+\/detail$/.test(path)) return TASK_DETAIL_REQUEST_TIMEOUT_MS
+    if (path === '/api/llm/status' || path === '/api/rag/status') return STATUS_REQUEST_TIMEOUT_MS
     return DEFAULT_REQUEST_TIMEOUT_MS
 }
 
@@ -327,7 +318,7 @@ export function subscribeSSE(onMessage, handlers = {}) {
     const { onOpen, onError, onHeartbeat, onOverflow } = handlers
     const es = new EventSource(buildUrl('/api/events'))
     es.onopen = () => {
-        if (onOpen) onOpen()
+        onOpen?.()
     }
     es.onmessage = (event) => {
         try {
@@ -346,7 +337,7 @@ export function subscribeSSE(onMessage, handlers = {}) {
         }
     }
     es.onerror = (error) => {
-        if (onError) onError(error)
+        onError?.(error)
     }
     return () => es.close()
 }

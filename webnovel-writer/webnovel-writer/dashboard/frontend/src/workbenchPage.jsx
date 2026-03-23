@@ -37,6 +37,17 @@ function writeLandingPreference(key, value) {
     window.localStorage.setItem(key, value)
 }
 
+function normalizeProjectStatus(project) {
+    if (project?.is_missing) return '路径已失效'
+    if (project?.is_corrupted) return '项目状态文件已损坏'
+    if (project?.is_initialized) {
+        if (project?.current_chapter) return `第 ${project.current_chapter} 章`
+        if (project?.total_words) return `${formatNumber(project.total_words)} 字`
+        return project?.genre || '可直接进入'
+    }
+    return '目录尚未初始化'
+}
+
 export function WorkbenchPage({
     hubData,
     tab = 'hub',
@@ -85,7 +96,7 @@ export function WorkbenchPage({
             return
         }
         setDraftRoot(projectRoot)
-        setMessage(response?.next_recommended_action || '该目录尚未初始化，可以直接改为新建项目。')
+        setMessage(response?.next_recommended_action || '该目录尚未初始化，可以直接转为新建项目。')
     }
 
     async function openPickedProject() {
@@ -147,7 +158,7 @@ export function WorkbenchPage({
             await postJSON(`/api/workbench/tools/${action}`, {
                 project_root: currentProjectRoot || currentProject?.project_root || '',
             })
-            setMessage('已触发工具动作。')
+            setMessage('工具动作已触发，请查看新开的窗口或当前提示。')
         } catch (requestError) {
             setError(normalizeError(requestError))
         } finally {
@@ -167,7 +178,10 @@ export function WorkbenchPage({
                     <div>
                         <div className="workbench-eyebrow">工作台</div>
                         <div className="panel-title">项目工作台</div>
-                        <div className="workbench-hero-copy">左侧用于快速进入项目，右侧保留项目管理、创建入口和工具动作。工作台本身不再重复堆放整套项目列表。</div>
+                        <div className="workbench-hero-copy">
+                            左侧用于快速进入项目，右侧保留项目管理、新建入口和常用工具。
+                            默认入口会先到这里，再决定打开哪个项目。
+                        </div>
                     </div>
                 </div>
                 <div className="tiny workbench-workspace">{`工作区：${hubData?.workspace_root || '未加载'}`}</div>
@@ -183,7 +197,9 @@ export function WorkbenchPage({
                 <>
                     <section className="panel workbench-panel">
                         <div className="panel-title">默认落地方式</div>
-                        <div className="workbench-section-copy">这个偏好只保存在当前浏览器，用来决定双击启动后优先停在工作台，还是自动回到上次项目。</div>
+                        <div className="workbench-section-copy">
+                            这个偏好只保存在当前浏览器，用来决定双击启动后优先停在工作台，还是自动回到上次项目。
+                        </div>
                         <div className="workbench-preference-switch" role="tablist" aria-label="启动落地偏好">
                             {landingPreferences.map((item) => (
                                 <button
@@ -201,7 +217,9 @@ export function WorkbenchPage({
 
                     <section className="panel workbench-panel">
                         <div className="panel-title">当前项目</div>
-                        <div className="workbench-section-copy">这里保留当前项目的详情与管理动作。真正的快速切换入口已经收口到左侧项目轨道。</div>
+                        <div className="workbench-section-copy">
+                            这里展示当前项目详情和管理动作。真正的快速切换入口已经收口到左侧项目轨道。
+                        </div>
                         {currentProject ? (
                             <WorkbenchProjectCard
                                 project={currentProject}
@@ -218,7 +236,9 @@ export function WorkbenchPage({
 
                     <section className="panel workbench-panel">
                         <div className="panel-title">打开已有项目</div>
-                        <div className="workbench-section-copy">通过系统文件夹选择器打开已初始化项目；如果目录尚未初始化，工作台会把目录自动带入新建流程。</div>
+                        <div className="workbench-section-copy">
+                            通过系统文件夹选择器打开已初始化项目；如果目录尚未初始化，工作台会把目录自动带入新建流程。
+                        </div>
                         <button className="primary-button workbench-button" onClick={openPickedProject} disabled={busyKey === 'open-existing'}>
                             {busyKey === 'open-existing' ? '打开中...' : '打开已有项目'}
                         </button>
@@ -226,7 +246,9 @@ export function WorkbenchPage({
 
                     <section ref={createPanelRef} className="panel full-span workbench-panel">
                         <div className="panel-title">新建项目</div>
-                        <div className="workbench-section-copy">先选目录，再填写标题和题材。创建成功后会直接进入该项目工作台。</div>
+                        <div className="workbench-section-copy">
+                            先选择目录，再填写标题和题材。创建成功后会直接进入该项目总览。
+                        </div>
                         <div className="task-row-actions workbench-inline-actions">
                             <button className="secondary-button workbench-button" onClick={startCreateFlow} disabled={busyKey === 'pick-create'}>
                                 {busyKey === 'pick-create' ? '选择中...' : '先选项目目录'}
@@ -249,7 +271,9 @@ export function WorkbenchPage({
 
                     <section className="panel full-span workbench-panel">
                         <div className="panel-title">失效记录</div>
-                        <div className="workbench-section-copy">这里是路径失效或项目损坏的记录，只会清理工作台登记，不会删除磁盘内容。</div>
+                        <div className="workbench-section-copy">
+                            这里只清理工作台登记，不会删除磁盘里的项目内容。
+                        </div>
                         {missingCards.length === 0 ? (
                             <div className="empty-state">没有失效项目记录。</div>
                         ) : (
@@ -271,11 +295,13 @@ export function WorkbenchPage({
             ) : (
                 <section className="panel full-span workbench-panel">
                     <div className="panel-title">工具页</div>
-                    <div className="workbench-section-copy">这里承接旧启动器里的常用动作，统一做成可直接执行的按钮。</div>
+                    <div className="workbench-section-copy">
+                        这里承接旧启动器里的常用动作，统一做成可直接执行的按钮。
+                    </div>
                     <div className="summary-grid">
                         <WorkbenchToolCard
-                            title="登录 Codex CLI"
-                            description="拉起登录窗口并检查当前登录状态。"
+                            title="登录创作命令行"
+                            description="打开登录窗口，并检查当前本机的创作命令行状态。"
                             actionLabel="立即登录"
                             disabled={false}
                             busy={busyKey === 'tool:login-codex'}
@@ -283,14 +309,14 @@ export function WorkbenchPage({
                         />
                         <WorkbenchToolCard
                             title="打开当前项目终端"
-                            description="在当前项目目录打开 PowerShell 窗口。"
+                            description="在当前项目目录打开终端窗口，方便执行本地命令。"
                             actionLabel="打开终端"
                             disabled={!currentProject}
                             busy={busyKey === 'tool:open-shell'}
                             onClick={() => runTool('open-shell')}
                         />
                         <WorkbenchToolCard
-                            title="开启局域网分享"
+                            title="开启局域网共享"
                             description="以当前项目启动可局域网访问的创作工作台。"
                             actionLabel="开启局域网模式"
                             disabled={!currentProject}
@@ -313,14 +339,6 @@ export function WorkbenchPage({
 }
 
 function WorkbenchProjectCard({ project, busyKey, current = false, onOpen, onPinToggle, onRemove }) {
-    const statusLabel = project.is_missing
-        ? '路径已失效'
-        : project.is_corrupted
-            ? 'state.json 损坏'
-            : project.is_initialized
-                ? `第 ${project.current_chapter || 0} 章 / ${formatNumber(project.total_words || 0)} 字`
-                : '目录未初始化'
-
     return (
         <div className="summary-card workbench-card workbench-project-card">
             <div className="task-item-header">
@@ -332,14 +350,24 @@ function WorkbenchProjectCard({ project, busyKey, current = false, onOpen, onPin
             </div>
             <div className="tiny task-target">{project.project_root}</div>
             <div className="summary-card-meta">{project.genre || '未填写题材'}</div>
-            <div className="summary-card-meta">{statusLabel}</div>
+            <div className="summary-card-meta">{normalizeProjectStatus(project)}</div>
             {project.last_opened_at ? <div className="summary-card-meta">{`最近打开：${project.last_opened_at}`}</div> : null}
             <div className="task-row-actions workbench-card-actions">
                 {onOpen ? <button className="primary-button workbench-button" onClick={onOpen}>进入项目</button> : null}
-                <button className="secondary-button workbench-button" onClick={onPinToggle} disabled={busyKey === `pin-project:${project.project_root}` || busyKey === `unpin-project:${project.project_root}`}>
+                <button
+                    className="secondary-button workbench-button"
+                    onClick={onPinToggle}
+                    disabled={busyKey === `pin-project:${project.project_root}` || busyKey === `unpin-project:${project.project_root}`}
+                >
                     {project.pinned ? '取消固定' : '固定'}
                 </button>
-                <button className="ghost-button workbench-button workbench-button-danger" onClick={onRemove} disabled={busyKey === `remove-project:${project.project_root}`}>移除记录</button>
+                <button
+                    className="ghost-button workbench-button workbench-button-danger"
+                    onClick={onRemove}
+                    disabled={busyKey === `remove-project:${project.project_root}`}
+                >
+                    移除记录
+                </button>
             </div>
         </div>
     )

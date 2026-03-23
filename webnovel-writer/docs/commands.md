@@ -13,6 +13,8 @@ Start-Webnovel-Writer.bat
 - 双击后直接启动 Dashboard 工作台，不再弹启动前菜单。
 - `.\Launch-Webnovel-Dashboard.ps1` 不传 `-ProjectRoot` 时，会启动全局工作台。
 - 只有显式传入一个已初始化项目目录时，脚本才会直接进入单项目视图。
+- 工作台模式使用 `GET /api/workbench/hub` 做健康探测；项目模式使用 `GET /api/project/director-hub?project_root=...` 做健康探测。
+- 启动器只会复用“属于当前工作区且健康探针通过”的已有实例；否则会替换旧实例后再启动。
 - 旧菜单仍可通过 `tools\Start-Webnovel-Writer.bat menu` 进入，但它已经不是默认主路径。
 
 ## `webnovel init`

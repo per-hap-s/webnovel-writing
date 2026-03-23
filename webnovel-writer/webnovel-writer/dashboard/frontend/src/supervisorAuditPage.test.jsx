@@ -159,7 +159,8 @@ test('keeps audit data visible when a later refresh fails', async () => {
     await waitFor(async () => {
         const alert = await screen.findByRole('alert')
         expect(alert.textContent || '').toContain('督办审计数据刷新失败')
-        expect(alert.textContent || '').toContain('REQUEST_FAILED')
+        expect(alert.textContent || '').not.toContain('REQUEST_FAILED')
+        expect(alert.textContent || '').toContain('查看诊断详情')
         expect(screen.getAllByText('Stable Audit Item').length).toBeGreaterThan(0)
         expect(screen.getAllByText('Stable Checklist').length).toBeGreaterThan(0)
     })

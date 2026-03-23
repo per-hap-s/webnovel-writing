@@ -12,6 +12,41 @@ function renderTagBlock(label, items) {
     )
 }
 
+function translateStoryRole(role) {
+    const value = String(role || '').trim()
+    if (value === 'current-execution') return '当前执行'
+    if (value === 'setup') return '铺垫'
+    if (value === 'payoff') return '兑现'
+    if (value === 'defer') return '延后'
+    if (value === 'flashback') return '回溯'
+    if (value === 'turning-point') return '转折'
+    if (value === 'progression') return '推进'
+    if (!value) return '未命名槽位'
+    return '未知阶段'
+}
+
+function translateReviewerLabel(value) {
+    const text = String(value || '').trim()
+    if (!text) return '未命名审查者'
+    if (text === 'consistency-review') return '一致性审查'
+    if (text === 'continuity-review') return '连续性审查'
+    if (text === 'ooc-review') return '人物声线审查'
+    if (text === 'review-summary') return '问题汇总'
+    if (text === 'story-director') return '多章规划'
+    if (text === 'chapter-director') return '单章指挥'
+    return /[\u3400-\u9fff]/u.test(text) ? text : '未命名审查者'
+}
+
+function translateIssueLabel(issue) {
+    const title = String(issue?.title || issue?.summary || '').trim()
+    if (title) return title
+    const severity = String(issue?.severity || '').trim()
+    if (severity === 'critical') return '严重问题'
+    if (severity === 'warning') return '警告问题'
+    if (severity === 'minor') return '轻微问题'
+    return '未命名问题'
+}
+
 function AlignmentCard({ title, alignment }) {
     return (
         <div className="summary-card">
@@ -25,7 +60,7 @@ function AlignmentCard({ title, alignment }) {
                 </div>
             </div>
             <div className="alignment-section">
-                <div className="tiny">已延期</div>
+                <div className="tiny">已延后</div>
                 <div className="alignment-list">
                     {alignment.deferred.length ? alignment.deferred.map((item) => (
                         <div key={`d-${item}`} className="alignment-chip deferred">{item}</div>
@@ -50,28 +85,28 @@ export function hasAlignment(alignment) {
 
 export function hasReviewSummary(summary) {
     return Boolean(summary && typeof summary === 'object' && (
-        Number(summary.overall_score || 0) > 0 ||
-        Array.isArray(summary.issues) && summary.issues.length > 0 ||
-        Array.isArray(summary.reviewers) && summary.reviewers.length > 0 ||
-        summary.summary
+        Number(summary.overall_score || 0) > 0
+        || (Array.isArray(summary.issues) && summary.issues.length > 0)
+        || (Array.isArray(summary.reviewers) && summary.reviewers.length > 0)
+        || summary.summary
     ))
 }
 
 export function formatGuardedOutcome(value) {
     if (value === 'completed_one_chapter') return '已推进一章'
-    if (value === 'blocked_story_refresh') return '因刷新建议而停止'
-    if (value === 'blocked_by_review') return '被审查关卡拦截'
-    if (value === 'stopped_for_approval') return '停在人工审批'
-    return value || '-'
+    if (value === 'blocked_story_refresh') return '因后续规划刷新建议而暂停'
+    if (value === 'blocked_by_review') return '因审查阻断而暂停'
+    if (value === 'stopped_for_approval') return '停在人工确认'
+    return value ? '未知结果' : '-'
 }
 
 export function formatGuardedBatchOutcome(value) {
-    if (value === 'completed_requested_batch') return '已完成请求章数'
-    if (value === 'blocked_story_refresh') return '因刷新建议而停止'
-    if (value === 'blocked_by_review') return '被审查关卡拦截'
-    if (value === 'stopped_for_approval') return '停在人工审批'
+    if (value === 'completed_requested_batch') return '已完成请求批次'
+    if (value === 'blocked_story_refresh') return '因后续规划刷新建议而暂停'
+    if (value === 'blocked_by_review') return '因审查阻断而暂停'
+    if (value === 'stopped_for_approval') return '停在人工确认'
     if (value === 'child_task_failed') return '子任务失败后停止'
-    return value || '-'
+    return value ? '未知结果' : '-'
 }
 
 export function TaskContinuationSection({ continuationSummary, operatorActions, renderOperatorActionButtons, MetricCard }) {
@@ -113,18 +148,18 @@ export function NarrativeContractsSection({ storyPlan, directorBrief, currentSto
     if (!(storyPlan || directorBrief)) return null
     return (
         <div className="subsection">
-            <div className="subsection-title">叙事导演合同</div>
+            <div className="subsection-title">叙事约束</div>
             {storyPlan ? (
                 <div className="planning-warning subtle">
                     <div className="detail-grid">
                         <MetricCard label="锚点章节" value={`第 ${storyPlan.anchor_chapter || '-'} 章`} />
-                        <MetricCard label="规划窗口" value={`${storyPlan.planning_horizon || '-'} 章`} />
-                        <MetricCard label="优先线程数" value={String((storyPlan.priority_threads || []).length)} />
-                        <MetricCard label="兑现排期数" value={String((storyPlan.payoff_schedule || []).length)} />
+                        <MetricCard label="规划跨度" value={`${storyPlan.planning_horizon || '-'} 章`} />
+                        <MetricCard label="优先线索数" value={String((storyPlan.priority_threads || []).length)} />
+                        <MetricCard label="回收排期数" value={String((storyPlan.payoff_schedule || []).length)} />
                     </div>
                     {storyPlan.priority_threads?.length ? (
                         <div>
-                            <div className="tiny">优先推进线程</div>
+                            <div className="tiny">优先推进线索</div>
                             <div className="planning-tags">
                                 {storyPlan.priority_threads.map((item) => (
                                     <span key={item} className="planning-tag">{item}</span>
@@ -154,9 +189,11 @@ export function NarrativeContractsSection({ storyPlan, directorBrief, currentSto
                     ) : null}
                     {currentStorySlot ? (
                         <div className="summary-card">
-                            <div className="summary-card-title">当前章槽位: 第 {currentStorySlot.chapter} 章 / {currentStorySlot.role}</div>
-                            <div className="summary-card-meta">目标：{currentStorySlot.chapter_goal || '-'}</div>
-                            <div className="summary-card-meta">章末钩子：{currentStorySlot.ending_hook_target || '-'}</div>
+                            <div className="summary-card-title">
+                                {`当前章节槽位：第 ${currentStorySlot.chapter} 章 / ${translateStoryRole(currentStorySlot.role)}`}
+                            </div>
+                            <div className="summary-card-meta">{`目标：${currentStorySlot.chapter_goal || '-'}`}</div>
+                            <div className="summary-card-meta">{`章末钩子：${currentStorySlot.ending_hook_target || '-'}`}</div>
                             {(currentStorySlot.must_advance_threads || []).length ? (
                                 <div className="planning-tags">
                                     {currentStorySlot.must_advance_threads.map((item) => (
@@ -170,10 +207,9 @@ export function NarrativeContractsSection({ storyPlan, directorBrief, currentSto
                         <div className="summary-grid">
                             {storyPlan.chapters.map((slot) => (
                                 <div key={`${slot.chapter}-${slot.role}`} className="summary-card">
-                                    <div className="summary-card-title">第 {slot.chapter} 章</div>
-                                    <div className="tiny">{slot.role || 'progression'}</div>
-                                    <div className="summary-card-meta">{slot.chapter_goal || '-'}</div>
-                                    <div className="summary-card-meta">Hook：{slot.ending_hook_target || '-'}</div>
+                                    <div className="summary-card-title">{`第 ${slot.chapter} 章 / ${translateStoryRole(slot.role)}`}</div>
+                                    <div className="tiny">{slot.chapter_goal || '未填写章节目标'}</div>
+                                    <div className="summary-card-meta">{`章末钩子：${slot.ending_hook_target || '-'}`}</div>
                                 </div>
                             ))}
                         </div>
@@ -184,12 +220,12 @@ export function NarrativeContractsSection({ storyPlan, directorBrief, currentSto
                 <div className="planning-warning subtle">
                     <div className="detail-grid">
                         <MetricCard label="单章目标" value={directorBrief.chapter_goal || '-'} />
-                        <MetricCard label="主冲突" value={directorBrief.primary_conflict || '-'} />
+                        <MetricCard label="核心冲突" value={directorBrief.primary_conflict || '-'} />
                         <MetricCard label="章末钩子" value={directorBrief.ending_hook_target || '-'} />
                         <MetricCard label="节奏" value={directorBrief.tempo || '-'} />
                     </div>
                     {renderTagBlock('必须推进', directorBrief.must_advance_threads)}
-                    {renderTagBlock('兑现目标', directorBrief.payoff_targets)}
+                    {renderTagBlock('回收目标', directorBrief.payoff_targets)}
                     {renderTagBlock('铺垫目标', directorBrief.setup_targets)}
                     {renderTagBlock('必须使用实体', directorBrief.must_use_entities)}
                 </div>
@@ -202,7 +238,7 @@ export function AlignmentResultsSection({ storyAlignment, directorAlignment }) {
     if (!(hasAlignment(storyAlignment) || hasAlignment(directorAlignment))) return null
     return (
         <div className="subsection">
-            <div className="subsection-title">执行对齐结果</div>
+            <div className="subsection-title">对齐结果</div>
             <div className="summary-grid">
                 {hasAlignment(storyAlignment) ? (
                     <AlignmentCard title="剧情对齐" alignment={storyAlignment} />
@@ -219,13 +255,13 @@ export function StoryRefreshSection({ storyRefresh, canRefreshStoryPlan, onRetry
     if (!storyRefresh) return null
     return (
         <div className="subsection">
-            <div className="subsection-title">滚动规划刷新建议</div>
+            <div className="subsection-title">后续章节规划刷新建议</div>
             <div className={`planning-warning ${storyRefresh.should_refresh ? '' : 'subtle'}`}>
                 <div className="detail-grid">
                     <MetricCard label="是否建议刷新" value={storyRefresh.should_refresh ? '建议刷新' : '继续沿用'} />
                     <MetricCard label="建议起点" value={storyRefresh.recommended_resume_from || '-'} />
-                    <MetricCard label="连续 miss 章节" value={String(storyRefresh.consecutive_missed_chapters || 0)} />
-                    <MetricCard label="本章 missed" value={String(storyRefresh.current_missed_count || 0)} />
+                    <MetricCard label="连续缺失章节" value={String(storyRefresh.consecutive_missed_chapters || 0)} />
+                    <MetricCard label="本章缺失数" value={String(storyRefresh.current_missed_count || 0)} />
                 </div>
                 <div className="tiny">{storyRefresh.suggested_action || '-'}</div>
                 {storyRefresh.reasons?.length ? (
@@ -253,8 +289,8 @@ export function ReviewSummarySection({ summary, MetricCard }) {
     const reviewers = (Array.isArray(summary.reviewers) ? summary.reviewers : [])
         .map((item) => {
             if (!item) return ''
-            if (typeof item === 'string') return item
-            if (typeof item === 'object') return item.label || item.name || item.id || item.reviewer || ''
+            if (typeof item === 'string') return translateReviewerLabel(item)
+            if (typeof item === 'object') return translateReviewerLabel(item.label || item.name || item.id || item.reviewer || '')
             return String(item)
         })
         .filter(Boolean)
@@ -266,14 +302,14 @@ export function ReviewSummarySection({ summary, MetricCard }) {
                     <MetricCard label="总评分" value={String(summary.overall_score ?? '-')} />
                     <MetricCard label="是否阻断" value={summary.blocking ? '是' : '否'} />
                     <MetricCard label="问题数" value={String(issues.length)} />
-                    <MetricCard label="审查器" value={reviewers.length ? reviewers.join(', ') : '-'} />
+                    <MetricCard label="审查者" value={reviewers.length ? reviewers.join('、') : '-'} />
                 </div>
                 {summary.summary ? <div className="tiny">{summary.summary}</div> : null}
                 {issues.length ? (
                     <div className="alignment-list">
                         {issues.slice(0, 6).map((issue, index) => (
                             <div key={`${issue.title || issue.severity || 'issue'}-${index}`} className={`alignment-chip ${issue.severity === 'critical' ? 'missed' : 'neutral'}`}>
-                                {issue.title || issue.summary || issue.severity || '未命名问题'}
+                                {translateIssueLabel(issue)}
                             </div>
                         ))}
                     </div>
@@ -287,13 +323,13 @@ export function GuardedRunSection({ guardedRun, MetricCard, translateStepName, t
     if (!guardedRun) return null
     return (
         <div className="subsection">
-            <div className="subsection-title">护栏推进结果</div>
+            <div className="subsection-title">护栏单章推进结果</div>
             <div className="planning-warning subtle">
                 <div className="detail-grid">
                     <MetricCard label="目标章节" value={`第 ${guardedRun.chapter || '-'} 章`} />
                     <MetricCard label="执行结果" value={formatGuardedOutcome(guardedRun.outcome)} />
-                    <MetricCard label="停止步骤" value={translateStepName(guardedRun.stop_step || 'idle')} />
-                    <MetricCard label="可继续排下一章" value={guardedRun.safe_to_continue ? '可以' : '不可以'} />
+                    <MetricCard label="停止阶段" value={translateStepName(guardedRun.stop_step || 'idle')} />
+                    <MetricCard label="可继续下章" value={guardedRun.safe_to_continue ? '可以' : '不可以'} />
                 </div>
                 {guardedRun.next_action?.reason ? <div className="tiny">{guardedRun.next_action.reason}</div> : null}
                 {guardedRun.next_action?.suggested_action ? <div className="tiny">{guardedRun.next_action.suggested_action}</div> : null}
@@ -301,7 +337,7 @@ export function GuardedRunSection({ guardedRun, MetricCard, translateStepName, t
                     <MetricCard label="子任务" value={guardedRun.child_task_id || '-'} />
                     <MetricCard label="子任务状态" value={guardedRun.child_task_status ? translateTaskStatus(guardedRun.child_task_status) : '-'} />
                     <MetricCard label="建议下一章" value={guardedRun.next_action?.next_chapter ? `第 ${guardedRun.next_action.next_chapter} 章` : '-'} />
-                    <MetricCard label="建议排队" value={guardedRun.next_action?.can_enqueue_next ? '建议' : '暂停'} />
+                    <MetricCard label="建议排队" value={guardedRun.next_action?.can_enqueue_next ? '建议继续' : '建议暂停'} />
                 </div>
             </div>
         </div>
@@ -332,26 +368,26 @@ export function GuardedBatchSection({
                 {guardedBatchRun.next_action?.reason ? <div className="tiny">{guardedBatchRun.next_action.reason}</div> : null}
                 {guardedBatchRun.next_action?.suggested_action ? <div className="tiny">{guardedBatchRun.next_action.suggested_action}</div> : null}
                 <div className="detail-grid">
-                    <MetricCard label="停止步骤" value={translateStepName(guardedBatchRun.stop_step || 'idle')} />
+                    <MetricCard label="停止阶段" value={translateStepName(guardedBatchRun.stop_step || 'idle')} />
                     <MetricCard label="停止原因" value={formatGuardedBatchOutcome(guardedBatchRun.stop_reason)} />
                     <MetricCard label="最后子任务" value={guardedBatchRun.last_child_task_id || '-'} />
                     <MetricCard label="最后子任务状态" value={guardedBatchRun.last_child_task_status ? translateTaskStatus(guardedBatchRun.last_child_task_status) : '-'} />
                 </div>
                 <div className="detail-grid">
-                    <MetricCard label="最后成功章节" value={lastSuccessfulBatchRun?.chapter ? `第 ${lastSuccessfulBatchRun.chapter} 章` : '-'} />
+                    <MetricCard label="最近成功章节" value={lastSuccessfulBatchRun?.chapter ? `第 ${lastSuccessfulBatchRun.chapter} 章` : '-'} />
                     <MetricCard label="实际停止章节" value={lastGuardedBatchRun?.chapter ? `第 ${lastGuardedBatchRun.chapter} 章` : '-'} />
                     <MetricCard label="停止判定" value={formatGuardedBatchOutcome(guardedBatchRun.stop_reason || guardedBatchRun.outcome)} />
-                    <MetricCard label="下一推荐动作" value={nextRecommendedAction?.label || guardedBatchRun.next_action?.suggested_action || '-'} />
+                    <MetricCard label="下一建议动作" value={nextRecommendedAction?.label || guardedBatchRun.next_action?.suggested_action || '-'} />
                 </div>
                 {(guardedBatchRun.runs || []).length ? (
                     <div className="summary-grid">
                         {guardedBatchRun.runs.map((item) => (
                             <div key={`${item.task_id || item.chapter}`} className="summary-card">
-                                <div className="summary-card-title">第 {item.chapter || '-'} 章</div>
-                                <div className="summary-card-meta">{formatGuardedOutcome(item.outcome || '-')}</div>
-                                <div className="summary-card-meta">停止步骤：{translateStepName(item.stop_step || 'idle')}</div>
-                                <div className="summary-card-meta">子任务：{item.task_id || '-'}</div>
-                                <div className="summary-card-meta">建议下一章：{item.next_chapter ? `第 ${item.next_chapter} 章` : '-'}</div>
+                                <div className="summary-card-title">{`第 ${item.chapter || '-'} 章`}</div>
+                                <div className="summary-card-meta">{formatGuardedBatchOutcome(item.outcome || '-')}</div>
+                                <div className="summary-card-meta">{`停止阶段：${translateStepName(item.stop_step || 'idle')}`}</div>
+                                <div className="summary-card-meta">{`子任务：${item.task_id || '-'}`}</div>
+                                <div className="summary-card-meta">{`建议下一章：${item.next_chapter ? `第 ${item.next_chapter} 章` : '-'}`}</div>
                                 {item.task_id ? (
                                     <div className="button-row">
                                         <button className="secondary-button" onClick={() => onSelectTask(item.task_id)}>查看该子任务</button>
@@ -374,9 +410,9 @@ export function ResumeSection({ resumeRun, MetricCard, translateStepName }) {
             <div className="planning-warning subtle">
                 <div className="detail-grid">
                     <MetricCard label="目标任务" value={resumeRun.target_task_id || '-'} />
-                    <MetricCard label="恢复步骤" value={resumeRun.resume_from_step ? translateStepName(resumeRun.resume_from_step) : '-'} />
+                    <MetricCard label="恢复阶段" value={resumeRun.resume_from_step ? translateStepName(resumeRun.resume_from_step) : '-'} />
                     <MetricCard label="恢复原因" value={resumeRun.resume_reason || '-'} />
-                    <MetricCard label="阻塞原因" value={resumeRun.blocking_reason || '-'} />
+                    <MetricCard label="阻断原因" value={resumeRun.blocking_reason || '-'} />
                 </div>
             </div>
         </div>

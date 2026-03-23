@@ -11,7 +11,7 @@ test('normalizeError maps PLAN_INPUT_BLOCKED to the dedicated guidance copy', ()
     })
 
     expect(normalized.code).toBe('PLAN_INPUT_BLOCKED')
-    expect(normalized.displayMessage).toContain('规划输入待补齐')
+    expect(normalized.displayMessage).toContain('规划信息待补齐')
     expect(normalized.details.blocking_items).toHaveLength(1)
 })
 
