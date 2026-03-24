@@ -52,6 +52,17 @@ This round extends the write-mainline explanation chain from task detail into sh
   - guarded outcomes
   - resume outcomes
   - unified `operator_actions`
+- `story_refresh` is now intentionally conservative for single-chapter drift:
+  - a lone missed target no longer forces replanning
+  - a mixed chapter with both hits and misses no longer forces replanning on that chapter alone
+  - refresh still triggers for consecutive missed chapters, multi-miss chapters with zero hits, or clearly severe one-chapter drift
+- non-actionable placeholder targets no longer count as alignment misses:
+  - generic story-plan fallback threads like `推进当前卷主线` / `保持章末钩子连续驱动`
+  - generic director fallback placeholders like `推进本章主线目标` / `补一条可回收的新线索`
+- stale stored `story_plan` / `director_brief` payloads now self-heal on read when the project already has actionable chapter outline text:
+  - read paths no longer blindly trust earlier placeholder plans such as `推进当前卷主线`
+  - chapter goals and must-advance threads now derive from the actual outline slice before falling back to generic placeholders
+- continuity ledger reads now hide non-actionable placeholder threads, and future `data-sync` runs no longer write those placeholder thread titles back into `state.json`
 - Task derivation is now split into:
   - `writingTaskDerived.js` for task -> normalized write-context data
   - `writingTaskListSummary.js` for list/overview-safe explanation adapters
@@ -124,7 +135,7 @@ In practice this means the operator can open a task and immediately see:
 Use the following checks for this phase:
 
 ```powershell
-python -m pytest dashboard\tests\test_guarded_runner.py dashboard\tests\test_guarded_batch_runner.py dashboard\tests\test_supervisor_recommendations.py dashboard\tests\test_app.py dashboard\tests\test_dashboard_smoke_contract.py scripts\data_modules\tests\test_webnovel_unified_cli.py -q
+python -m pytest dashboard\tests\test_guarded_runner.py dashboard\tests\test_guarded_batch_runner.py dashboard\tests\test_supervisor_recommendations.py dashboard\tests\test_director_placeholder_recovery.py dashboard\tests\test_app.py dashboard\tests\test_dashboard_smoke_contract.py scripts\data_modules\tests\test_webnovel_unified_cli.py -q
 npm run test:state
 npm run test:ui
 npm run build
