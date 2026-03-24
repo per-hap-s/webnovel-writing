@@ -23,3 +23,11 @@
 - 不传 `-ProjectRoot` 时，默认进入全局工作台。
 - 只有显式传入已初始化项目目录时，才会直接进入单项目视图。
 - 启动器只会复用“属于当前工作区且健康探针通过”的已有实例。
+
+测试入口（PowerShell）：
+- 仓库根后端入口：`python -m pytest webnovel-writer\webnovel-writer\dashboard\tests\test_app.py -q`
+- 包根后端组合验证：在 `webnovel-writer\webnovel-writer` 下运行 `python -m pytest dashboard\tests\test_app.py dashboard\tests\test_orchestrator.py dashboard\tests\test_task_store.py -q`
+- CLI（命令行）mock 回归：在 `webnovel-writer\webnovel-writer` 下运行 `python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q`
+- 前端统一测试入口：在 `webnovel-writer\webnovel-writer\dashboard\frontend` 下运行 `npm test`
+- 前端静态检查：在 `webnovel-writer\webnovel-writer\dashboard\frontend` 下运行 `npm run typecheck`
+- 前端构建产物同步：在 `webnovel-writer\webnovel-writer\dashboard\frontend` 下运行 `npm run build`

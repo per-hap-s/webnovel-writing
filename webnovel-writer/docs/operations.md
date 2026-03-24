@@ -337,3 +337,34 @@ Rules:
   - a chapter backup is written before overwrite
 - If `require_manual_approval = true`, the task must pause at `approval-gate` with `status = awaiting_writeback_approval` before overwrite.
 - If repair review still blocks the chapter, the task must fail with `REPAIR_REVIEW_BLOCKED` and must not overwrite the chapter body.
+
+## Local Test Entrypoints
+
+Use PowerShell-compatible commands only.
+
+Backend:
+
+```powershell
+Set-Location D:\CodexProjects\Project1
+python -m pytest webnovel-writer\webnovel-writer\dashboard\tests\test_app.py -q
+
+Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer
+python -m pytest dashboard\tests\test_app.py dashboard\tests\test_orchestrator.py dashboard\tests\test_task_store.py -q
+python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q
+```
+
+Frontend:
+
+```powershell
+Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\dashboard\frontend
+npm test
+npm run typecheck
+npm run build
+```
+
+Rules:
+
+- Keep `npm test` as the single frontend entrypoint for day-to-day verification.
+- `npm run test:state` is reserved for `node:test` logic files.
+- `npm run test:ui` is reserved for Vitest files and now includes the previously omitted suites.
+- `dashboard/frontend/dist/` remains committed; when runtime source files change, rebuild and commit the matching `dist/` update in the same change.

@@ -33,3 +33,8 @@ webnovel-writer/webnovel-writer/output/playwright/
 
 # Backup for nested repository metadata
 .git-backups/
+
+# Local audit and research scratch outputs
+output/research/
+output/tool-ready/
+output/frontend-build-audit/

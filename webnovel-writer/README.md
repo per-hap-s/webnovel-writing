@@ -118,3 +118,30 @@ npm run build
 - [`docs/genres.md`](docs/genres.md)
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/README.md`](docs/README.md)
+
+## Local Verification Entrypoints
+
+Current recommended PowerShell commands:
+
+```powershell
+# Repository root
+Set-Location D:\CodexProjects\Project1
+python -m pytest webnovel-writer\webnovel-writer\dashboard\tests\test_app.py -q
+
+# Package root
+Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer
+python -m pytest dashboard\tests\test_app.py dashboard\tests\test_orchestrator.py dashboard\tests\test_task_store.py -q
+python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q
+
+# Frontend root
+Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\dashboard\frontend
+npm test
+npm run typecheck
+npm run build
+```
+
+Notes:
+
+- `npm test` is now the single frontend test entrypoint.
+- `npm run test:state` keeps the `node:test` logic-only suite.
+- `npm run test:ui` keeps the Vitest + `jsdom` suite and now includes previously omitted test files.
