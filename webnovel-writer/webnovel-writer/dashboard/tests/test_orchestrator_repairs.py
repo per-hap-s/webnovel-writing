@@ -15,7 +15,13 @@ from dashboard.orchestrator import (
     SETTINGS_DIR_NAME,
 )
 from scripts.data_modules.index_manager import ChapterMeta
-from scripts.init_project import _build_master_outline, build_initial_planning_profile
+from scripts.init_project import (
+    _ensure_plan_ready_outline,
+    _build_master_outline,
+    build_bootstrap_planning_profile,
+    build_initial_planning_profile,
+    sync_master_outline_with_profile,
+)
 
 
 def step_result(
@@ -215,6 +221,60 @@ def test_bootstrap_profile_defaults_are_cold_start_ready():
     assert "请明确" not in profile["ability_cost"]
     assert "回档" in profile["core_setting"]
     assert "回档" in profile["story_logline"]
+
+
+def test_bootstrap_profile_seed_supports_plan_without_manual_fill(tmp_path: Path):
+    project_root = tmp_path / "bootstrap-ready-novel"
+    (project_root / ".webnovel").mkdir(parents=True)
+    profile = build_bootstrap_planning_profile(title="Night Rain Archive", genre="Urban Supernatural")
+    state = {
+        "project_info": {"title": "Night Rain Archive", "genre": "Urban Supernatural"},
+        "progress": {"current_chapter": 0, "total_words": 0},
+        "planning": {"profile": profile, "readiness": {}},
+    }
+    (project_root / ".webnovel" / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    (project_root / ".webnovel" / "planning-profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    outline_dir = project_root / OUTLINE_DIR_NAME
+    outline_dir.mkdir(parents=True, exist_ok=True)
+    outline_text = _ensure_plan_ready_outline(
+        _build_master_outline(50, title="Night Rain Archive", genre="Urban Supernatural"),
+        title="Night Rain Archive",
+        genre="Urban Supernatural",
+        protagonist_name="",
+        golden_finger_name="",
+        core_selling_points="",
+        protagonist_desire="",
+        protagonist_flaw="",
+        factions="",
+        power_system_type="",
+        gf_irreversible_cost="",
+    )
+    outline_text = sync_master_outline_with_profile(
+        outline_text,
+        title="Night Rain Archive",
+        genre="Urban Supernatural",
+        target_chapters=50,
+        profile=profile,
+    )
+    (outline_dir / OUTLINE_SUMMARY_FILE).write_text(outline_text, encoding="utf-8")
+    runner = MappingRunner(
+        {
+            "plan": {
+                "volume_plan": {"title": "Volume One", "summary": "The first five chapters establish the cost and first enemy line."},
+                "chapters": [{"chapter": 1, "goal": "Set the hook"}],
+            }
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("plan", {"volume": "1"})
+
+    assert task["status"] == "completed"
+    plan_bundle = next(bundle for step_name, bundle in runner.prompt_bundles if step_name == "plan")
+    assert plan_bundle["input"]["plan_health_check"]["ok"] is True
 
 
 def test_plan_task_persists_outline_and_state(tmp_path: Path):

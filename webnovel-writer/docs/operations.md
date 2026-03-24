@@ -146,6 +146,64 @@ http://127.0.0.1:8765/?project_root=<url-encoded-project-root>&page=quality
 
 详细参数、产物说明和归因口径见 `dashboard-readonly-audit.md`。
 
+### 版本级 bootstrap -> plan -> write -> review -> readonly audit 验收
+
+当需要判断“当前小说写作项目是否已经达到可持续实用状态”时，统一使用仓库内正式 `real e2e` 脚本，不再手工拼一轮 API 调用与页面回归。
+
+正式入口：
+
+```powershell
+& '.\tools\Tests\Run-Webnovel-RealE2E.ps1'
+```
+
+常用变体：
+
+```powershell
+& '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -PreferredPort 8765
+& '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -OutputRoot 'D:\CodexProjects\Project1\output\verification\real-e2e\manual-run'
+& '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -RunId 'manual01'
+& '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -ProjectRoot 'D:\path\to\existing-project'
+```
+
+脚本内部固定流程：
+
+1. 记录 Git（版本控制）分支/提交、Python / Node / Playwright 基线，以及 LLM / RAG 状态。
+2. 创建或复用 1 个真实项目目录。
+3. 通过 `POST /api/project/bootstrap` 初始化项目。
+4. 读取并保存一次 `Planning Profile`，验证冷启动计划输入链。
+5. 执行 `plan volume=1`。
+6. 执行 `write chapter=1..3`，在章节简报审批点自动批准继续。
+7. 执行 `review chapter_range=1-3`，验证结构化 review summary。
+8. 仅在 review 给出可修复候选时触发 1 次 `repair`。
+9. 用 Playwright 检查 `control / tasks / quality` 页面。
+10. 复用既有 readonly audit 脚本检查 `supervisor / supervisor-audit`。
+
+固定产物：
+
+- `environment.json`
+- `bootstrap-response.json`
+- `planning-profile-before.json`
+- `planning-profile-after.json`
+- `task-summary-plan.json`
+- `task-summary-write-ch1.json`
+- `task-summary-write-ch2.json`
+- `task-summary-write-ch3.json`
+- `task-summary-review-1-3.json`
+- `task-summary-repair.json`
+- `project-state-final.json`
+- `readonly-audit-result.json`
+- `acceptance-report.md`
+
+失败归因固定使用最终 `classification`：
+
+- `environment_blocked`
+- `mainline_failure`
+- `page_regression`
+- `readonly_audit_failure`
+- `pass`
+
+详细参数、标准产物和验收口径见 `dashboard-real-e2e.md`。
+
 ## 常用环境变量
 
 ```powershell

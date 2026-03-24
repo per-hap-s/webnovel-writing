@@ -183,3 +183,51 @@ def test_approved_chapter_brief_resumes_write_and_auto_completes_writeback(tmp_p
     assert state["trust_map"]
     assert state["director_decisions"]
     assert state["plot_threads"]["active_threads"]
+
+
+def test_write_uses_word_count_from_same_source_as_selected_content(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    chapter_file = f"{BODY_DIR_NAME}/ch0001.md"
+    draft_content = long_content("Draft Chapter 1")
+    polished_content = long_content("Polished Chapter 1") * 8
+    draft_word_count = len("".join(draft_content.split()))
+    polished_word_count = len("".join(polished_content.split()))
+    runner = SequenceRunner(
+        {
+            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "draft": step_result("draft", {"chapter_file": chapter_file, "content": draft_content, "word_count": draft_word_count}),
+            "consistency-review": step_result("consistency-review", review_payload()),
+            "continuity-review": step_result("continuity-review", review_payload()),
+            "ooc-review": step_result("ooc-review", review_payload()),
+            "polish": step_result(
+                "polish",
+                {
+                    "chapter_file": chapter_file,
+                    "content": polished_content,
+                    "anti_ai_force_check": "pass",
+                    "change_summary": [],
+                },
+            ),
+            "data-sync": step_result(
+                "data-sync",
+                {
+                    "files_written": [chapter_file],
+                    "summary_file": ".webnovel/summaries/ch0001.md",
+                    "state_updated": True,
+                    "index_updated": True,
+                    "chapter_meta": {"title": "Chapter 1", "location": "Night Rain City", "characters": ["Shen Yan"]},
+                },
+            ),
+        }
+    )
+    service = make_service(project_root, runner)
+
+    task = service.run_task_sync("write", {"chapter": 1, "require_manual_approval": False})
+    approved = service.approve_writeback(task["id"], reason="approve brief")
+    asyncio.run(service._run_task(task["id"], resume_from_step=approved.get("current_step") or "chapter-brief-approval"))
+    completed = service.get_task(task["id"])
+
+    assert completed["status"] == "completed"
+    chapter_record = service.index_manager.get_chapter(1)
+    assert chapter_record is not None
+    assert chapter_record["word_count"] == polished_word_count

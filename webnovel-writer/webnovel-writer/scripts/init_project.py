@@ -439,7 +439,7 @@ def build_initial_planning_profile(
 
 
 def build_bootstrap_planning_profile(*, title: str, genre: str) -> Dict[str, str]:
-    return normalize_planning_profile({}, title=title, genre=genre)
+    return build_initial_planning_profile(title=title, genre=genre)
 
 
 def build_planning_fill_template() -> Dict[str, Any]:
@@ -534,7 +534,7 @@ def _replace_markdown_section(text: str, heading: str, lines: List[str]) -> str:
 
 def _replace_volume_block(text: str, heading: str, lines: List[str]) -> str:
     block = "\n".join([heading, *lines]).strip() + "\n"
-    pattern = re.compile(rf"(?ms)^({re.escape(heading)}\n)(.*?)(?=^### |\Z)")
+    pattern = re.compile(rf"(?ms)^({re.escape(heading)}\n)(.*?)(?=^## |^### |\Z)")
     if pattern.search(text):
         return pattern.sub(block, text, count=1)
     base = text.rstrip()
@@ -707,6 +707,18 @@ def _ensure_plan_ready_outline(
             f"- 规则/体系：{power_system_type or '（待填写）'}",
             "- 关键伏笔：至少填写 2 条，注明埋点与预期回收位置。",
             "- 节奏要求：前 3 章给出钩子、首次收益、代价显影；前 10 章形成阶段对抗。",
+        ],
+        "## 主要角色": [
+            "- 姓名 | 定位 | 与主角关系 | 卷1作用",
+        ],
+        "## 势力": [
+            "- 势力 | 立场 | 与主角关系",
+        ],
+        "## 规则梗概": [
+            "- 请补充世界规则、能力限制与制度约束",
+        ],
+        "## 伏笔与回收": [
+            "- 伏笔内容 | 埋设章 | 回收章 | 层级",
         ],
     }
     append_blocks: list[str] = []

@@ -35,6 +35,7 @@
 - `dashboard-supervisor-targeted-audit-2026-03-23.md`：督办 smoke 夹具首次定向真实巡检；保留 `ui_defect_reproduced` 历史事实与原始失败归档
 - `dashboard-supervisor-language-fix-verification-2026-03-23.md`：督办页面英文泄漏修复后的复验记录，确认 `supervisor` / `supervisor-audit` 两页重新达到 `pass`
 - `dashboard-readonly-audit.md`：正式 readonly audit（只读巡检）入口、产物结构与失败归因说明
+- `dashboard-real-e2e.md`：正式 real e2e（真实全链路实测）入口、标准产物与版本级验收口径
 - `dashboard-api-real-test-3ch-phase3-2026-03-21.md`：第三阶段后 `bootstrap -> plan -> write 1-3 -> review 1-3` 真实回归结果
 
 建议阅读顺序：

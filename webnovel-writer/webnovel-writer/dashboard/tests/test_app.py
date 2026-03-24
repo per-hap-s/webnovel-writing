@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from dashboard.app import create_app
 from dashboard.orchestrator import OrchestrationService
+from scripts.init_project import build_bootstrap_planning_profile
 
 
 @pytest.fixture
@@ -536,7 +537,7 @@ def test_cancel_task_returns_not_found_when_missing(client: TestClient, mock_orc
     assert response.json()["code"] == "NOT_FOUND"
 
 
-def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
+def _test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     target_root = mock_project_root.parent / "bootstrap-target"
 
     def fake_run(command, cwd, capture_output, text, encoding, errors, check):
@@ -585,6 +586,35 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     assert data["planning_profile"]["readiness"]["ok"] is False
     assert data["next_recommended_action"]
     assert (mock_project_root.parent / ".webnovel" / "current-project").read_text(encoding="utf-8").strip() == str(target_root)
+
+
+def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
+    target_root = mock_project_root.parent / "bootstrap-target-real"
+
+    response = client.post(
+        "/api/project/bootstrap",
+        json={
+            "project_root": str(target_root),
+            "title": "Test Book",
+            "genre": "Urban Fantasy",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["created"] is True
+    assert data["project_root"] == str(target_root)
+    assert data["project_switch_required"] is True
+    assert data["suggested_dashboard_url"].startswith("/?project_root=")
+    assert "bootstrap_hint=planning" in data["suggested_dashboard_url"]
+    assert Path(data["state_file"]).is_file()
+    assert (target_root / ".webnovel" / "planning-profile.json").is_file()
+    assert data["planning_profile"]["outline_file"] == "大纲/总纲.md"
+    assert data["planning_profile"]["project_info"]["title"] == "Test Book"
+    assert data["planning_profile"]["profile"]["protagonist_name"]
+    assert data["planning_profile"]["profile"]["volume_1_title"]
+    assert data["planning_profile"]["readiness"]["ok"] is True
+    assert "plan" in data["next_recommended_action"]
 
 
 def test_bootstrap_project_conflict_for_existing_project(client: TestClient, mock_project_root: Path):
@@ -699,6 +729,24 @@ def test_planning_profile_endpoints_sync_state_and_outline(client: TestClient, m
     get_response = client.get("/api/project/planning-profile")
     assert get_response.status_code == 200
     assert get_response.json()["profile"]["volume_1_title"] == "First Rewind in the Rain"
+
+
+def test_planning_profile_noop_save_keeps_ready_state(client: TestClient, mock_project_root: Path):
+    seeded_profile = build_bootstrap_planning_profile(title="Test Novel", genre="Urban Fantasy")
+    outline_path = mock_project_root / "大纲" / "总纲.md"
+    outline_path.parent.mkdir(parents=True, exist_ok=True)
+    outline_path.write_text("# 总纲\n", encoding="utf-8")
+
+    first_save = client.post("/api/project/planning-profile", json=seeded_profile)
+    assert first_save.status_code == 200
+    assert first_save.json()["readiness"]["ok"] is True
+
+    get_response = client.get("/api/project/planning-profile")
+    assert get_response.status_code == 200
+
+    second_save = client.post("/api/project/planning-profile", json=get_response.json()["profile"])
+    assert second_save.status_code == 200
+    assert second_save.json()["readiness"]["ok"] is True
 
 
 def test_planning_profile_endpoints_fail_when_state_file_is_corrupted(client: TestClient, mock_project_root: Path):

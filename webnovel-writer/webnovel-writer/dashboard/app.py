@@ -1277,7 +1277,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
             'project_switch_required': current_root is None or str(target_root) != str(current_root),
             'suggested_dashboard_url': _build_project_dashboard_url(target_root, bootstrap_hint='planning'),
             'planning_profile': planning_payload,
-            'next_recommended_action': '项目已初始化。下一步请先确认规划信息，再运行 plan。',
+            'next_recommended_action': '项目已初始化。下一步请先确认并按需调整规划信息，再运行 plan。',
         }
 
     @app.get('/api/llm/status')

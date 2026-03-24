@@ -6303,21 +6303,23 @@ class OrchestrationService:
         review_summary = artifacts.get("review_summary") or {}
         story_plan = self._get_task_story_plan(task, chapter)
         director_brief = self._get_task_director_brief(task, chapter)
+        selected_output = self._select_writeback_output(payload, polish_output, draft_output)
 
         requested_chapter_file = self._default_chapter_file(chapter)
         reported_chapter_file = str(
-            payload.get("chapter_file")
+            selected_output.get("chapter_file")
+            or payload.get("chapter_file")
             or polish_output.get("chapter_file")
             or draft_output.get("chapter_file")
             or requested_chapter_file
         )
         chapter_file = requested_chapter_file
-        content = payload.get("content") or polish_output.get("content") or draft_output.get("content") or ""
+        content = selected_output.get("content") or ""
         if not isinstance(content, str) or not content.strip():
             raise ValueError("data-sync 无法确定章节正文内容")
 
         word_count = self._canonical_word_count(content)
-        reported_word_count = self._parse_reported_word_count(payload, polish_output, draft_output)
+        reported_word_count = self._parse_reported_word_count(selected_output)
         self._validate_writeback_content(content, word_count, reported_word_count)
 
         requested_summary_file = self._default_summary_file(chapter)
@@ -6557,6 +6559,13 @@ class OrchestrationService:
 
     def _canonical_word_count(self, content: str) -> int:
         return len("".join(content.split()))
+
+    def _select_writeback_output(self, *payloads: Dict[str, Any]) -> Dict[str, Any]:
+        for payload in payloads:
+            content = payload.get("content")
+            if isinstance(content, str) and content.strip():
+                return payload
+        return {}
 
     def _parse_reported_word_count(self, *payloads: Dict[str, Any]) -> Optional[int]:
         for payload in payloads:
