@@ -11,8 +11,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:state": "node --test src/supervisorAuditState.test.js src/operatorAction.test.js src/operatorActionRuntime.test.js src/writingContinuation.test.js src/writingTaskDerived.test.js src/writingTaskListSummary.test.js src/recoverySemantics.test.js",
-    "test:ui": "vitest run --environment jsdom src/api.test.js src/appSections.test.jsx src/supervisorAuditDerived.test.jsx src/supervisorAuditPage.test.jsx src/supervisorPage.test.jsx src/taskCenterPageSection.test.jsx src/taskCenterRepairApproval.test.jsx src/app.integration.test.jsx",
+    "test": "npm run test:state && npm run test:ui",
+    "test:state": "node --test src/supervisorAuditState.test.js src/operatorAction.test.js src/operatorActionRuntime.test.js src/writingTaskDerived.test.js src/writingTaskListSummary.test.js src/recoverySemantics.test.js",
+    "test:ui": "vitest run --environment jsdom src/api.test.js src/appSections.test.jsx src/dashboardLanguageGuard.test.jsx src/launcherHealth.test.jsx src/supervisorAuditDerived.test.jsx src/supervisorAuditPage.test.jsx src/supervisorLanguageGuard.test.jsx src/supervisorPage.test.jsx src/taskCenterPageSection.test.jsx src/taskCenterRepairApproval.test.jsx src/taskCenterRepairCandidates.test.jsx src/writingContinuation.test.js src/app.integration.test.jsx",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

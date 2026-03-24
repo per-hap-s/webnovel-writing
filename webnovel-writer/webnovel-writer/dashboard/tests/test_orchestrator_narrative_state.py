@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -127,7 +128,7 @@ def test_apply_write_data_sync_persists_narrative_state(tmp_path: Path):
     with patch.object(service, "_validate_writeback_consistency", return_value=None), patch.object(
         service, "_sync_core_setting_docs", return_value=None
     ):
-        service._apply_write_data_sync(task["id"], task, payload)
+        asyncio.run(service._apply_write_data_sync(task["id"], task, payload))
 
     refreshed = service.store.get_task(task["id"]) or {}
     writeback = (refreshed.get("artifacts") or {}).get("writeback") or {}
@@ -173,7 +174,7 @@ def test_apply_write_data_sync_rolls_back_narrative_state_on_failure(tmp_path: P
         service, "_sync_core_setting_docs", return_value=None
     ):
         with pytest.raises(ValueError, match="forced failure"):
-            service._apply_write_data_sync(task["id"], task, payload)
+            asyncio.run(service._apply_write_data_sync(task["id"], task, payload))
 
     active = service.narrative_graph.get_active_foreshadowing(before_chapter=1, limit=5)
     assert active[0]["content"] == "旧内容"

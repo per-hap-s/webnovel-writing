@@ -148,4 +148,32 @@ describe('buildTaskContinuationSummary', () => {
         expect(summary.continuation).toBe(WRITING_CONTINUATION.noop)
         expect(summary.actionLabel).toBe('无需恢复')
     })
+
+    test('write task awaiting chapter brief approval makes replanning completion explicit', () => {
+        const summary = buildTaskContinuationSummary({
+            task: {
+                task_type: 'write',
+                status: 'awaiting_chapter_brief_approval',
+                current_step: 'chapter-brief-approval',
+                artifacts: {
+                    writeback: {
+                        story_alignment: { satisfied: [], missed: [], deferred: [] },
+                        director_alignment: { satisfied: [], missed: [], deferred: [] },
+                    },
+                },
+            },
+            storyPlan: { anchor_chapter: 1 },
+            directorBrief: { chapter_goal: '确认新的夜班封控推进点' },
+            storyAlignment: { satisfied: [], missed: [], deferred: [] },
+            directorAlignment: { satisfied: [], missed: [], deferred: [] },
+            storyRefresh: null,
+            guardedRun: null,
+            guardedBatchRun: null,
+            resumeRun: null,
+            operatorActions: [],
+        })
+
+        expect(summary.nextStep).toBe('确认新简报并开写')
+        expect(summary.summary).toContain('重规划已完成')
+    })
 })

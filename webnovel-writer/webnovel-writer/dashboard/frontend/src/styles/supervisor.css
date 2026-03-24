@@ -1,0 +1,84 @@
+.supervisor-grid {
+    display: grid;
+    gap: 12px;
+}
+
+.supervisor-card {
+    display: grid;
+    gap: 10px;
+    padding: 16px 18px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: white;
+}
+
+.supervisor-card.warning {
+    background: rgba(255, 244, 221, 0.85);
+}
+
+.supervisor-card.danger {
+    background: rgba(180, 35, 24, 0.06);
+    border-color: rgba(180, 35, 24, 0.2);
+}
+
+.supervisor-card.success {
+    background: rgba(45, 106, 79, 0.08);
+    border-color: rgba(45, 106, 79, 0.2);
+}
+
+.supervisor-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.supervisor-title {
+    font-weight: 700;
+}
+
+.supervisor-meta {
+    color: var(--ink);
+}
+
+.alignment-section {
+    display: grid;
+    gap: 6px;
+}
+
+.alignment-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.alignment-chip {
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    border: 1px solid transparent;
+}
+
+.alignment-chip.satisfied {
+    color: var(--success);
+    background: rgba(45, 106, 79, 0.12);
+    border-color: rgba(45, 106, 79, 0.2);
+}
+
+.alignment-chip.deferred {
+    color: var(--warning);
+    background: rgba(183, 121, 31, 0.12);
+    border-color: rgba(183, 121, 31, 0.22);
+}
+
+.alignment-chip.missed {
+    color: var(--danger);
+    background: rgba(180, 35, 24, 0.08);
+    border-color: rgba(180, 35, 24, 0.18);
+}
+
+.alignment-chip.neutral {
+    color: var(--accent);
+    background: rgba(22, 105, 122, 0.08);
+    border-color: rgba(22, 105, 122, 0.16);
+}

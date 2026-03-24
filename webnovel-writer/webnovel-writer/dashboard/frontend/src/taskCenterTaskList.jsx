@@ -20,6 +20,18 @@ function buildActionKey(action) {
     return action.id || `${action.kind}:${action.taskId || action.taskType || action.label || 'action'}`
 }
 
+function parseTaskTimestamp(task) {
+    const parsed = Date.parse(String(task?.runtime_status?.last_event_at || task?.updated_at || task?.created_at || ''))
+    return Number.isFinite(parsed) ? parsed : 0
+}
+
+function compareTaskListOrder(left, right) {
+    const leftTime = parseTaskTimestamp(left)
+    const rightTime = parseTaskTimestamp(right)
+    if (leftTime !== rightTime) return rightTime - leftTime
+    return String(left?.id || '').localeCompare(String(right?.id || ''))
+}
+
 export function TaskCenterTaskList({
     tasks,
     selectedTaskId,
@@ -34,11 +46,12 @@ export function TaskCenterTaskList({
     resolveCurrentStepLabel,
     resolveTargetLabel,
 }) {
+    const orderedTasks = [...(Array.isArray(tasks) ? tasks : [])].sort(compareTaskListOrder)
     return (
         <section className="panel list-panel">
             <div className="panel-title">任务中心</div>
             <div className="task-list">
-                {tasks.map((task) => {
+                {orderedTasks.map((task) => {
                     const liveTask = withLiveRuntimeStatus(task, runtimeNow)
                     const writingSummary = buildWritingTaskListSummary({ task: liveTask })
                     const primaryAction = writingSummary?.primaryAction || null
@@ -80,7 +93,7 @@ export function TaskCenterTaskList({
                         </div>
                     )
                 })}
-                {tasks.length === 0 && <div className="empty-state">{TASK_CENTER_COPY.empty}</div>}
+                {orderedTasks.length === 0 && <div className="empty-state">{TASK_CENTER_COPY.empty}</div>}
             </div>
         </section>
     )

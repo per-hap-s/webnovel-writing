@@ -1,0 +1,144 @@
+.files-layout {
+    grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+    min-height: calc(100vh - 48px);
+    align-items: stretch;
+}
+
+.file-tree-panel,
+.file-preview-panel {
+    min-height: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.file-tree-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.file-preview {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    max-height: none;
+}
+
+.file-empty-state {
+    display: grid;
+    gap: 8px;
+    align-content: start;
+    min-height: 220px;
+    padding: 18px 20px;
+    border-radius: 18px;
+    border: 1px dashed rgba(31, 27, 24, 0.14);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(248, 242, 233, 0.78));
+}
+
+.file-meta-card {
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: white;
+    border: 1px solid var(--line);
+}
+
+.file-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px 12px;
+    font-size: 0.88rem;
+}
+
+.table-wrap {
+    overflow: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(31, 27, 24, 0.08);
+    text-align: left;
+    vertical-align: top;
+}
+
+.tree-root,
+.tree-nodes {
+    display: grid;
+    gap: 8px;
+}
+
+.tree-node {
+    display: grid;
+    gap: 8px;
+}
+
+.tree-section {
+    padding: 10px;
+    border-radius: 14px;
+    background: white;
+    border: 1px solid var(--line);
+}
+
+.tree-title,
+.tree-folder {
+    font-weight: 700;
+}
+
+.tree-folder-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    text-align: left;
+}
+
+.tree-folder-icon {
+    color: var(--muted);
+    width: 1rem;
+    display: inline-flex;
+    justify-content: center;
+}
+
+.tree-file {
+    padding: 6px 0;
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    text-align: left;
+}
+
+.compact-empty-card {
+    display: grid;
+    gap: 6px;
+    padding: 14px 16px;
+    border-radius: 16px;
+    border: 1px dashed rgba(31, 27, 24, 0.14);
+    background: rgba(255, 255, 255, 0.64);
+}
+
+@media (max-width: 960px) {
+    .files-layout {
+        min-height: auto;
+    }
+
+    .file-tree-panel,
+    .file-preview-panel {
+        height: auto;
+    }
+
+    .file-tree-scroll,
+    .file-preview {
+        min-height: auto;
+    }
+}

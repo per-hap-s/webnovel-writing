@@ -12,37 +12,46 @@ test('deriveWritingTaskContext normalizes write artifacts and operator actions',
                 'story-director': {
                     structured_output: {
                         anchor_chapter: 10,
-                        chapters: [{ chapter: 12, goal: '推进主线' }],
+                        chapters: [{ chapter: 12, goal: 'advance-mainline' }],
                     },
                 },
                 'chapter-director': {
                     structured_output: {
-                        chapter_goal: '揭示线索',
+                        chapter_goal: 'reveal-clue',
                     },
                 },
             },
             writeback: {
-                story_alignment: { satisfied: ['主线推进'], missed: ['支线回收'], deferred: [] },
-                director_alignment: { satisfied: ['兑现钩子'], missed: [], deferred: ['伏笔延后'] },
+                story_alignment: { satisfied: ['mainline'], missed: ['payoff'], deferred: [] },
+                director_alignment: { satisfied: ['hook'], missed: [], deferred: ['foreshadow'] },
                 story_refresh: {
                     should_refresh: true,
                     recommended_resume_from: 'story-director',
-                    suggested_action: '先刷新滚动规划',
+                    suggested_action: 'refresh-story-plan',
                 },
             },
         },
-        operatorActions: [{ label: '继续下一章', variant: 'primary' }],
+        operatorActions: [
+            {
+                kind: 'launch-task',
+                label: 'Continue next chapter',
+                variant: 'primary',
+                taskType: 'write',
+                payload: { chapter: 13 },
+            },
+        ],
     }
 
     const derived = deriveWritingTaskContext(task)
 
     assert.equal(derived.storyPlan.anchor_chapter, 10)
-    assert.equal(derived.directorBrief.chapter_goal, '揭示线索')
-    assert.deepEqual(derived.storyAlignment.missed, ['支线回收'])
-    assert.deepEqual(derived.directorAlignment.deferred, ['伏笔延后'])
+    assert.equal(derived.directorBrief.chapter_goal, 'reveal-clue')
+    assert.deepEqual(derived.storyAlignment.missed, ['payoff'])
+    assert.deepEqual(derived.directorAlignment.deferred, ['foreshadow'])
     assert.equal(derived.storyRefresh.recommended_resume_from, 'story-director')
-    assert.equal(derived.currentStorySlot.goal, '推进主线')
-    assert.equal(derived.operatorActions[0].label, '继续下一章')
+    assert.equal(derived.currentStorySlot.goal, 'advance-mainline')
+    assert.equal(derived.operatorActions[0].kind, 'launch-task')
+    assert.equal(derived.operatorActions[0].variant, 'primary')
 })
 
 test('deriveWritingTaskContext resolves guarded write and guarded batch fallback artifacts', () => {
@@ -76,7 +85,7 @@ test('deriveWritingTaskContext resolves resume step output and defaults missing 
                 resume: {
                     structured_output: {
                         resume_from_step: 'chapter-director',
-                        blocking_reason: '等待恢复目标',
+                        blocking_reason: 'waiting-for-target',
                     },
                 },
             },

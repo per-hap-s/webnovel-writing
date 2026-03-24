@@ -246,6 +246,16 @@ def test_retry_task_accepts_resume_from_step(client: TestClient, mock_orchestrat
     mock_orchestrator.retry_task.assert_called_once_with("task-1", resume_from_step="story-director")
 
 
+def test_retry_task_returns_conflict_for_non_retryable_task(client: TestClient, mock_orchestrator: MagicMock):
+    mock_orchestrator.retry_task.side_effect = ValueError("任务已取消，不能直接重试。")
+
+    response = client.post("/api/tasks/task-1/retry", json={})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "TASK_RETRY_NOT_ALLOWED"
+    assert "已取消" in response.json()["message"]
+
+
 def test_task_summary_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
     mock_orchestrator.list_task_summaries.return_value = [{"id": "task-1", "status": "retrying"}]
 
@@ -615,6 +625,9 @@ def test_bootstrap_project_success(client: TestClient, mock_project_root: Path):
     assert data["planning_profile"]["profile"]["volume_1_title"]
     assert data["planning_profile"]["readiness"]["ok"] is True
     assert "plan" in data["next_recommended_action"]
+    with sqlite3.connect(str(target_root / ".webnovel" / "index.db")) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "chapters" in tables
 
 
 def test_bootstrap_project_conflict_for_existing_project(client: TestClient, mock_project_root: Path):
@@ -785,6 +798,84 @@ def test_project_info_supports_request_scoped_project_root(client: TestClient, m
     assert response.json()["dashboard_context"]["project_initialized"] is True
 
 
+def test_create_app_keeps_project_context_isolated_per_instance(mock_project_root: Path):
+    other_root = mock_project_root.parent / "other-project"
+    (other_root / ".webnovel").mkdir(parents=True)
+    (other_root / ".webnovel" / "state.json").write_text(
+        json.dumps({"project_info": {"title": "Other Root"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    orchestrator_one = MagicMock(spec=OrchestrationService)
+    orchestrator_two = MagicMock(spec=OrchestrationService)
+    orchestrator_one.probe_llm.return_value = {}
+    orchestrator_one.probe_rag.return_value = {}
+    orchestrator_two.probe_llm.return_value = {}
+    orchestrator_two.probe_rag.return_value = {}
+
+    with patch("dashboard.app.OrchestrationService", side_effect=[orchestrator_one, orchestrator_two]):
+        app_one = create_app(project_root=mock_project_root)
+        app_two = create_app(project_root=other_root)
+        with TestClient(app_one) as client_one, TestClient(app_two) as client_two:
+            response_one = client_one.get("/api/project/info")
+            response_two = client_two.get("/api/project/info")
+
+    assert response_one.status_code == 200
+    assert response_one.json()["project_info"]["title"] == "Test Novel"
+    assert response_one.json()["dashboard_context"]["project_root"] == str(mock_project_root)
+    assert response_two.status_code == 200
+    assert response_two.json()["project_info"]["title"] == "Other Root"
+    assert response_two.json()["dashboard_context"]["project_root"] == str(other_root)
+
+
+def test_save_llm_settings_does_not_leak_into_other_project_defaults(mock_project_root: Path, monkeypatch: pytest.MonkeyPatch):
+    other_root = mock_project_root.parent / "other-project"
+    (other_root / ".webnovel").mkdir(parents=True)
+    (other_root / ".webnovel" / "state.json").write_text(
+        json.dumps({"project_info": {"title": "Other Root"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    for key in (
+        "WEBNOVEL_LLM_PROVIDER",
+        "WEBNOVEL_LLM_BASE_URL",
+        "WEBNOVEL_LLM_MODEL",
+        "WEBNOVEL_LLM_API_KEY",
+        "OPENAI_MODEL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    orchestrator_one = MagicMock(spec=OrchestrationService)
+    orchestrator_two = MagicMock(spec=OrchestrationService)
+    orchestrator_one.probe_llm.return_value = {"connection_status": "connected"}
+    orchestrator_one.probe_rag.return_value = {}
+    orchestrator_two.probe_llm.return_value = {"connection_status": "connected"}
+    orchestrator_two.probe_rag.return_value = {}
+
+    with patch("dashboard.app.OrchestrationService", side_effect=[orchestrator_one, orchestrator_two]):
+        app_one = create_app(project_root=mock_project_root)
+        app_two = create_app(project_root=other_root)
+        with TestClient(app_one) as client_one, TestClient(app_two) as client_two:
+            save_response = client_one.post(
+                "/api/settings/llm",
+                json={
+                    "provider": "openai-compatible",
+                    "base_url": "https://example.com/v1",
+                    "model": "gpt-isolated",
+                    "api_key": "secret-key-1234",
+                },
+            )
+            leaked_response = client_two.get("/api/settings/llm")
+
+    assert save_response.status_code == 200
+    assert leaked_response.status_code == 200
+    leaked_payload = leaked_response.json()
+    assert leaked_payload["model"] == ""
+    assert leaked_payload["has_api_key"] is False
+
+
 def test_file_read_returns_metadata_for_text_file(client: TestClient, mock_project_root: Path):
     target = mock_project_root / "正文" / "第0001章.md"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -872,6 +963,56 @@ def test_relationships_endpoint_returns_entity_display_names(client: TestClient,
     payload = response.json()
     assert payload[0]["from_entity_name"] == "沈言"
     assert payload[0]["to_entity_name"] == "沈母"
+
+
+def test_entities_endpoint_honors_type_and_include_archived_filters(client: TestClient, mock_project_root: Path):
+    conn = sqlite3.connect(str(mock_project_root / ".webnovel" / "index.db"))
+    conn.executemany(
+        "INSERT INTO entities (id, canonical_name, type, is_archived, last_appearance) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("hero", "娌堣█", "character", 0, 3),
+            ("mentor", "娌堟瘝", "character", 0, 2),
+            ("retired", "鏃у弸", "character", 1, 1),
+            ("hall", "鍒嗗眬", "location", 0, 5),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    active_response = client.get("/api/entities", params={"type": "character"})
+    archived_response = client.get("/api/entities", params={"type": "character", "include_archived": "true"})
+
+    assert active_response.status_code == 200
+    assert archived_response.status_code == 200
+    assert [item["id"] for item in active_response.json()] == ["hero", "mentor"]
+    assert [item["id"] for item in archived_response.json()] == ["hero", "mentor", "retired"]
+
+
+def test_aliases_endpoint_supports_entity_filter_and_full_listing(client: TestClient, mock_project_root: Path):
+    conn = sqlite3.connect(str(mock_project_root / ".webnovel" / "index.db"))
+    conn.execute(
+        "CREATE TABLE aliases (alias TEXT, entity_id TEXT, entity_type TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.executemany(
+        "INSERT INTO aliases (alias, entity_id, entity_type) VALUES (?, ?, ?)",
+        [
+            ("闃跨牚", "hero", "character"),
+            ("娌堝", "mentor", "character"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    filtered_response = client.get("/api/aliases", params={"entity": "hero"})
+    all_response = client.get("/api/aliases")
+
+    assert filtered_response.status_code == 200
+    assert all_response.status_code == 200
+    filtered_payload = filtered_response.json()
+    assert len(filtered_payload) == 1
+    assert filtered_payload[0]["alias"] == "闃跨牚"
+    assert filtered_payload[0]["entity_id"] == "hero"
+    assert {item["entity_id"] for item in all_response.json()} == {"hero", "mentor"}
 
 
 def test_file_tree_uses_hierarchical_display_names_for_volume_and_chapter(client: TestClient, mock_project_root: Path):

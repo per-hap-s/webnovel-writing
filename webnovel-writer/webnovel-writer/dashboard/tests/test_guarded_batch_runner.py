@@ -82,7 +82,7 @@ def test_guarded_batch_runner_completes_requested_chapters(tmp_path: Path):
     service = OrchestrationService(project_root, runner=runner)
     service._load_workflow = lambda task_type: guarded_batch_workflow() if task_type == "guarded-batch-write" else guarded_workflow() if task_type == "guarded-write" else write_workflow()  # type: ignore[method-assign]
 
-    def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
+    async def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
         chapter = int((task.get("request") or {}).get("chapter") or 0)
         latest = service.store.get_task(task_id) or task
         artifacts = dict(latest.get("artifacts") or {})
@@ -119,7 +119,7 @@ def test_guarded_batch_runner_stops_when_child_requests_story_refresh(tmp_path: 
     service = OrchestrationService(project_root, runner=runner)
     service._load_workflow = lambda task_type: guarded_batch_workflow() if task_type == "guarded-batch-write" else guarded_workflow() if task_type == "guarded-write" else write_workflow()  # type: ignore[method-assign]
 
-    def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
+    async def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
         latest = service.store.get_task(task_id) or task
         artifacts = dict(latest.get("artifacts") or {})
         artifacts["writeback"] = {

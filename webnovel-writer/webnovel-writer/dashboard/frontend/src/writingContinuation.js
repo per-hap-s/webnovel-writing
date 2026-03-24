@@ -295,12 +295,12 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
     if (task?.status === 'awaiting_chapter_brief_approval') {
         return buildSummary({
             tone: 'warning',
-            heading: '开写前需要先确认章节简报',
+            heading: '已生成新简报，确认后开始正文',
             continuation: WRITING_CONTINUATION.waitingApproval,
-            nextStep: primaryAction?.label || '批准开写',
-            summary: '本章章节简报已生成，只有先批准本章目标、冲突和信息边界，正文阶段才会启动。',
-            reasons: ['当前任务停在章节简报确认', ...contractSignals],
-            actionLabel: primaryAction?.label || '批准开写',
+            nextStep: primaryAction?.label || '确认新简报并开写',
+            summary: '后续重规划已完成，本章新的章节简报也已生成。当前只差你确认新的本章目标、冲突和信息边界，确认后才会开始正文。',
+            reasons: ['当前任务停在新章节简报确认', ...contractSignals],
+            actionLabel: primaryAction?.label || '确认新简报并开写',
         })
     }
     if (task?.status === 'queued' || task?.status === 'running') {

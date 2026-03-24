@@ -102,6 +102,21 @@ class IndexChapterMixin:
                 for row in cursor.fetchall()
             ]
 
+    def list_chapters(self) -> List[Dict]:
+        """按章节正序返回全部章节。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM chapters
+                ORDER BY chapter ASC
+            """
+            )
+            return [
+                self._row_to_dict(row, parse_json=["characters"])
+                for row in cursor.fetchall()
+            ]
+
     # ==================== 场景操作 ====================
 
     def add_scenes(self, chapter: int, scenes: List["SceneMeta"]):
@@ -162,6 +177,26 @@ class IndexChapterMixin:
                 ORDER BY scene_index
             """,
                 (chapter,),
+            )
+            return [
+                self._row_to_dict(row, parse_json=["characters"])
+                for row in cursor.fetchall()
+            ]
+
+    def list_scenes(self, chapter: Optional[int] = None, limit: int = 500) -> List[Dict]:
+        """列出场景；传 chapter 时仅返回单章。"""
+        if chapter is not None:
+            return self.get_scenes(chapter)
+
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM scenes
+                ORDER BY chapter ASC, scene_index ASC
+                LIMIT ?
+            """,
+                (limit,),
             )
             return [
                 self._row_to_dict(row, parse_json=["characters"])

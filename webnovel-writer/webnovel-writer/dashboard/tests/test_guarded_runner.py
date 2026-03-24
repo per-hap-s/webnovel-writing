@@ -193,7 +193,7 @@ def test_guarded_runner_completes_exactly_one_child_chapter_and_proposes_next_st
     }
     service._load_workflow = lambda task_type: guarded_workflow() if task_type == "guarded-write" else write_workflow_spec  # type: ignore[method-assign]
 
-    def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
+    async def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
         latest = service.store.get_task(task_id) or task
         artifacts = dict(latest.get("artifacts") or {})
         artifacts["writeback"] = {
@@ -234,7 +234,7 @@ def test_resume_task_emits_resume_contract_and_operator_actions(tmp_path: Path):
     service = OrchestrationService(project_root, runner=runner)
     service._load_workflow = lambda task_type: write_workflow() if task_type == "write" else {"name": "resume", "version": 1, "steps": [{"name": "resume", "type": "internal"}]}  # type: ignore[method-assign]
 
-    def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
+    async def fake_apply_write_data_sync(task_id: str, task: dict, payload: dict) -> None:
         latest = service.store.get_task(task_id) or task
         artifacts = dict(latest.get("artifacts") or {})
         artifacts["writeback"] = {

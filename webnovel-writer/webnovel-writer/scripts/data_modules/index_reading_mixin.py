@@ -239,10 +239,19 @@ class IndexReadingMixin:
         """
         with self._get_conn() as conn:
             cursor = conn.cursor()
+            columns = {row[1] for row in cursor.execute("PRAGMA table_info(review_metrics)").fetchall()}
+            order_terms: List[str] = []
+            if "end_chapter" in columns:
+                order_terms.append("end_chapter DESC")
+            if "start_chapter" in columns:
+                order_terms.append("start_chapter DESC")
+            if not order_terms and "id" in columns:
+                order_terms.append("id DESC")
+            order_sql = ", ".join(order_terms) if order_terms else "created_at DESC"
             cursor.execute(
-                """
+                f"""
                 SELECT * FROM review_metrics
-                ORDER BY end_chapter DESC, start_chapter DESC
+                ORDER BY {order_sql}
                 LIMIT ?
             """,
                 (limit,),

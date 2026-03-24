@@ -56,6 +56,7 @@ from scripts.project_locator import (
 
 from .orchestrator import OrchestrationService
 from .path_guard import safe_resolve
+from .query_service import DashboardQueryService
 from .task_models import (
     SupervisorBatchDismissRequest,
     SupervisorChecklistSaveRequest,
@@ -126,9 +127,6 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
             )
 
 
-_project_root: Path | None = None
-_workspace_root: Path | None = None
-_watcher = FileWatcher()
 STATIC_DIR = Path(__file__).parent / 'frontend' / 'dist'
 FILE_TREE_FOLDERS = ('正文', '大纲', '设定集')
 PROJECT_STATE_SECTION = '项目状态'
@@ -209,35 +207,19 @@ def _get_cors_origins() -> list[str]:
     
     logger.info(f'CORS 允许的来源: {origins}')
     return origins
-
-
-def _get_workspace_root() -> Path:
-    if _workspace_root is not None:
-        return _workspace_root
-    if _project_root is not None:
-        return _project_root.parent
-    return resolve_workspace_root(cwd=Path.cwd())
-
-
-def _get_project_root() -> Path:
-    if _project_root is None:
-        raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
-    return _project_root
-
-
-def _try_get_project_root() -> Path | None:
-    return _project_root
-
-
 def _resolve_project_root_input(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
 def _webnovel_dir(project_root: Path | None = None) -> Path:
-    return (project_root or _get_project_root()) / '.webnovel'
+    if project_root is None:
+        raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
+    return project_root / '.webnovel'
 
 def _project_env_path(project_root: Path | None = None) -> Path:
-    return (project_root or _get_project_root()) / '.env'
+    if project_root is None:
+        raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
+    return project_root / '.env'
 
 
 def _state_path(project_root: Path | None = None) -> Path:
@@ -245,31 +227,32 @@ def _state_path(project_root: Path | None = None) -> Path:
 
 
 def create_app(project_root: str | Path | None = None, workspace_root: str | Path | None = None) -> FastAPI:
-    global _project_root, _workspace_root
-
-    _project_root = Path(project_root).resolve() if project_root else None
+    default_project_root = Path(project_root).resolve() if project_root else None
     if workspace_root:
-        _workspace_root = Path(workspace_root).resolve()
-    elif _project_root is not None:
-        _workspace_root = _project_root.parent
+        default_workspace_root = Path(workspace_root).resolve()
+    elif default_project_root is not None:
+        default_workspace_root = default_project_root.parent
     else:
-        _workspace_root = resolve_workspace_root(cwd=Path.cwd())
+        default_workspace_root = resolve_workspace_root(cwd=Path.cwd())
+    watcher = FileWatcher()
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         app.state.dashboard_loop = asyncio.get_running_loop()
         app.state.orchestrators = {}
-        app.state.workspace_root = _get_workspace_root()
+        app.state.project_root = default_project_root
+        app.state.workspace_root = default_workspace_root
+        app.state.watcher = watcher
         app.state.orchestrator = None
-        if _try_get_project_root() is not None:
-            webnovel = _webnovel_dir(_get_project_root())
+        if default_project_root is not None:
+            webnovel = _webnovel_dir(default_project_root)
             if webnovel.is_dir():
-                _watcher.start(webnovel, app.state.dashboard_loop)
-            app.state.orchestrator = _get_orchestrator_for_root(_get_project_root(), refresh=True)
+                watcher.start(webnovel, app.state.dashboard_loop)
+            app.state.orchestrator = _get_orchestrator_for_root(default_project_root, refresh=True)
         try:
             yield
         finally:
-            _watcher.stop()
+            watcher.stop()
 
     app = FastAPI(title='网文管理面板', version='0.2.0', lifespan=_lifespan)
     app.add_middleware(
@@ -279,6 +262,22 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         allow_headers=['*'],
     )
     app.add_middleware(TimeoutMiddleware)
+
+    def _get_workspace_root() -> Path:
+        workspace_root_value = getattr(app.state, 'workspace_root', None)
+        if workspace_root_value is not None:
+            return Path(workspace_root_value).resolve()
+        return default_workspace_root
+
+    def _get_project_root() -> Path:
+        project_root_value = getattr(app.state, 'project_root', None)
+        if project_root_value is None:
+            raise APIError(409, 'PROJECT_NOT_SELECTED', '当前还没有打开任何项目。')
+        return Path(project_root_value).resolve()
+
+    def _try_get_project_root() -> Path | None:
+        project_root_value = getattr(app.state, 'project_root', None)
+        return Path(project_root_value).resolve() if project_root_value is not None else None
 
     def _resolve_request_project_root(http_request: Request | None = None, *, explicit_root: Optional[str] = None) -> Path:
         candidate = explicit_root or (http_request.query_params.get('project_root') if http_request else None)
@@ -296,7 +295,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         loop = getattr(app.state, 'dashboard_loop', None)
         webnovel_dir = _webnovel_dir(project_root_value)
         if loop is not None and webnovel_dir.is_dir():
-            _watcher.watch(webnovel_dir, loop)
+            app.state.watcher.watch(webnovel_dir, loop)
 
     def _get_orchestrator_for_root(project_root_value: Path, *, refresh: bool = False) -> OrchestrationService:
         registry: dict[str, OrchestrationService] = getattr(app.state, 'orchestrators', {})
@@ -315,6 +314,10 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
     def _get_request_orchestrator(http_request: Request | None = None, *, explicit_root: Optional[str] = None, refresh: bool = False) -> OrchestrationService:
         project_root_value = _resolve_request_project_root(http_request, explicit_root=explicit_root)
         return _get_orchestrator_for_root(project_root_value, refresh=refresh)
+
+    def _get_query_service(http_request: Request | None = None, *, explicit_root: Optional[str] = None) -> DashboardQueryService:
+        project_root_value = _resolve_request_project_root(http_request, explicit_root=explicit_root)
+        return DashboardQueryService(project_root_value)
 
     def _workspace_state() -> dict[str, Any]:
         return get_workspace_registry_state(workspace_root=_get_workspace_root())
@@ -849,9 +852,10 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         }
 
     def _refresh_runtime_settings(project_root_value: Path, updates: dict[str, str]) -> None:
-        for key, value in updates.items():
-            os.environ[key] = value
-        _get_orchestrator_for_root(project_root_value, refresh=True)
+        orchestrator = _get_orchestrator_for_root(project_root_value)
+        refresh_runtime_settings = getattr(orchestrator, 'refresh_runtime_settings', None)
+        if callable(refresh_runtime_settings):
+            refresh_runtime_settings(updated_keys=set(updates))
 
     def _fetchall_safe(conn: sqlite3.Connection, query: str, params: tuple = ()) -> list[dict]:
         """
@@ -1232,7 +1236,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.post('/api/project/bootstrap')
     async def bootstrap_project(http_request: Request, request: BootstrapProjectRequest):
-        target_root = Path(request.project_root or _get_project_root()).resolve()
+        target_root = Path(request.project_root or _resolve_request_project_root(http_request)).resolve()
         state_path = target_root / '.webnovel' / 'state.json'
         if state_path.is_file():
             raise HTTPException(409, '项目已初始化，不能重复创建。')
@@ -1514,6 +1518,8 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
             return _get_request_orchestrator(http_request).retry_task(task_id, resume_from_step=request.resume_from_step if request else None)
         except KeyError as exc:
             raise HTTPException(404, '未找到任务。') from exc
+        except ValueError as exc:
+            raise APIError(409, 'TASK_RETRY_NOT_ALLOWED', str(exc)) from exc
 
     @app.post('/api/tasks/{task_id}/cancel')
     async def cancel_task(task_id: str, http_request: Request, request: CancelTaskRequest | None = None):
@@ -1556,142 +1562,54 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/entities')
     def list_entities(request: Request, entity_type: Optional[str] = Query(None, alias='type'), include_archived: bool = False):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            q = 'SELECT * FROM entities'
-            params: list = []
-            clauses: list[str] = []
-            if entity_type:
-                clauses.append('type = ?')
-                params.append(entity_type)
-            if not include_archived:
-                clauses.append('is_archived = 0')
-            if clauses:
-                q += ' WHERE ' + ' AND '.join(clauses)
-            q += ' ORDER BY last_appearance DESC'
-            rows = conn.execute(q, params).fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_entities(
+            entity_type=entity_type,
+            include_archived=include_archived,
+        )
 
     @app.get('/api/entities/{entity_id}')
     def get_entity(entity_id: str, request: Request):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            row = conn.execute('SELECT * FROM entities WHERE id = ?', (entity_id,)).fetchone()
-            if not row:
-                raise HTTPException(404, '未找到实体。')
-            return dict(row)
+        row = _get_query_service(request).get_entity(entity_id)
+        if row is None:
+            raise HTTPException(404, '未找到实体。')
+        return row
 
     @app.get('/api/relationships')
     def list_relationships(request: Request, entity: Optional[str] = None, limit: int = 200):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            has_alias_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'aliases'"
-            ).fetchone() is not None
-            alias_join_sql = (
-                'LEFT JOIN (SELECT entity_id, MIN(alias) AS alias FROM aliases GROUP BY entity_id) fa ON fa.entity_id = r.from_entity '
-                'LEFT JOIN (SELECT entity_id, MIN(alias) AS alias FROM aliases GROUP BY entity_id) ta ON ta.entity_id = r.to_entity'
-            ) if has_alias_table else ''
-            base_query = (
-                'SELECT r.*, '
-                'COALESCE(fe.canonical_name, r.from_entity) AS from_entity_name, '
-                'COALESCE(te.canonical_name, r.to_entity) AS to_entity_name, '
-                f"{'fa.alias AS from_entity_alias, ta.alias AS to_entity_alias ' if has_alias_table else 'NULL AS from_entity_alias, NULL AS to_entity_alias '}"
-                'FROM relationships r '
-                'LEFT JOIN entities fe ON fe.id = r.from_entity '
-                'LEFT JOIN entities te ON te.id = r.to_entity '
-                f'{alias_join_sql}'
-            )
-            if entity:
-                rows = conn.execute(
-                    f'{base_query} WHERE r.from_entity = ? OR r.to_entity = ? ORDER BY r.chapter DESC LIMIT ?',
-                    (entity, entity, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(f'{base_query} ORDER BY r.chapter DESC LIMIT ?', (limit,)).fetchall()
-            items = []
-            for row in rows:
-                item = dict(row)
-                item['from_entity_display'] = _resolve_relationship_entity_display(
-                    canonical_name=item.get('from_entity_name'),
-                    alias=item.get('from_entity_alias'),
-                    raw_id=item.get('from_entity'),
-                )
-                item['to_entity_display'] = _resolve_relationship_entity_display(
-                    canonical_name=item.get('to_entity_name'),
-                    alias=item.get('to_entity_alias'),
-                    raw_id=item.get('to_entity'),
-                )
-                item['type_label'] = _translate_relationship_type(item.get('type'))
-                item['from_entity_label'] = '起始实体'
-                item['to_entity_label'] = '目标实体'
-                item['type_label_label'] = '关系类型'
-                items.append(item)
-            return items
+        return _get_query_service(request).list_relationships(entity=entity, limit=limit)
 
     @app.get('/api/relationship-events')
     def list_relationship_events(request: Request, entity: Optional[str] = None, from_chapter: Optional[int] = None, to_chapter: Optional[int] = None, limit: int = 200):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            q = 'SELECT * FROM relationship_events'
-            params: list = []
-            clauses: list[str] = []
-            if entity:
-                clauses.append('(from_entity = ? OR to_entity = ?)')
-                params.extend([entity, entity])
-            if from_chapter is not None:
-                clauses.append('chapter >= ?')
-                params.append(from_chapter)
-            if to_chapter is not None:
-                clauses.append('chapter <= ?')
-                params.append(to_chapter)
-            if clauses:
-                q += ' WHERE ' + ' AND '.join(clauses)
-            q += ' ORDER BY chapter DESC, id DESC LIMIT ?'
-            params.append(limit)
-            rows = conn.execute(q, params).fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_relationship_events(
+            entity=entity,
+            from_chapter=from_chapter,
+            to_chapter=to_chapter,
+            limit=limit,
+        )
 
     @app.get('/api/chapters')
     def list_chapters(request: Request):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            rows = conn.execute('SELECT * FROM chapters ORDER BY chapter ASC').fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_chapters()
 
     @app.get('/api/scenes')
     def list_scenes(request: Request, chapter: Optional[int] = None, limit: int = 500):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            if chapter is not None:
-                rows = conn.execute('SELECT * FROM scenes WHERE chapter = ? ORDER BY scene_index ASC', (chapter,)).fetchall()
-            else:
-                rows = conn.execute('SELECT * FROM scenes ORDER BY chapter ASC, scene_index ASC LIMIT ?', (limit,)).fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_scenes(chapter=chapter, limit=limit)
 
     @app.get('/api/reading-power')
     def list_reading_power(request: Request, limit: int = 50):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            rows = conn.execute('SELECT * FROM chapter_reading_power ORDER BY chapter DESC LIMIT ?', (limit,)).fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_reading_power(limit=limit)
 
     @app.get('/api/review-metrics')
     def list_review_metrics(request: Request, limit: int = 20):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            rows = conn.execute('SELECT * FROM review_metrics ORDER BY end_chapter DESC LIMIT ?', (limit,)).fetchall()
-            return [_with_display_timestamps(dict(r), fields=('created_at',)) for r in rows]
+        return _get_query_service(request).list_review_metrics(limit=limit)
 
     @app.get('/api/state-changes')
     def list_state_changes(request: Request, entity: Optional[str] = None, limit: int = 100):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            if entity:
-                rows = conn.execute('SELECT * FROM state_changes WHERE entity_id = ? ORDER BY chapter DESC LIMIT ?', (entity, limit)).fetchall()
-            else:
-                rows = conn.execute('SELECT * FROM state_changes ORDER BY chapter DESC LIMIT ?', (limit,)).fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_state_changes(entity=entity, limit=limit)
 
     @app.get('/api/aliases')
     def list_aliases(request: Request, entity: Optional[str] = None):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            if entity:
-                rows = conn.execute('SELECT * FROM aliases WHERE entity_id = ?', (entity,)).fetchall()
-            else:
-                rows = conn.execute('SELECT * FROM aliases').fetchall()
-            return [dict(r) for r in rows]
+        return _get_query_service(request).list_aliases(entity=entity)
 
     @app.get('/api/overrides')
     def list_overrides(request: Request, status: Optional[str] = None, limit: int = 100):
@@ -1716,10 +1634,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/invalid-facts')
     def list_invalid_facts(request: Request, status: Optional[str] = None, limit: int = 100):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            if status:
-                return _fetchall_safe(conn, 'SELECT * FROM invalid_facts WHERE status = ? ORDER BY marked_at DESC LIMIT ?', (status, limit))
-            return _fetchall_safe(conn, 'SELECT * FROM invalid_facts ORDER BY marked_at DESC LIMIT ?', (limit,))
+        return _get_query_service(request).list_invalid_facts(status=status, limit=limit)
 
     @app.get('/api/rag-queries')
     def list_rag_queries(request: Request, query_type: Optional[str] = None, limit: int = 100):
@@ -1741,8 +1656,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/checklist-scores')
     def list_checklist_scores(request: Request, limit: int = 100):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            return _fetchall_safe(conn, 'SELECT * FROM writing_checklist_scores ORDER BY chapter DESC LIMIT ?', (limit,))
+        return _get_query_service(request).list_checklist_scores(limit=limit)
 
     @app.get('/api/story-plans')
     def list_story_plans(request: Request, limit: int = 20):
@@ -1764,42 +1678,15 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/timeline-events')
     def list_timeline_events(request: Request, chapter: Optional[int] = None, entity: Optional[str] = None, limit: int = 100):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            return _list_narrative_rows(
-                conn,
-                table_name='timeline_events',
-                chapter=chapter,
-                entity=entity,
-                limit=limit,
-                chapter_clause_builder=_build_timeline_chapter_clause,
-                order_columns=('chapter', 'event_chapter', 'occurred_chapter', 'updated_at', 'created_at'),
-            )
+        return _get_query_service(request).list_timeline_events(chapter=chapter, entity=entity, limit=limit)
 
     @app.get('/api/character-arcs')
     def list_character_arcs(request: Request, chapter: Optional[int] = None, entity: Optional[str] = None, limit: int = 100):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            return _list_narrative_rows(
-                conn,
-                table_name='character_arcs',
-                chapter=chapter,
-                entity=entity,
-                limit=limit,
-                chapter_clause_builder=_build_character_arc_chapter_clause,
-                order_columns=('chapter', 'start_chapter', 'updated_at', 'created_at'),
-            )
+        return _get_query_service(request).list_character_arcs(chapter=chapter, entity=entity, limit=limit)
 
     @app.get('/api/knowledge-states')
     def list_knowledge_states(request: Request, chapter: Optional[int] = None, entity: Optional[str] = None, limit: int = 100):
-        with closing(_get_db(_resolve_request_project_root(request))) as conn:
-            return _list_narrative_rows(
-                conn,
-                table_name='knowledge_states',
-                chapter=chapter,
-                entity=entity,
-                limit=limit,
-                chapter_clause_builder=_build_knowledge_state_chapter_clause,
-                order_columns=('chapter', 'known_chapter', 'discovered_chapter', 'updated_at', 'created_at'),
-            )
+        return _get_query_service(request).list_knowledge_states(chapter=chapter, entity=entity, limit=limit)
 
     @app.get('/api/files/tree')
     def file_tree(request: Request):
@@ -1856,7 +1743,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
     @app.get('/api/events')
     async def sse(request: Request):
         _ensure_project_watch(_resolve_request_project_root(request))
-        q = _watcher.subscribe()
+        q = app.state.watcher.subscribe()
 
         async def _gen():
             try:
@@ -1871,7 +1758,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
             except asyncio.CancelledError:
                 pass
             finally:
-                _watcher.unsubscribe(q)
+                app.state.watcher.unsubscribe(q)
 
         return StreamingResponse(_gen(), media_type='text/event-stream')
 

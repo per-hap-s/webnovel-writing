@@ -275,24 +275,56 @@ test('chapter brief approval tasks surface approve and reject actions in the fir
 
     renderTaskCenter([task], task)
 
-    expect(await screen.findByRole('button', { name: '批准开写' })).not.toBeNull()
-    expect(screen.getByRole('button', { name: '驳回重做章节简报' })).not.toBeNull()
+    expect(await screen.findByRole('button', { name: '确认新简报并开写' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: '驳回并重做新简报' })).not.toBeNull()
+})
+
+test('task list orders newer tasks above older tasks even when list_priority conflicts', async () => {
+    const olderTask = {
+        id: 'task-older-1',
+        task_type: 'plan',
+        status: 'failed',
+        current_step: 'plan',
+        updated_at: '2026-03-21T10:00:00Z',
+        list_priority: 1,
+        runtime_status: {},
+        request: { volume: 1 },
+    }
+    const newerTask = {
+        id: 'task-newer-1',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'data-sync',
+        updated_at: '2026-03-21T12:00:00Z',
+        list_priority: 99,
+        runtime_status: {},
+        request: { chapter: 1 },
+    }
+
+    const view = renderTaskCenter([olderTask, newerTask], newerTask)
+
+    await waitFor(() => {
+        const items = [...view.container.querySelectorAll('.task-item')]
+        expect(items).toHaveLength(2)
+        expect(within(items[0]).getByText('撰写章节')).not.toBeNull()
+        expect(within(items[1]).getByText('多章规划')).not.toBeNull()
+    })
 })
 
 
 test('central translation helpers expose final pure-Chinese writing terms', () => {
-    expect(translateTaskStatus('awaiting_chapter_brief_approval')).toBe('等待确认开写')
+    expect(translateTaskStatus('awaiting_chapter_brief_approval')).toBe('待确认新简报')
     expect(translateStepName('story-director')).toBe('多章规划')
     expect(translateStepName('chapter-director')).toBe('单章指挥')
     expect(translateStepName('chapter-brief-approval')).toBe('章节简报确认')
-    expect(translateEventMessage('Waiting for chapter brief approval')).toBe('等待确认章节简报')
+    expect(translateEventMessage('Waiting for chapter brief approval')).toBe('后续重规划已完成，等待确认新的章节简报')
     expect(translateEventMessage('Chapter brief approved')).toBe('章节简报已批准，可开始正文写作')
     expect(resolveApprovalStatusLabel({
         task_type: 'write',
         status: 'awaiting_chapter_brief_approval',
         approval_status: 'pending',
         request: { require_manual_approval: false },
-    })).toBe('等待确认章节简报')
+    })).toBe('待确认新章节简报')
 })
 afterEach(() => {
     cleanup()

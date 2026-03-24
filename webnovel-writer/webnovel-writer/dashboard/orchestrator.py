@@ -70,6 +70,17 @@ MIN_WRITEBACK_WORD_COUNT = 200
 MAX_WORD_COUNT_DRIFT = 200
 MAX_WORD_COUNT_DRIFT_RATIO = 0.5
 MIN_PLAN_OUTLINE_CHARS = 120
+SETTING_DOC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("WEBNOVEL_SETTING_DOC_SYNC_TIMEOUT_SECONDS", "30"))
+NON_ACTIONABLE_ALIGNMENT_TARGETS = {
+    "thread": {
+        "推进当前卷主线",
+        "保持章末钩子连续驱动",
+        "推进本章主线目标",
+    },
+    "setup": {
+        "补一条可回收的新线索",
+    },
+}
 PLAN_OUTLINE_SIGNAL_PHRASES = (
     "故事前提",
     "核心设定",
@@ -82,6 +93,11 @@ PLAN_OUTLINE_SIGNAL_PHRASES = (
 )
 PLAN_INPUT_BLOCKED_CODE = "PLAN_INPUT_BLOCKED"
 PLAN_INPUT_BLOCKED_MESSAGE = "规划输入不完整，无法生成可执行卷规划。"
+OUTLINE_ACTION_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:Chapter\s*\d+\s*:\s*|第\s*\d+\s*章\s*[:：\-]\s*)",
+    re.IGNORECASE,
+)
+OUTLINE_ACTION_SPLIT_RE = re.compile(r"[。！？；\n]+|(?:，|,|、)\s*|(?:并且|并|同时|随后|然后)")
 
 SETTING_DOC_PATHS = {
     "worldview": f"{SETTINGS_DIR_NAME}/世界观.md",
@@ -199,6 +215,7 @@ class OrchestrationService:
         self.spec_dir = Path(__file__).resolve().parent.parent / "workflow_specs"
         self.template_dir = self.spec_dir / "templates"
         self.store = TaskStore(self.project_root)
+        self._owns_runner = runner is None
         self.runner = runner or create_default_runner(self.project_root)
         self.config = get_config(project_root=self.project_root)
         self.rag_client = get_client(self.config)
@@ -207,6 +224,21 @@ class OrchestrationService:
         self._jobs: dict[str, asyncio.Task] = {}
         self._repair_project_layout()
         self._recover_or_mark_stale_running_tasks()
+
+    def refresh_runtime_settings(self, *, updated_keys: Optional[set[str]] = None) -> None:
+        if self._owns_runner:
+            self.runner = create_default_runner(self.project_root)
+        else:
+            refresh_runner = getattr(self.runner, "refresh_runtime_settings", None)
+            if callable(refresh_runner):
+                try:
+                    refresh_runner(updated_keys=updated_keys, project_root=self.project_root)
+                except TypeError:
+                    refresh_runner()
+        self.config = get_config(project_root=self.project_root)
+        self.rag_client = get_client(self.config)
+        self.index_manager = IndexManager(self.config)
+        self.narrative_graph = NarrativeGraph(config=self.config, manager=self.index_manager)
 
     def list_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [self._with_runtime_status(task) for task in self.store.list_tasks(limit=limit)]
@@ -243,7 +275,12 @@ class OrchestrationService:
 
     def get_continuity_ledger(self) -> Dict[str, Any]:
         state = self._read_state_data()
-        plot_threads = (state.get("plot_threads") or {}).get("active_threads") or []
+        plot_threads = [
+            item
+            for item in ((state.get("plot_threads") or {}).get("active_threads") or [])
+            if isinstance(item, dict)
+            and not self._is_non_actionable_alignment_target("thread", str(item.get("title") or "").strip())
+        ]
         return {
             "plot_threads": plot_threads if isinstance(plot_threads, list) else [],
             "mystery_ledger": state.get("mystery_ledger") or [],
@@ -2154,11 +2191,33 @@ class OrchestrationService:
             return False
         writeback = ((task.get("artifacts") or {}).get("writeback") or {})
         if not str(writeback.get("outline_file") or "").strip():
-            return False
+            return self._plan_writeback_is_complete(task)
         if not str(writeback.get("state_file") or "").strip():
-            return False
+            return self._plan_writeback_is_complete(task)
         events = self.store.get_events(task.get("id"), limit=50)
-        return any(str(event.get("message") or "") == "Plan writeback completed" for event in events)
+        if any(str(event.get("message") or "") == "Plan writeback completed" for event in events):
+            return True
+        return self._plan_writeback_is_complete(task)
+
+    def _plan_writeback_is_complete(self, task: Dict[str, Any]) -> bool:
+        request = task.get("request") or {}
+        volume = str(request.get("volume") or "1").strip() or "1"
+        try:
+            state_data = self._read_state_data()
+        except ProjectStateCorruptedError:
+            return False
+        planning = state_data.get("planning") or {}
+        volume_plans = planning.get("volume_plans") or {}
+        volume_entry = volume_plans.get(volume)
+        if not isinstance(volume_entry, dict):
+            return False
+        outline_file = str(volume_entry.get("outline_file") or f"{OUTLINE_DIR_NAME}/{self._volume_plan_filename(volume)}").strip()
+        if not outline_file:
+            return False
+        outline_path = self._resolve_project_path(outline_file)
+        if not outline_path.is_file():
+            return False
+        return outline_path.stat().st_size > 0 and str(planning.get("latest_volume") or "") == volume
 
     def _build_runtime_status(self, task: Dict[str, Any], events: List[Dict[str, Any]]) -> Dict[str, Any]:
         step_key = self._resolve_runtime_step_key(task, events)
@@ -2659,7 +2718,7 @@ class OrchestrationService:
         updated = 0
         for task in self.store.list_tasks(limit=1000):
             task_id = task.get("id")
-            if not task_id or task.get("status") != "running":
+            if not task_id or str(task.get("status") or "") not in ACTIVE_RUNTIME_STATES:
                 continue
             current_step = task.get("current_step")
             if self._should_complete_stale_task_after_restart(task):
@@ -2991,6 +3050,11 @@ class OrchestrationService:
         current_task = self.store.get_task(task_id)
         if current_task is None:
             raise KeyError(task_id)
+        task_error = current_task.get("error") or {}
+        if str(task_error.get("code") or "") == "TASK_CANCELLED":
+            raise ValueError("任务已取消，不能直接重试。")
+        if task_error.get("retryable") is False:
+            raise ValueError("当前任务不允许重试。")
         target_step = resume_from_step or self._determine_resume_from_step(current_task)
         preserve_approval = bool(
             current_task.get("approval_status") == "approved" and target_step in {"chapter-brief-approval", "approval-gate", "data-sync", "repair-writeback"}
@@ -5266,7 +5330,7 @@ class OrchestrationService:
     def _load_recent_director_briefs(self, chapter: int, window: int = 3) -> List[Dict[str, Any]]:
         briefs: List[Dict[str, Any]] = []
         for prev_chapter in range(max(1, chapter - window), chapter):
-            brief = self._load_director_brief(prev_chapter)
+            brief = self._load_director_brief(prev_chapter, auto_refresh=False)
             if brief:
                 briefs.append(brief)
         return briefs
@@ -5329,19 +5393,23 @@ class OrchestrationService:
         reader_signal = context_payload.get("reader_signal") or {}
         review_trend = reader_signal.get("review_trend") or {}
         outline = str(context_payload.get("outline") or "").strip()
+        outline_targets = self._extract_outline_action_targets(outline, limit=4)
         previous_summaries = [str(item).strip() for item in (context_payload.get("previous_summaries") or []) if str(item).strip()]
         recent_briefs = self._load_recent_director_briefs(chapter)
         recent_alignments = self._load_recent_director_alignments(chapter)
 
-        priority_threads = self._normalize_director_text_list(
+        priority_threads = self._normalize_actionable_text_list(
             [item.get("name") for item in active_foreshadowing]
             + [item.get("topic") for item in knowledge_conflicts]
             + [thread.split(":", 1)[-1] for row in recent_alignments for thread in ((row.get("director_alignment") or {}).get("missed") or [])]
             + [thread for brief in recent_briefs for thread in (brief.get("must_advance_threads") or [])],
+            category="thread",
             limit=6,
         )
+        if not priority_threads and outline_targets:
+            priority_threads = outline_targets[:2]
         if not priority_threads and outline:
-            priority_threads = ["推进当前卷主线", "保持章末钩子连续驱动"]
+            priority_threads = ["推进当前主线"]
 
         payoff_schedule: List[Dict[str, Any]] = []
         defer_schedule: List[Dict[str, Any]] = []
@@ -5454,6 +5522,9 @@ class OrchestrationService:
         current_missed = self._normalize_director_text_list((story_alignment or {}).get("missed"), limit=20)
         current_satisfied = self._normalize_director_text_list((story_alignment or {}).get("satisfied"), limit=20)
         current_deferred = self._normalize_director_text_list((story_alignment or {}).get("deferred"), limit=20)
+        current_missed_count = len(current_missed)
+        current_satisfied_count = len(current_satisfied)
+        current_deferred_count = len(current_deferred)
 
         consecutive_missed = 1 if current_missed else 0
         for row in reversed(recent_history):
@@ -5464,15 +5535,17 @@ class OrchestrationService:
 
         reasons: List[str] = []
         reason_codes: List[str] = []
-        if len(current_missed) >= 2:
-            reasons.append("当前章节有多个多章目标未命中，滚动规划已明显偏离执行结果。")
-            reason_codes.append("multiple_missed_targets")
+        # Single-chapter drift should be judged conservatively; partial hits are common in
+        # long-form drafting and should not force a full replan on their own.
+        if current_missed_count >= 2 and current_satisfied_count == 0:
+            reasons.append("当前章节连续漏掉多个多章目标且没有命中项，滚动规划已明显偏离执行结果。")
+            reason_codes.append("single_chapter_multi_miss_without_hits")
         if consecutive_missed >= 2:
             reasons.append(f"连续 {consecutive_missed} 章出现 story alignment missed，建议重新规划未来章节顺序。")
             reason_codes.append("consecutive_missed_chapters")
-        if current_missed and len(current_missed) > len(current_satisfied):
-            reasons.append("当前章节未满足的多章目标多于已满足目标，后续排期可信度下降。")
-            reason_codes.append("missed_outweighs_satisfied")
+        if current_missed_count >= 3 and current_missed_count >= current_satisfied_count + 2:
+            reasons.append("当前章节未满足的多章目标显著多于已满足目标，后续排期可信度下降。")
+            reason_codes.append("severe_missed_outweighs_satisfied")
 
         should_refresh = bool(reasons)
         assessment = {
@@ -5481,9 +5554,9 @@ class OrchestrationService:
             "reason_codes": self._normalize_director_text_list(reason_codes, limit=6),
             "reasons": self._normalize_director_text_list(reasons, limit=6),
             "consecutive_missed_chapters": consecutive_missed,
-            "current_missed_count": len(current_missed),
-            "current_satisfied_count": len(current_satisfied),
-            "current_deferred_count": len(current_deferred),
+            "current_missed_count": current_missed_count,
+            "current_satisfied_count": current_satisfied_count,
+            "current_deferred_count": current_deferred_count,
             "anchor_chapter": int((story_plan or {}).get("anchor_chapter") or chapter),
             "planning_horizon": int((story_plan or {}).get("planning_horizon") or 0),
         }
@@ -5520,7 +5593,8 @@ class OrchestrationService:
         story_plan = self._get_task_story_plan(task, chapter)
         story_slot = self._get_story_plan_slot(story_plan, chapter)
 
-        must_advance_threads = self._normalize_director_text_list((story_slot.get("must_advance_threads") or []), limit=4)
+        outline_targets = self._extract_outline_action_targets(outline, limit=4)
+        must_advance_threads = self._normalize_actionable_text_list((story_slot.get("must_advance_threads") or []), category="thread", limit=4)
         must_advance_threads.extend(
             [
             str(item.get("name") or "").strip()
@@ -5528,15 +5602,15 @@ class OrchestrationService:
             if str(item.get("name") or "").strip()
             ]
         )
-        must_advance_threads = self._normalize_director_text_list(must_advance_threads, limit=4)
+        must_advance_threads = self._normalize_actionable_text_list(must_advance_threads, category="thread", limit=4)
         if not must_advance_threads:
             must_advance_threads = [
                 str(item.get("topic") or "").strip()
                 for item in knowledge_conflicts[:2]
                 if str(item.get("topic") or "").strip()
             ]
-        if not must_advance_threads and outline:
-            must_advance_threads = ["推进本章主线目标"]
+        if not must_advance_threads and outline_targets:
+            must_advance_threads = outline_targets[:2]
 
         payoff_targets = self._normalize_director_text_list(story_slot.get("optional_payoffs"), limit=3)
         payoff_targets.extend(
@@ -5561,6 +5635,10 @@ class OrchestrationService:
                 for item in knowledge_conflicts[:2]
                 if str(item.get("topic") or "").strip()
             ]
+        if not setup_targets and len(outline_targets) > 1:
+            setup_targets = [f"把“{outline_targets[1]}”埋成后续可回收线索"]
+        elif not setup_targets and outline_targets:
+            setup_targets = [f"围绕“{outline_targets[0]}”补一条可回收线索"]
 
         must_use_entities = self._derive_director_entities(core_character_arcs, recent_timeline_events)
         relationship_moves = self._derive_director_relationship_moves(core_character_arcs)
@@ -5608,7 +5686,10 @@ class OrchestrationService:
                 f"不要一次性解释完 {str(active_foreshadowing[0].get('name') or '').strip()}"
             ]
 
-        chapter_goal = str(story_slot.get("chapter_goal") or "").strip() or self._build_director_goal(
+        chapter_goal = str(story_slot.get("chapter_goal") or "").strip()
+        if self._contains_non_actionable_phrase(chapter_goal):
+            chapter_goal = ""
+        chapter_goal = chapter_goal or self._build_director_goal(
             chapter=chapter,
             payoff_targets=payoff_targets,
             setup_targets=setup_targets,
@@ -5726,6 +5807,102 @@ class OrchestrationService:
             if len(items) >= limit:
                 break
         return items
+
+    def _normalize_actionable_text_list(self, value: Any, *, category: str, limit: int = 5) -> List[str]:
+        items = self._normalize_director_text_list(value, limit=max(limit * 3, limit))
+        actionable = [item for item in items if not self._is_non_actionable_alignment_target(category, item)]
+        return actionable[:limit]
+
+    def _is_non_actionable_alignment_target(self, category: str, target: str) -> bool:
+        normalized = str(target or "").strip()
+        if not normalized:
+            return True
+        ignored = NON_ACTIONABLE_ALIGNMENT_TARGETS.get(str(category or "").strip(), set())
+        return normalized in ignored
+
+    def _contains_non_actionable_phrase(self, text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        if "未找到第" in normalized and "章的大纲" in normalized:
+            return True
+        for values in NON_ACTIONABLE_ALIGNMENT_TARGETS.values():
+            for item in values:
+                if item and item in normalized:
+                    return True
+        return False
+
+    def _clean_outline_action_source(self, outline: str) -> str:
+        text = str(outline or "").strip()
+        if not text or text.startswith("⚠️"):
+            return ""
+        cleaned_lines: List[str] = []
+        for raw_line in text.splitlines():
+            line = OUTLINE_ACTION_PREFIX_RE.sub("", str(raw_line or "").strip())
+            if not line:
+                continue
+            if line.startswith("#"):
+                line = re.sub(r"^#+\s*", "", line).strip()
+            if line:
+                cleaned_lines.append(line)
+        return " ".join(cleaned_lines).strip()
+
+    def _extract_outline_action_targets(self, outline: str, *, limit: int = 3) -> List[str]:
+        source = self._clean_outline_action_source(outline)
+        if not source:
+            return []
+        candidates = [
+            re.sub(r"\s+", " ", chunk).strip(" -:：,，。；、")
+            for chunk in OUTLINE_ACTION_SPLIT_RE.split(source)
+        ]
+        targets: List[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or len(candidate) < 4:
+                continue
+            if self._contains_non_actionable_phrase(candidate):
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(candidate[:36])
+            if len(targets) >= limit:
+                break
+        return targets
+
+    def _load_outline_for_chapter(self, chapter: int) -> str:
+        try:
+            from scripts.extract_chapter_context import extract_chapter_outline
+
+            return str(extract_chapter_outline(self.project_root, chapter) or "").strip()
+        except Exception:
+            return ""
+
+    def _story_plan_needs_refresh(self, plan: Dict[str, Any], *, chapter: int) -> bool:
+        outline_targets = self._extract_outline_action_targets(self._load_outline_for_chapter(chapter), limit=2)
+        if not outline_targets:
+            return False
+        slot = self._get_story_plan_slot(plan, chapter)
+        actionable_priority = self._normalize_actionable_text_list(plan.get("priority_threads"), category="thread", limit=6)
+        actionable_slot = self._normalize_actionable_text_list(slot.get("must_advance_threads"), category="thread", limit=4)
+        chapter_goal = str(slot.get("chapter_goal") or "").strip()
+        return (not actionable_priority and not actionable_slot) or self._contains_non_actionable_phrase(chapter_goal)
+
+    def _director_brief_needs_refresh(self, brief: Dict[str, Any], *, chapter: int) -> bool:
+        outline_targets = self._extract_outline_action_targets(self._load_outline_for_chapter(chapter), limit=2)
+        if not outline_targets:
+            return False
+        actionable_threads = self._normalize_actionable_text_list(brief.get("must_advance_threads"), category="thread", limit=4)
+        actionable_setup = self._normalize_actionable_text_list(brief.get("setup_targets"), category="setup", limit=3)
+        primary_conflict = str(brief.get("primary_conflict") or "").strip()
+        chapter_goal = str(brief.get("chapter_goal") or "").strip()
+        return (
+            not actionable_threads
+            or self._contains_non_actionable_phrase(chapter_goal)
+            or self._contains_non_actionable_phrase(primary_conflict)
+            or (brief.get("setup_targets") and not actionable_setup)
+        )
 
     def _derive_director_entities(self, core_character_arcs: List[Dict[str, Any]], recent_timeline_events: List[Dict[str, Any]]) -> List[str]:
         entities: List[str] = []
@@ -5876,9 +6053,19 @@ class OrchestrationService:
         json_alias_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
-    def _load_story_plan(self, chapter: int) -> Dict[str, Any]:
+    def _load_story_plan(self, chapter: int, *, auto_refresh: bool = True) -> Dict[str, Any]:
         story_dir = self.project_root / STORY_DIRECTOR_DIR_NAME
-        return load_story_plan_for_chapter(story_dir, chapter)
+        payload = load_story_plan_for_chapter(story_dir, chapter)
+        if not isinstance(payload, dict) or not payload:
+            return {}
+        normalized = self._normalize_story_plan(payload, chapter=chapter)
+        if auto_refresh and self._story_plan_needs_refresh(normalized, chapter=chapter):
+            refreshed = self._build_story_plan({"request": {"chapter": chapter}})
+            refreshed = self._normalize_story_plan(refreshed, chapter=chapter)
+            if refreshed:
+                self._write_story_plan(int(refreshed.get("anchor_chapter") or chapter), refreshed)
+                return refreshed
+        return normalized
 
     def _normalize_story_plan_slot(self, slot: Dict[str, Any], *, chapter: int) -> Dict[str, Any]:
         normalized = {
@@ -5993,7 +6180,7 @@ class OrchestrationService:
         self._record_director_decision(brief)
         return path
 
-    def _load_director_brief(self, chapter: int) -> Dict[str, Any]:
+    def _load_director_brief(self, chapter: int, *, auto_refresh: bool = True) -> Dict[str, Any]:
         path = self._director_brief_path(chapter)
         if not path.is_file():
             return {}
@@ -6001,7 +6188,16 @@ class OrchestrationService:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        normalized = self._normalize_director_brief(payload, chapter=chapter)
+        if auto_refresh and self._director_brief_needs_refresh(normalized, chapter=chapter):
+            refreshed = self._build_chapter_director_brief({"request": {"chapter": chapter}})
+            refreshed = self._normalize_director_brief(refreshed, chapter=chapter)
+            if refreshed:
+                self._write_director_brief(chapter, refreshed)
+                return refreshed
+        return normalized
 
     def _render_story_plan_markdown(self, plan: Dict[str, Any], *, volume_number: int) -> str:
         chapters = [item for item in (plan.get("chapters") or []) if isinstance(item, dict)]
@@ -6090,7 +6286,11 @@ class OrchestrationService:
         ).strip()
         voice_constraints = self._merge_string_entries([], director_brief.get("voice_constraints"))
         must_hold_back = self._merge_string_entries([], director_brief.get("must_hold_back_facts"))
-        must_advance_threads = self._merge_string_entries([], director_brief.get("must_advance_threads"))
+        must_advance_threads = [
+            item
+            for item in self._merge_string_entries([], director_brief.get("must_advance_threads"))
+            if not self._is_non_actionable_alignment_target("thread", item)
+        ]
         foreshadowing_items = list(narrative_sync.get("foreshadowing_items") or [])
         knowledge_states = list(narrative_sync.get("knowledge_states") or [])
         character_arcs = list(narrative_sync.get("character_arcs") or [])
@@ -6425,7 +6625,7 @@ class OrchestrationService:
                 summary_content=summary_content,
                 content=content,
             )
-            await self._sync_core_setting_docs(
+            await self._sync_core_setting_docs_with_fallback(
                 task_id=task_id,
                 trigger="write",
                 chapter=chapter,
@@ -6504,15 +6704,6 @@ class OrchestrationService:
                 )
 
         self._update_state_data(_mutate)
-        await self._sync_core_setting_docs(
-            task_id=task_id,
-            trigger="plan",
-            chapter=None,
-            plan_payload=payload,
-            state_payload=None,
-            structured_sync=None,
-        )
-
         latest_artifacts = dict(latest_task.get("artifacts") or {})
         latest_artifacts["writeback"] = {
             "outline_file": self._relative_project_path(outline_path),
@@ -6531,6 +6722,55 @@ class OrchestrationService:
             step_name="plan",
             payload=latest_artifacts["writeback"],
         )
+        await self._sync_core_setting_docs_with_fallback(
+            task_id=task_id,
+            trigger="plan",
+            chapter=None,
+            plan_payload=payload,
+            state_payload=None,
+            structured_sync=None,
+        )
+
+    async def _sync_core_setting_docs_with_fallback(
+        self,
+        *,
+        task_id: str,
+        trigger: str,
+        chapter: Optional[int],
+        plan_payload: Optional[Dict[str, Any]],
+        state_payload: Optional[Dict[str, Any]],
+        structured_sync: Optional[Dict[str, Any]],
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                self._sync_core_setting_docs(
+                    task_id=task_id,
+                    trigger=trigger,
+                    chapter=chapter,
+                    plan_payload=plan_payload,
+                    state_payload=state_payload,
+                    structured_sync=structured_sync,
+                ),
+                timeout=SETTING_DOC_SYNC_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Core setting docs sync timed out for task %s", task_id)
+            self.store.append_event(
+                task_id,
+                "warning",
+                "Core setting docs sync timed out",
+                step_name="data-sync" if trigger == "write" else "plan",
+                payload={"trigger": trigger, "chapter": chapter, "timeout_seconds": SETTING_DOC_SYNC_TIMEOUT_SECONDS},
+            )
+        except Exception as exc:
+            logger.warning("Core setting docs sync failed for task %s: %s", task_id, exc, exc_info=True)
+            self.store.append_event(
+                task_id,
+                "warning",
+                "Core setting docs sync failed",
+                step_name="data-sync" if trigger == "write" else "plan",
+                payload={"trigger": trigger, "chapter": chapter, "message": str(exc)},
+            )
 
     def _build_summary_markdown(self, chapter: int, content: str, review_summary: Dict[str, Any]) -> str:
         snippet = " ".join(line.strip() for line in content.splitlines() if line.strip())
@@ -8877,6 +9117,8 @@ class OrchestrationService:
             return bool(normalized) and normalized in text_evidence
 
         for target in self._normalize_director_text_list(slot.get("must_advance_threads")):
+            if self._is_non_actionable_alignment_target("thread", target):
+                continue
             if has_text(target):
                 alignment["satisfied"].append(f"thread:{target}")
             else:
@@ -8891,7 +9133,7 @@ class OrchestrationService:
         for item in [row for row in (story_plan.get("payoff_schedule") or []) if isinstance(row, dict)]:
             target = str(item.get("thread") or "").strip()
             target_chapter = int(item.get("target_chapter") or 0)
-            if not target:
+            if not target or self._is_non_actionable_alignment_target("thread", target):
                 continue
             if target_chapter > chapter:
                 alignment["deferred"].append(f"scheduled:{target}@{target_chapter}")
@@ -8949,12 +9191,16 @@ class OrchestrationService:
                 alignment["missed"].append(f"payoff:{target}")
 
         for target in self._normalize_director_text_list(director_brief.get("setup_targets")):
+            if self._is_non_actionable_alignment_target("setup", target):
+                continue
             if has_text(target):
                 alignment["satisfied"].append(f"setup:{target}")
             else:
                 alignment["missed"].append(f"setup:{target}")
 
         for target in self._normalize_director_text_list(director_brief.get("must_advance_threads")):
+            if self._is_non_actionable_alignment_target("thread", target):
+                continue
             if has_text(target):
                 alignment["satisfied"].append(f"thread:{target}")
             else:

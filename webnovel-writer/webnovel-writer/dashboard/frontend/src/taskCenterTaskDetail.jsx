@@ -174,25 +174,25 @@ export function TaskCenterTaskDetail({
                                             className="primary-button"
                                             onClick={() => onPerform(
                                                 `/api/chapters/${chapter}/brief/approve`,
-                                                { reason: '由仪表盘批准开写' },
+                                                { reason: '由仪表盘确认新简报并开写' },
                                                 { actionKey: briefApproveActionKey, focusTaskId: liveSelectedTask.id },
                                             )}
                                             disabled={Boolean(pendingActionKey)}
                                             loading={pendingActionKey === briefApproveActionKey}
                                         >
-                                            批准开写
+                                            确认新简报并开写
                                         </ActionButton>
                                         <ActionButton
                                             className="danger-button"
                                             onClick={() => onPerform(
                                                 `/api/chapters/${chapter}/brief/reject`,
-                                                { reason: '由仪表盘驳回章节简报' },
+                                                { reason: '由仪表盘驳回并重做新简报' },
                                                 { actionKey: briefRejectActionKey, focusTaskId: liveSelectedTask.id },
                                             )}
                                             disabled={Boolean(pendingActionKey)}
                                             loading={pendingActionKey === briefRejectActionKey}
                                         >
-                                            驳回重做章节简报
+                                            驳回并重做新简报
                                         </ActionButton>
                                     </>
                                 ) : null}

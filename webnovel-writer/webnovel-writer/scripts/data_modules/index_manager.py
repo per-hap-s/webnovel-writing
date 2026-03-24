@@ -250,6 +250,18 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
         with self._get_conn() as conn:
             cursor = conn.cursor()
 
+            def _columns_for(table_name: str) -> set[str]:
+                try:
+                    rows = cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
+                except sqlite3.OperationalError:
+                    return set()
+                return {str(row[1]) for row in rows if row and row[1]}
+
+            def _create_index_if_columns(sql: str, table_name: str, *required_columns: str) -> None:
+                columns = _columns_for(table_name)
+                if all(column in columns for column in required_columns):
+                    cursor.execute(sql)
+
             # 章节表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chapters (
@@ -368,35 +380,39 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
             """)
 
             # v5.1 引入索引
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)"
+            _create_index_if_columns("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)", "entities", "type")
+            _create_index_if_columns("CREATE INDEX IF NOT EXISTS idx_entities_tier ON entities(tier)", "entities", "tier")
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_entities_protagonist ON entities(is_protagonist)",
+                "entities",
+                "is_protagonist",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_tier ON entities(tier)"
+            _create_index_if_columns("CREATE INDEX IF NOT EXISTS idx_aliases_entity ON aliases(entity_id)", "aliases", "entity_id")
+            _create_index_if_columns("CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias)", "aliases", "alias")
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_state_changes_entity ON state_changes(entity_id)",
+                "state_changes",
+                "entity_id",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_protagonist ON entities(is_protagonist)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_state_changes_chapter ON state_changes(chapter)",
+                "state_changes",
+                "chapter",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_aliases_entity ON aliases(entity_id)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_relationships_from ON relationships(from_entity)",
+                "relationships",
+                "from_entity",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_entity)",
+                "relationships",
+                "to_entity",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_state_changes_entity ON state_changes(entity_id)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_state_changes_chapter ON state_changes(chapter)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_relationships_from ON relationships(from_entity)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_entity)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_relationships_chapter ON relationships(chapter)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_relationships_chapter ON relationships(chapter)",
+                "relationships",
+                "chapter",
             )
 
             # 关系事件表 (v5.5 引入，用于时序回放/图谱分析)
@@ -652,11 +668,16 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_foreshadowing_status_chapter ON foreshadowing_items(status, planted_chapter)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_foreshadowing_status_chapter ON foreshadowing_items(status, planted_chapter)",
+                "foreshadowing_items",
+                "status",
+                "planted_chapter",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_foreshadowing_owner ON foreshadowing_items(owner_entity)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_foreshadowing_owner ON foreshadowing_items(owner_entity)",
+                "foreshadowing_items",
+                "owner_entity",
             )
 
             cursor.execute("""
@@ -673,11 +694,16 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_timeline_chapter_scene ON timeline_events(chapter, scene_index)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_timeline_chapter_scene ON timeline_events(chapter, scene_index)",
+                "timeline_events",
+                "chapter",
+                "scene_index",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_timeline_location ON timeline_events(location)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_timeline_location ON timeline_events(location)",
+                "timeline_events",
+                "location",
             )
 
             cursor.execute("""
@@ -695,11 +721,15 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                     PRIMARY KEY (entity_id, chapter)
                 )
             """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_character_arcs_entity ON character_arcs(entity_id)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_character_arcs_entity ON character_arcs(entity_id)",
+                "character_arcs",
+                "entity_id",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_character_arcs_chapter ON character_arcs(chapter)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_character_arcs_chapter ON character_arcs(chapter)",
+                "character_arcs",
+                "chapter",
             )
 
             cursor.execute("""
@@ -716,14 +746,21 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                     PRIMARY KEY (entity_id, chapter, topic)
                 )
             """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_knowledge_entity_topic ON knowledge_states(entity_id, topic)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_entity_topic ON knowledge_states(entity_id, topic)",
+                "knowledge_states",
+                "entity_id",
+                "topic",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_knowledge_chapter ON knowledge_states(chapter)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_chapter ON knowledge_states(chapter)",
+                "knowledge_states",
+                "chapter",
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_knowledge_truth_status ON knowledge_states(truth_status)"
+            _create_index_if_columns(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_truth_status ON knowledge_states(truth_status)",
+                "knowledge_states",
+                "truth_status",
             )
 
             conn.commit()
@@ -750,6 +787,161 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
             yield conn
         finally:
             conn.close()
+
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
+        try:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        except sqlite3.OperationalError:
+            return set()
+        columns: set[str] = set()
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                column_name = row["name"]
+            else:
+                column_name = row[1]
+            if column_name:
+                columns.add(str(column_name))
+        return columns
+
+    def _build_narrative_entity_clause(self, columns: set[str], entity_id: str) -> Tuple[Optional[str], List[Any]]:
+        entity_columns = [
+            column
+            for column in (
+                "entity_id",
+                "owner_entity",
+                "character_id",
+                "holder_entity_id",
+                "subject_entity_id",
+                "observer_entity_id",
+                "knower_entity_id",
+                "source_entity_id",
+                "target_entity_id",
+                "related_entity_id",
+                "from_entity",
+                "to_entity",
+            )
+            if column in columns
+        ]
+        like_columns = [column for column in ("participants", "participants_json") if column in columns]
+        if not entity_columns:
+            if not like_columns:
+                return None, []
+            clause = "(" + " OR ".join(f"{column} LIKE ?" for column in like_columns) + ")"
+            return clause, [f"%{entity_id}%"] * len(like_columns)
+
+        equality_clause = [f"{column} = ?" for column in entity_columns]
+        like_clause = [f"{column} LIKE ?" for column in like_columns]
+        clause = "(" + " OR ".join([*equality_clause, *like_clause]) + ")"
+        return clause, [entity_id] * len(entity_columns) + [f"%{entity_id}%"] * len(like_columns)
+
+    def _build_scalar_chapter_clause(
+        self,
+        columns: set[str],
+        chapter: int,
+        *,
+        exact: Tuple[str, ...] = (),
+        before_or_equal: Tuple[str, ...] = (),
+        after_or_equal: Tuple[str, ...] = (),
+    ) -> Tuple[Optional[str], List[Any]]:
+        for column in exact:
+            if column in columns:
+                return f"{column} = ?", [chapter]
+        for column in before_or_equal:
+            if column in columns:
+                return f"{column} <= ?", [chapter]
+        for column in after_or_equal:
+            if column in columns:
+                return f"{column} >= ?", [chapter]
+        return None, []
+
+    def _build_timeline_chapter_clause(self, columns: set[str], chapter: int) -> Tuple[Optional[str], List[Any]]:
+        return self._build_scalar_chapter_clause(
+            columns,
+            chapter,
+            exact=("chapter", "event_chapter", "occurred_chapter"),
+            before_or_equal=("start_chapter",),
+        )
+
+    def _build_character_arc_chapter_clause(self, columns: set[str], chapter: int) -> Tuple[Optional[str], List[Any]]:
+        if "chapter" in columns:
+            return "chapter = ?", [chapter]
+        if "start_chapter" in columns and "end_chapter" in columns:
+            return "(start_chapter <= ? AND (end_chapter IS NULL OR end_chapter >= ?))", [chapter, chapter]
+        return self._build_scalar_chapter_clause(
+            columns,
+            chapter,
+            before_or_equal=("start_chapter",),
+            after_or_equal=("end_chapter",),
+        )
+
+    def _build_knowledge_state_chapter_clause(self, columns: set[str], chapter: int) -> Tuple[Optional[str], List[Any]]:
+        return self._build_scalar_chapter_clause(
+            columns,
+            chapter,
+            exact=("chapter", "known_chapter", "discovered_chapter"),
+            before_or_equal=("updated_chapter",),
+        )
+
+    def _list_narrative_rows(
+        self,
+        *,
+        table_name: str,
+        chapter: Optional[int],
+        entity_id: Optional[str],
+        limit: int,
+        chapter_clause_builder,
+        order_columns: Tuple[str, ...],
+        parse_json_fields: Tuple[str, ...] = (),
+        boolean_fields: Tuple[str, ...] = (),
+    ) -> List[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            columns = self._table_columns(conn, table_name)
+            if not columns:
+                return []
+
+            clauses: List[str] = []
+            params: List[Any] = []
+            if chapter is not None:
+                chapter_clause, chapter_params = chapter_clause_builder(columns, chapter)
+                if chapter_clause:
+                    clauses.append(chapter_clause)
+                    params.extend(chapter_params)
+            if entity_id:
+                entity_clause, entity_params = self._build_narrative_entity_clause(columns, entity_id)
+                if entity_clause:
+                    clauses.append(entity_clause)
+                    params.extend(entity_params)
+
+            query = f"SELECT * FROM {table_name}"
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+
+            order_terms = [f"{column} DESC" for column in order_columns if column in columns]
+            if "id" in columns and "id DESC" not in order_terms:
+                order_terms.append("id DESC")
+            if order_terms:
+                query += " ORDER BY " + ", ".join(order_terms)
+
+            query += " LIMIT ?"
+            params.append(int(limit))
+            rows = conn.execute(query, params).fetchall()
+
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for field in parse_json_fields:
+                raw = item.get(field)
+                if not raw:
+                    continue
+                try:
+                    item[field] = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            for field in boolean_fields:
+                if field in item:
+                    item[field] = bool(item.get(field))
+            normalized.append(item)
+        return normalized
 
     def close(self) -> None:
         """Compatibility no-op for callers that explicitly close the manager."""
@@ -910,6 +1102,24 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                 rows.append(data)
             return rows
 
+    def list_timeline_events(
+        self,
+        chapter: Optional[int] = None,
+        entity_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出 dashboard 所需的时间线事件视图。"""
+        return self._list_narrative_rows(
+            table_name="timeline_events",
+            chapter=chapter,
+            entity_id=entity_id,
+            limit=limit,
+            chapter_clause_builder=self._build_timeline_chapter_clause,
+            order_columns=("chapter", "event_chapter", "occurred_chapter", "updated_at", "created_at"),
+            parse_json_fields=("participants", "participants_json"),
+            boolean_fields=("objective_fact",),
+        )
+
     def save_character_arc(self, arc: CharacterArcMeta) -> bool:
         """插入或更新角色弧线快照。"""
         with self._get_conn() as conn:
@@ -1027,6 +1237,23 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
                 self._row_to_dict(row, parse_json=["relationship_state_json"])
                 for row in cursor.fetchall()
             ]
+
+    def list_character_arcs(
+        self,
+        chapter: Optional[int] = None,
+        entity_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出 dashboard 所需的角色弧线视图。"""
+        return self._list_narrative_rows(
+            table_name="character_arcs",
+            chapter=chapter,
+            entity_id=entity_id,
+            limit=limit,
+            chapter_clause_builder=self._build_character_arc_chapter_clause,
+            order_columns=("chapter", "start_chapter", "updated_at", "created_at"),
+            parse_json_fields=("relationship_state_json",),
+        )
 
     def save_knowledge_state(self, state: KnowledgeStateMeta) -> bool:
         """插入或更新认知状态。"""
@@ -1168,6 +1395,22 @@ class IndexManager(IndexChapterMixin, IndexEntityMixin, IndexDebtMixin, IndexRea
             )
         )
         return conflicts[:limit]
+
+    def list_knowledge_states(
+        self,
+        chapter: Optional[int] = None,
+        entity_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出 dashboard 所需的认知状态视图。"""
+        return self._list_narrative_rows(
+            table_name="knowledge_states",
+            chapter=chapter,
+            entity_id=entity_id,
+            limit=limit,
+            chapter_clause_builder=self._build_knowledge_state_chapter_clause,
+            order_columns=("chapter", "known_chapter", "discovered_chapter", "updated_at", "created_at"),
+        )
 
     # ==================== 章节操作 ====================
 

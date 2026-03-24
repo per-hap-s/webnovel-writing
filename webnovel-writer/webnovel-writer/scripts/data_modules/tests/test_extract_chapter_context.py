@@ -52,3 +52,46 @@ def test_load_rag_assist_propagates_rag_error(tmp_path, monkeypatch):
 
     with pytest.raises(RAGRequestError):
         module._load_rag_assist(tmp_path, 3, 'outline')
+
+
+def test_extract_chapter_outline_supports_volume_plan_from_state(tmp_path):
+    _ensure_scripts_dir()
+
+    from extract_chapter_context import extract_chapter_outline
+    from data_modules.config import DataModulesConfig
+
+    cfg = DataModulesConfig.from_project_root(tmp_path)
+    cfg.ensure_dirs()
+    outline_dir = tmp_path / '大纲'
+    outline_dir.mkdir(exist_ok=True)
+    (outline_dir / 'volume-01-plan.md').write_text(
+        '\n'.join(
+            [
+                '# Volume 1 Plan',
+                '',
+                '## Chapter Beats',
+                '- Chapter 1: 开篇先用异常监控制造第一重疑点。',
+                '- Chapter 2: 主角被迫接单，确认规则与代价。',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    state = {
+        'planning': {
+            'volume_plans': {
+                '1': {
+                    'outline_file': '大纲/volume-01-plan.md',
+                }
+            },
+            'latest_volume': '1',
+        },
+        'progress': {
+            'volumes_planned': [{'volume': 1, 'chapters_range': '1-50'}],
+        },
+    }
+    (cfg.webnovel_dir / 'state.json').write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+
+    outline = extract_chapter_outline(tmp_path, 1)
+    assert 'Chapter 1' in outline
+    assert '异常监控' in outline

@@ -182,6 +182,37 @@ class IndexEntityMixin:
                 for row in cursor.fetchall()
             ]
 
+    def list_entities(
+        self,
+        entity_type: Optional[str] = None,
+        include_archived: bool = False,
+    ) -> List[Dict]:
+        """列出实体，支持类型过滤与归档过滤。"""
+        if entity_type:
+            return self.get_entities_by_type(entity_type, include_archived=include_archived)
+
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            if include_archived:
+                cursor.execute(
+                    """
+                    SELECT * FROM entities
+                    ORDER BY last_appearance DESC, id ASC
+                """
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM entities
+                    WHERE is_archived = 0
+                    ORDER BY last_appearance DESC, id ASC
+                """
+                )
+            return [
+                self._row_to_dict(row, parse_json=["current_json"])
+                for row in cursor.fetchall()
+            ]
+
     def get_entities_by_tier(self, tier: str) -> List[Dict]:
         """
         按重要度层级获取实体列表。
@@ -375,6 +406,28 @@ class IndexEntityMixin:
                 "SELECT alias FROM aliases WHERE entity_id = ?", (entity_id,)
             )
             return [row["alias"] for row in cursor.fetchall()]
+
+    def list_alias_records(self, entity_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """列出别名记录，供 dashboard 查询接口使用。"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            if entity_id:
+                cursor.execute(
+                    """
+                    SELECT * FROM aliases
+                    WHERE entity_id = ?
+                    ORDER BY alias ASC, entity_type ASC
+                """,
+                    (entity_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM aliases
+                    ORDER BY entity_id ASC, alias ASC, entity_type ASC
+                """
+                )
+            return [dict(row) for row in cursor.fetchall()]
 
     def remove_alias(self, alias: str, entity_id: str) -> bool:
         """
@@ -781,6 +834,47 @@ class IndexEntityMixin:
                 f"""
                 SELECT * FROM relationship_events
                 WHERE {where_sql}
+                ORDER BY chapter DESC, id DESC
+                LIMIT ?
+            """,
+                (*params, int(limit)),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def list_relationship_events(
+        self,
+        entity_id: Optional[str] = None,
+        direction: str = "both",
+        from_chapter: Optional[int] = None,
+        to_chapter: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出关系事件，允许不指定实体过滤。"""
+        if entity_id:
+            return self.get_relationship_events(
+                entity_id,
+                direction=direction,
+                from_chapter=from_chapter,
+                to_chapter=to_chapter,
+                limit=limit,
+            )
+
+        clauses: List[str] = []
+        params: List[Any] = []
+        if from_chapter is not None:
+            clauses.append("chapter >= ?")
+            params.append(int(from_chapter))
+        if to_chapter is not None:
+            clauses.append("chapter <= ?")
+            params.append(int(to_chapter))
+
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT * FROM relationship_events
+                {where_sql}
                 ORDER BY chapter DESC, id DESC
                 LIMIT ?
             """,

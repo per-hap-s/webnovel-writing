@@ -153,6 +153,106 @@ def extract_chapter_outline(project_root: Path, chapter_num: int) -> str:
     return f"⚠️ 未找到第 {chapter_num} 章的大纲"
 
 
+def _read_state_payload(project_root: Path) -> Dict[str, Any]:
+    state_path = project_root / ".webnovel" / "state.json"
+    if not state_path.exists():
+        return {}
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _outline_candidates_for_volume(project_root: Path, volume_num: int) -> List[Path]:
+    candidates: List[Path] = []
+    state = _read_state_payload(project_root)
+    planning = state.get("planning")
+    if isinstance(planning, dict):
+        volume_plans = planning.get("volume_plans")
+        if isinstance(volume_plans, dict):
+            volume_entry = volume_plans.get(str(volume_num))
+            if isinstance(volume_entry, dict):
+                outline_file = str(volume_entry.get("outline_file") or "").strip()
+                if outline_file:
+                    candidates.append(project_root / Path(outline_file))
+
+    candidates.extend(
+        [
+            project_root / "大纲" / f"volume-{volume_num:02d}-plan.md",
+            project_root / "大纲" / f"第{volume_num}卷-详细大纲.md",
+            project_root / "大纲" / f"第{volume_num}卷 详细大纲.md",
+            project_root / "大纲" / f"第{volume_num}卷详细大纲.md",
+        ]
+    )
+
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _extract_outline_from_legacy_markdown(content: str, chapter_num: int) -> str:
+    pattern = rf"###\s*第\s*{chapter_num}\s*章[：:\s]*(.+?)(?=###\s*第\s*\d+\s*章|##\s|$)"
+    match = re.search(pattern, content, re.DOTALL)
+    if not match:
+        pattern = rf"###\s*第{chapter_num}章[：:\s]*(.+?)(?=###\s*第\d+章|##\s|$)"
+        match = re.search(pattern, content, re.DOTALL)
+    if not match:
+        return ""
+    outline = match.group(0).strip()
+    if len(outline) > 1500:
+        outline = outline[:1500] + "\n...(已截断)"
+    return outline
+
+
+def _extract_outline_from_volume_plan(content: str, chapter_num: int) -> str:
+    prefix = f"- Chapter {chapter_num}:"
+    next_item_re = re.compile(r"^- Chapter \d+:")
+    capture = False
+    collected: List[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip()
+        if not capture:
+            if line.startswith(prefix):
+                capture = True
+                collected.append(line)
+            continue
+        if next_item_re.match(line):
+            break
+        if line.startswith("## ") and collected:
+            break
+        collected.append(line)
+    return "\n".join(part for part in collected if part.strip()).strip()
+
+
+def extract_chapter_outline(project_root: Path, chapter_num: int) -> str:
+    """Extract chapter outline segment from legacy or new volume plan files."""
+    volume_num = _volume_num_for_chapter_from_state(project_root, chapter_num) or volume_num_for_chapter(chapter_num)
+    outline_candidates = _outline_candidates_for_volume(project_root, volume_num)
+    outline_file = next((path for path in outline_candidates if path.exists()), None)
+
+    if outline_file is None:
+        tried = " / ".join(str(path) for path in outline_candidates)
+        return f"⚠️ 大纲文件不存在，已尝试: {tried}"
+
+    content = outline_file.read_text(encoding="utf-8")
+    outline = _extract_outline_from_legacy_markdown(content, chapter_num)
+    if outline:
+        return outline
+
+    outline = _extract_outline_from_volume_plan(content, chapter_num)
+    if outline:
+        return outline
+
+    return f"⚠️ 未找到第 {chapter_num} 章的大纲"
+
+
 def _load_summary_file(project_root: Path, chapter_num: int) -> str:
     """Load summary section from `.webnovel/summaries/chNNNN.md`."""
     summary_path = project_root / ".webnovel" / "summaries" / f"ch{chapter_num:04d}.md"

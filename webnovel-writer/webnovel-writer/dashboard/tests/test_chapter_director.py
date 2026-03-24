@@ -127,7 +127,7 @@ def test_retry_from_context_reuses_director_brief_but_director_retry_refreshes(t
 
     service.store.update_task(task["id"], status="failed", current_step="context", error={"code": "STEP_FAILED", "message": "context failed"})
     retried = service.retry_task(task["id"])
-    assert retried["status"] == "queued"
+    assert retried["status"] == "retrying"
     asyncio.run(service._run_task(task["id"], resume_from_step="context"))
     reused_brief = json.loads((project_root / ".webnovel" / "director" / "ch0002.json").read_text(encoding="utf-8"))
     assert reused_brief["chapter_goal"] == original_brief["chapter_goal"]

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -137,7 +138,7 @@ def test_writeback_records_director_and_story_alignment(tmp_path: Path):
     with patch.object(service, "_validate_writeback_consistency", return_value=None), patch.object(
         service, "_sync_core_setting_docs", return_value=None
     ):
-        service._apply_write_data_sync(task["id"], service.store.get_task(task["id"]) or task, payload)
+        asyncio.run(service._apply_write_data_sync(task["id"], service.store.get_task(task["id"]) or task, payload))
 
     refreshed = service.store.get_task(task["id"]) or {}
     story_alignment = (((refreshed.get("artifacts") or {}).get("writeback") or {}).get("story_alignment") or {})
@@ -222,7 +223,7 @@ def test_writeback_marks_story_refresh_when_missed_targets_accumulate(tmp_path: 
     with patch.object(service, "_validate_writeback_consistency", return_value=None), patch.object(
         service, "_sync_core_setting_docs", return_value=None
     ):
-        service._apply_write_data_sync(task["id"], service.store.get_task(task["id"]) or task, payload)
+        asyncio.run(service._apply_write_data_sync(task["id"], service.store.get_task(task["id"]) or task, payload))
 
     refreshed = service.store.get_task(task["id"]) or {}
     writeback = ((refreshed.get("artifacts") or {}).get("writeback") or {})
@@ -233,3 +234,96 @@ def test_writeback_marks_story_refresh_when_missed_targets_accumulate(tmp_path: 
 
     events = service.store.get_events(task["id"])
     assert any(event.get("message") == "Story plan refresh suggested" for event in events)
+
+
+def test_story_refresh_does_not_trigger_for_single_light_miss_without_history(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+
+    assessment = service._build_story_refresh_assessment(
+        {"anchor_chapter": 5, "planning_horizon": 4},
+        {
+            "satisfied": [],
+            "missed": ["thread:异常名单"],
+            "deferred": [],
+        },
+        chapter=5,
+    )
+
+    assert assessment["should_refresh"] is False
+    assert assessment["recommended_resume_from"] is None
+    assert assessment["suggested_action"] == "当前滚动规划仍可继续使用。"
+
+
+def test_story_refresh_does_not_trigger_for_single_chapter_partial_miss(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+
+    assessment = service._build_story_refresh_assessment(
+        {"anchor_chapter": 6, "planning_horizon": 4},
+        {
+            "satisfied": ["thread:封控升级"],
+            "missed": ["thread:白蜡印", "scheduled:白蜡印@6"],
+            "deferred": [],
+        },
+        chapter=6,
+    )
+
+    assert assessment["should_refresh"] is False
+    assert assessment["recommended_resume_from"] is None
+
+
+def test_story_alignment_ignores_non_actionable_placeholder_threads(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+
+    story_plan = {
+        "anchor_chapter": 1,
+        "planning_horizon": 4,
+        "chapters": [
+            {
+                "chapter": 1,
+                "must_advance_threads": ["推进当前卷主线", "保持章末钩子连续驱动"],
+                "optional_payoffs": [],
+            }
+        ],
+        "payoff_schedule": [],
+    }
+    payload = {
+        "foreshadowing_items": [],
+        "timeline_events": [],
+        "knowledge_states": [],
+        "chapter_meta": {"characters": ["顾临"]},
+    }
+
+    alignment = service._build_story_alignment(story_plan, payload, "顾临发现人数对不上，并被迫接下异常处理任务。", 1)
+    assessment = service._build_story_refresh_assessment(story_plan, alignment, chapter=1)
+
+    assert alignment == {"satisfied": [], "missed": [], "deferred": []}
+    assert assessment["should_refresh"] is False
+
+
+def test_director_alignment_ignores_non_actionable_placeholder_targets(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+
+    director_brief = {
+        "payoff_targets": [],
+        "setup_targets": ["补一条可回收的新线索"],
+        "must_advance_threads": ["推进本章主线目标"],
+        "must_use_entities": [],
+        "relationship_moves": [],
+        "knowledge_reveals": [],
+    }
+    payload = {
+        "foreshadowing_items": [],
+        "timeline_events": [],
+        "character_arcs": [],
+        "knowledge_states": [],
+        "relationships_new": [],
+        "chapter_meta": {"characters": ["顾临"]},
+    }
+
+    alignment = service._build_director_alignment(director_brief, payload, "顾临先处理眼前风险。")
+
+    assert alignment == {"satisfied": [], "missed": [], "deferred": []}

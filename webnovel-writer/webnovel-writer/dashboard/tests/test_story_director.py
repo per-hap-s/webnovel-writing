@@ -171,7 +171,7 @@ def test_retry_from_context_reuses_story_plan_but_story_retry_refreshes(tmp_path
 
     service.store.update_task(task["id"], status="failed", current_step="context", error={"code": "STEP_FAILED", "message": "context failed"})
     retried = service.retry_task(task["id"])
-    assert retried["status"] == "queued"
+    assert retried["status"] == "retrying"
     asyncio.run(service._run_task(task["id"], resume_from_step="context"))
     reused_plan = json.loads((project_root / ".webnovel" / "story-director" / "plan-ch0002.json").read_text(encoding="utf-8"))
     assert reused_plan["rationale"] == saved_plan["rationale"]

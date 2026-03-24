@@ -29,6 +29,12 @@ import re
 # 安全修复：导入安全工具函数
 from security_utils import sanitize_commit_message, atomic_write_json, is_git_available
 from project_locator import write_current_project_pointer
+try:
+    from data_modules.config import get_config as get_data_modules_config
+    from data_modules.index_manager import IndexManager
+except ImportError:  # pragma: no cover
+    from scripts.data_modules.config import get_config as get_data_modules_config
+    from scripts.data_modules.index_manager import IndexManager
 
 
 # Windows 编码兼容性修复
@@ -894,6 +900,9 @@ def init_project(
     state_path.parent.mkdir(parents=True, exist_ok=True)
     # 使用原子化写入（初始化不需要备份旧文件）
     atomic_write_json(state_path, state, use_lock=True, backup=False)
+
+    # 初始化 SQLite 索引库，确保 chapters 等运行时表可用。
+    IndexManager(get_data_modules_config(project_path))
 
     # 读取内置模板（可选）
     script_dir = Path(__file__).resolve().parent

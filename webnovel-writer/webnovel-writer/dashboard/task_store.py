@@ -393,6 +393,10 @@ class TaskStore:
                 "kind": approval_kind,
                 "status": str(approval.get("status") or "pending"),
             }
+            for key, value in approval_record.items():
+                if key == "current":
+                    continue
+                approval_artifacts[key] = value
             approval_artifacts["current"] = approval_record
             approval_artifacts[approval_kind] = approval_record
             artifacts["approval"] = approval_artifacts

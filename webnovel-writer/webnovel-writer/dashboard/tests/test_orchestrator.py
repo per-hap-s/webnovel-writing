@@ -190,6 +190,48 @@ def test_plan_setting_doc_sync_runs_without_blocking_event_loop(tmp_path: Path):
     assert completed["status"] == "completed"
 
 
+def test_plan_running_task_self_heals_when_volume_plan_already_persisted(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {
+        "name": "plan",
+        "version": 1,
+        "steps": [{"name": "plan", "type": "llm", "instructions": "do", "output_schema": {}}],
+    }
+    task = service.store.create_task("plan", {"volume": 1}, workflow)
+    service.store.save_step_result(
+        task["id"],
+        "plan",
+        {
+            "success": True,
+            "structured_output": {
+                "volume_plan": {"title": "Volume 1"},
+                "chapters": [{"chapter": 1}],
+            },
+        },
+    )
+    service.store.mark_running(task["id"], "plan")
+
+    volume_outline = project_root / "大纲" / "volume-01-plan.md"
+    volume_outline.write_text("# Volume 1 Plan\n", encoding="utf-8")
+    state_path = project_root / ".webnovel" / "state.json"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    state_data.setdefault("planning", {})["volume_plans"] = {
+        "1": {
+            "outline_file": "大纲/volume-01-plan.md",
+            "updated_at": "2026-03-24T10:41:22+00:00",
+            "summary": "Volume summary",
+            "chapter_count": 1,
+        }
+    }
+    state_data["planning"]["latest_volume"] = "1"
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    healed = service.get_task(task["id"])
+    assert healed["status"] == "completed"
+    assert healed["current_step"] is None
+
+
 def test_probe_rag_returns_client_probe(tmp_path: Path):
     project_root = make_project(tmp_path)
 
@@ -474,6 +516,43 @@ def test_cancel_task_marks_running_task_interrupted_with_cancel_code(tmp_path: P
     assert cancelled["status"] == "interrupted"
     assert cancelled["error"]["code"] == "TASK_CANCELLED"
     assert any(event["payload"].get("reason") == "user requested stop" for event in events)
+
+
+def test_retry_task_rejects_cancelled_tasks(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "context", "type": "llm"}]}
+    task = service.store.create_task("write", {"chapter": 6}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow)
+    service.store.mark_running(task["id"], "context")
+    service.cancel_task(task["id"], "user requested stop")
+
+    with pytest.raises(ValueError, match="已取消"):
+        service.retry_task(task["id"])
+
+
+@pytest.mark.parametrize("status", ["retrying", "resuming_writeback"])
+def test_service_restart_recovers_all_active_runtime_states(tmp_path: Path, status: str):
+    project_root = make_project(tmp_path)
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "context", "type": "llm"}]}
+    original = OrchestrationService(project_root, runner=MappingRunner())
+    task = original.store.create_task("write", {"chapter": 7}, workflow)
+    original.store.update_task(
+        task["id"],
+        workflow_spec=workflow,
+        status=status,
+        current_step="context",
+        started_at="2026-03-24T00:00:00+00:00",
+        finished_at=None,
+        error=None,
+    )
+
+    restarted = OrchestrationService(project_root, runner=MappingRunner())
+    recovered = restarted.get_task(task["id"])
+
+    assert recovered["status"] == "interrupted"
+    assert recovered["error"]["code"] == "TASK_INTERRUPTED"
+    assert recovered["current_step"] == "context"
 
 
 def test_runtime_status_hides_stale_error_after_retry_restart(tmp_path: Path):
