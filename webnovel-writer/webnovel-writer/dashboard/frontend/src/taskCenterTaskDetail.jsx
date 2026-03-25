@@ -8,6 +8,7 @@ import {
     StoryRefreshSection,
     TaskContinuationSection,
 } from './taskDetailPanels.jsx'
+import { renderOperatorActionButtons } from './operatorActionButtons.jsx'
 import { buildTaskContinuationSummary } from './writingContinuation.js'
 import { formatTimestampShort } from './dashboardPageCommon.jsx'
 import {
@@ -36,6 +37,22 @@ function buildRequestActionKey(path, body = {}) {
 function resolveRepairWritebackLabel(candidate) {
     const action = candidate?.operator_action?.payload || candidate?.operatorAction?.payload || {}
     return action?.require_manual_approval ? '需要人工确认后回写' : '将自动回写正文'
+}
+
+function resolveFallbackSummary(task) {
+    const runtime = task?.runtime_status || {}
+    if (!runtime?.fallback_used) return ''
+    if (task?.status === 'completed') {
+        return runtime?.fallback_model
+            ? `已自动切换到 ${runtime.fallback_model} 完成当前步骤。`
+            : '已自动切换到回退模型完成当前步骤。'
+    }
+    if (task?.status === 'failed') {
+        return task?.error?.message || runtime?.phase_detail || '默认模型重试耗尽且自动降级失败。'
+    }
+    return runtime?.fallback_model
+        ? `已自动切换到 ${runtime.fallback_model}，正在继续当前步骤。`
+        : '已自动切换到回退模型，正在继续当前步骤。'
 }
 
 function ActionButton({ className, onClick, disabled, loading, children, loadingLabel }) {
@@ -117,6 +134,7 @@ export function TaskCenterTaskDetail({
                 )
                 const reviewSummary = guardedRun?.review_summary || guardedBatchRun?.review_summary || liveSelectedTask.artifacts?.review_summary || null
                 const repairCandidates = Array.isArray(reviewSummary?.repair_candidates) ? reviewSummary.repair_candidates : []
+                const fallbackSummary = resolveFallbackSummary(liveSelectedTask)
                 const blockingItems = Array.isArray(liveSelectedTask?.artifacts?.blocking_items) ? liveSelectedTask.artifacts.blocking_items : []
                 const primaryActionKey = buildActionKey(primaryAction)
                 const retryActionKey = buildRequestActionKey(`/api/tasks/${liveSelectedTask.id}/retry`)
@@ -139,7 +157,15 @@ export function TaskCenterTaskDetail({
                             <MetricCard label="当前阶段" value={resolveCurrentStepLabel ? resolveCurrentStepLabel(liveSelectedTask) : translateStepName(liveSelectedTask.current_step || 'idle')} />
                             <MetricCard label="确认状态" value={resolveApprovalStatusLabel ? resolveApprovalStatusLabel(liveSelectedTask) : (liveSelectedTask.approval_status || '-')} />
                             <MetricCard label="任务类型" value={translateTaskType(liveSelectedTask.task_type)} />
-                            <MetricCard label="实时运行" value={resolveRuntimeBadgeLabel(liveSelectedTask)} />
+                            <MetricCard
+                                label="实时运行"
+                                value={
+                                    liveSelectedTask?.approval_status === 'pending'
+                                    || ['awaiting_chapter_brief_approval', 'awaiting_writeback_approval'].includes(liveSelectedTask?.status)
+                                        ? '审批待处理'
+                                        : resolveRuntimeBadgeLabel(liveSelectedTask)
+                                }
+                            />
                         </div>
 
                         <div className="planning-warning detail-action-bar">
@@ -252,8 +278,13 @@ export function TaskCenterTaskDetail({
                         {continuationSummary ? (
                             <TaskContinuationSection
                                 continuationSummary={continuationSummary}
-                                operatorActions={[]}
-                                renderOperatorActionButtons={() => []}
+                                operatorActions={operatorActions}
+                                renderOperatorActionButtons={(actions) => renderOperatorActionButtons(
+                                    actions,
+                                    onExecuteOperatorAction,
+                                    Boolean(pendingActionKey),
+                                    continuationSummary?.actionLabel || '执行下一步',
+                                )}
                                 MetricCard={MetricCard}
                             />
                         ) : null}
@@ -305,6 +336,19 @@ export function TaskCenterTaskDetail({
                             )}
                             MetricCard={MetricCard}
                         />
+
+                        {fallbackSummary ? (
+                            <div className="planning-warning">
+                                <div className="subsection-title">模型切换状态</div>
+                                <div className="tiny">{fallbackSummary}</div>
+                                <div className="detail-grid">
+                                    <MetricCard label="实际模型" value={liveSelectedTask.runtime_status?.effective_model || '-'} />
+                                    <MetricCard label="默认模型" value={liveSelectedTask.runtime_status?.primary_model || '-'} />
+                                    <MetricCard label="回退模型" value={liveSelectedTask.runtime_status?.fallback_model || '-'} />
+                                    <MetricCard label="已自动降级" value={formatRetryableValue(liveSelectedTask.runtime_status?.fallback_used)} />
+                                </div>
+                            </div>
+                        ) : null}
 
                         <details className="raw-output-details">
                             <summary>高级诊断信息</summary>

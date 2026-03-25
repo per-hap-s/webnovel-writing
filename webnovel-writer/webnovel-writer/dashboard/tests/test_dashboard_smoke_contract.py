@@ -446,6 +446,8 @@ def test_frontend_task_detail_includes_task_lineage_view():
 
     assert "parent_task_id" in section_source
     assert "root_task_id" in section_source
+    assert "effective_model" in section_source
+    assert "fallback_used" in section_source
 
 
 def test_frontend_state_test_script_covers_writing_continuation():
@@ -523,6 +525,10 @@ def test_task_list_endpoint_returns_runtime_status(tmp_path: Path):
     assert "step_started_at" in runtime
     assert "waiting_since" in runtime
     assert "last_non_heartbeat_activity_at" in runtime
+    assert "effective_model" in runtime
+    assert "primary_model" in runtime
+    assert "fallback_model" in runtime
+    assert "fallback_used" in runtime
 
 
 def test_project_info_includes_dashboard_context(tmp_path: Path):

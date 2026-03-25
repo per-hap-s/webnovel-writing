@@ -8,6 +8,35 @@ import dashboard.llm_runner as llm_runner_module
 from dashboard.llm_runner import CodexCliRunner, MockRunner, OpenAICompatibleRunner, create_default_runner
 
 
+class FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def build_chat_completion_response(content: str) -> bytes:
+    return json.dumps(
+        {
+            'choices': [
+                {
+                    'message': {
+                        'content': content,
+                    }
+                }
+            ]
+        },
+        ensure_ascii=False,
+    ).encode('utf-8')
+
+
 def test_codex_cli_runner_reports_missing_binary(tmp_path: Path, monkeypatch):
     project_root = tmp_path / 'novel'
     project_root.mkdir()
@@ -418,3 +447,209 @@ def test_api_runner_retries_retryable_http_5xx(tmp_path: Path, monkeypatch):
     assert result.success is True
     assert calls['count'] == 2
     assert result.metadata['retry_count'] == 1
+
+
+def test_api_runner_falls_back_to_mini_after_primary_timeout_retries_exhaust(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '1')
+    monkeypatch.setenv('WEBNOVEL_LLM_ENABLE_FALLBACK', 'true')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_MODEL', 'gpt-5.4-mini')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_STEPS', 'draft,polish')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_ON', 'LLM_TIMEOUT,LLM_HTTP_ERROR')
+    monkeypatch.setattr(llm_runner_module.time, 'sleep', lambda _: None)
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        payload = json.loads(req.data.decode('utf-8'))
+        model = payload['model']
+        calls.append(model)
+        if model == 'gpt-5.4':
+            raise TimeoutError('request timed out')
+        return FakeResponse(
+            build_chat_completion_response(
+                '{"chapter_file":"正文/ch0001.md","content":"正文","anti_ai_force_check":"pass","change_summary":[]}'
+            )
+        )
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', fake_urlopen)
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {
+            'name': 'draft',
+            'instructions': 'do',
+            'required_output_keys': ['chapter_file', 'content', 'anti_ai_force_check', 'change_summary'],
+            'output_schema': {},
+        },
+        project_root,
+        {'task_id': 'task-1', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert calls == ['gpt-5.4', 'gpt-5.4', 'gpt-5.4-mini']
+    assert result.metadata['primary_model'] == 'gpt-5.4'
+    assert result.metadata['fallback_model'] == 'gpt-5.4-mini'
+    assert result.metadata['effective_model'] == 'gpt-5.4-mini'
+    assert result.metadata['fallback_used'] is True
+    assert result.metadata['fallback_trigger_error_code'] == 'LLM_TIMEOUT'
+    assert result.metadata['fallback_trigger_http_status'] is None
+    assert result.metadata['attempt_models'] == ['gpt-5.4', 'gpt-5.4', 'gpt-5.4-mini']
+
+
+def test_api_runner_falls_back_after_retryable_5xx_when_primary_retries_exhaust(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '0')
+    monkeypatch.setenv('WEBNOVEL_LLM_ENABLE_FALLBACK', 'true')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_MODEL', 'gpt-5.4-mini')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_STEPS', 'draft,polish')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_ON', 'LLM_TIMEOUT,LLM_HTTP_ERROR')
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        payload = json.loads(req.data.decode('utf-8'))
+        model = payload['model']
+        calls.append(model)
+        if model == 'gpt-5.4':
+            raise HTTPError(req.full_url, 502, 'Bad Gateway', hdrs=None, fp=io.BytesIO(b'upstream bad gateway'))
+        return FakeResponse(build_chat_completion_response('{"volume_plan":{"title":"卷一"},"chapters":[]}'))
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', fake_urlopen)
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {
+            'name': 'polish',
+            'instructions': 'do',
+            'required_output_keys': ['volume_plan', 'chapters'],
+            'output_schema': {},
+        },
+        project_root,
+        {'task_id': 'task-2', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is True
+    assert calls == ['gpt-5.4', 'gpt-5.4-mini']
+    assert result.metadata['fallback_used'] is True
+    assert result.metadata['fallback_trigger_error_code'] == 'LLM_HTTP_ERROR'
+    assert result.metadata['fallback_trigger_http_status'] == 502
+
+
+def test_api_runner_does_not_fallback_on_http_4xx(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '1')
+    monkeypatch.setenv('WEBNOVEL_LLM_ENABLE_FALLBACK', 'true')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_MODEL', 'gpt-5.4-mini')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_STEPS', 'draft,polish')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_ON', 'LLM_TIMEOUT,LLM_HTTP_ERROR')
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        payload = json.loads(req.data.decode('utf-8'))
+        calls.append(payload['model'])
+        raise HTTPError(req.full_url, 429, 'Too Many Requests', hdrs=None, fp=io.BytesIO(b'rate limit'))
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', fake_urlopen)
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'draft', 'instructions': 'do', 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-3', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is False
+    assert calls == ['gpt-5.4']
+    assert result.error['code'] == 'LLM_HTTP_ERROR'
+    assert result.error['http_status'] == 429
+    assert result.error['fallback_used'] is False
+    assert result.error['effective_model'] == 'gpt-5.4'
+    assert result.error['fallback_exhausted'] is False
+    assert result.error['original_message'] == 'rate limit'
+    assert result.error['message'] == llm_runner_module.STEP_ERROR_MESSAGES['LLM_HTTP_ERROR']
+
+
+def test_api_runner_does_not_fallback_on_invalid_step_output(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '1')
+    monkeypatch.setenv('WEBNOVEL_LLM_ENABLE_FALLBACK', 'true')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_MODEL', 'gpt-5.4-mini')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_STEPS', 'draft,polish')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_ON', 'LLM_TIMEOUT,LLM_HTTP_ERROR')
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        payload = json.loads(req.data.decode('utf-8'))
+        calls.append(payload['model'])
+        return FakeResponse(build_chat_completion_response('not json at all'))
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', fake_urlopen)
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'draft', 'instructions': 'do', 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-4', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is False
+    assert calls == ['gpt-5.4']
+    assert result.error['code'] == 'INVALID_STEP_OUTPUT'
+    assert result.error['fallback_used'] is False
+    assert result.metadata['attempt_models'] == ['gpt-5.4']
+
+
+def test_api_runner_marks_fallback_exhausted_when_primary_and_fallback_both_fail(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / 'novel'
+    project_root.mkdir()
+    monkeypatch.setenv('WEBNOVEL_LLM_PROVIDER', 'openai-compatible')
+    monkeypatch.setenv('WEBNOVEL_LLM_API_KEY', 'sk-test')
+    monkeypatch.setenv('WEBNOVEL_LLM_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('WEBNOVEL_LLM_BASE_URL', 'http://127.0.0.1:8317/v1')
+    monkeypatch.setenv('WEBNOVEL_LLM_MAX_RETRIES', '0')
+    monkeypatch.setenv('WEBNOVEL_LLM_ENABLE_FALLBACK', 'true')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_MODEL', 'gpt-5.4-mini')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_STEPS', 'draft,polish')
+    monkeypatch.setenv('WEBNOVEL_LLM_FALLBACK_ON', 'LLM_TIMEOUT,LLM_HTTP_ERROR')
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        payload = json.loads(req.data.decode('utf-8'))
+        calls.append(payload['model'])
+        raise TimeoutError(f"{payload['model']} timed out")
+
+    monkeypatch.setattr(llm_runner_module.urlrequest, 'urlopen', fake_urlopen)
+    runner = OpenAICompatibleRunner(project_root)
+    result = runner.run(
+        {'name': 'draft', 'instructions': 'do', 'output_schema': {}},
+        project_root,
+        {'task_id': 'task-5', 'references': [], 'reference_documents': [], 'project_context': [], 'input': {}, 'step_spec': {}},
+    )
+
+    assert result.success is False
+    assert calls == ['gpt-5.4', 'gpt-5.4-mini']
+    assert result.error['code'] == 'LLM_TIMEOUT'
+    assert result.error['fallback_used'] is True
+    assert result.error['effective_model'] == 'gpt-5.4-mini'
+    assert result.error['fallback_exhausted'] is True
+    assert result.metadata['attempt_models'] == ['gpt-5.4', 'gpt-5.4-mini']

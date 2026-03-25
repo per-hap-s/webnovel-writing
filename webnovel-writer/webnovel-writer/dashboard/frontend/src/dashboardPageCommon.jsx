@@ -183,6 +183,10 @@ const EXACT_EVENT_MESSAGES = {
     'Repair plan blocked': '修稿启动前缺少输入',
     'Repair writeback blocked': '修稿回写被阻断',
     'Repair writeback completed': '修稿回写已完成',
+    llm_fallback_scheduled: '已安排自动降级',
+    llm_fallback_started: '自动降级已开始',
+    llm_fallback_succeeded: '已自动切换回退模型完成当前步骤',
+    llm_fallback_failed: '自动降级后仍失败',
 }
 
 const UI_COPY = {

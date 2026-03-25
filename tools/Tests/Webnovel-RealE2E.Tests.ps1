@@ -186,6 +186,73 @@ Describe 'Invoke-WebnovelRealE2ECapture' {
             $script:playwrightCalls[2] | Should Be @('screenshot')
         }
     }
+
+    It 'throws a clear error when the playwright screenshot command fails' {
+        InModuleScope $realE2EModule.Name {
+            $transcriptPath = Join-Path $TestDrive 'capture-transcript.txt'
+            $playwrightDir = Join-Path $TestDrive '.playwright-cli'
+            New-Item -ItemType Directory -Path $playwrightDir -Force | Out-Null
+
+            $script:playwrightCalls = @()
+            function script:FakePlaywrightFailure {
+                param(
+                    [Parameter(ValueFromRemainingArguments = $true)]
+                    [string[]]$ArgsList
+                )
+
+                $script:playwrightCalls += ,@($ArgsList)
+                if ($ArgsList[0] -eq 'screenshot') {
+                    $global:LASTEXITCODE = 1
+                    Write-Output 'TimeoutError: page.screenshot: Timeout 5000ms exceeded.'
+                } else {
+                    $global:LASTEXITCODE = 0
+                }
+            }
+
+            Mock Start-Sleep {}
+            Mock Get-WebnovelRealE2ENewPlaywrightFile {
+                param($Directory, $Filter)
+
+                if ($Filter -eq 'page-*.yml') {
+                    return 'D:\snapshots\page-control.yml'
+                }
+
+                return $null
+            }
+
+            $thrownMessage = ''
+            try {
+                Invoke-WebnovelRealE2ECapture `
+                    -Name 'control' `
+                    -Url 'http://127.0.0.1:8877/?page=control' `
+                    -PlaywrightScript 'FakePlaywrightFailure' `
+                    -PlaywrightDir $playwrightDir `
+                    -TranscriptPath $transcriptPath `
+                    -PlaywrightWorkdir $TestDrive `
+                    -Open
+                throw 'expected Invoke-WebnovelRealE2ECapture to throw'
+            } catch {
+                $thrownMessage = $_.Exception.Message
+            }
+
+            $thrownMessage | Should Match 'Playwright screenshot failed for control'
+
+            $transcript = (Get-Content -Path $transcriptPath -Raw) -replace [string][char]0, ''
+            $transcript | Should Match 'TimeoutError: page\.screenshot'
+        }
+    }
+}
+
+Describe 'Dashboard frontend entry documents' {
+    It 'does not depend on remote Google Fonts at runtime' {
+        $sourceIndex = Get-Content 'D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer\dashboard\frontend\index.html' -Raw
+        $distIndex = Get-Content 'D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer\dashboard\frontend\dist\index.html' -Raw
+
+        $sourceIndex | Should Not Match 'fonts\.googleapis\.com'
+        $sourceIndex | Should Not Match 'fonts\.gstatic\.com'
+        $distIndex | Should Not Match 'fonts\.googleapis\.com'
+        $distIndex | Should Not Match 'fonts\.gstatic\.com'
+    }
 }
 
 Describe 'Get-WebnovelRealE2EObjectProperty' {
@@ -206,6 +273,62 @@ Describe 'Get-WebnovelRealE2EObjectProperty' {
             $payload = @{ recoverability = 'retriable' }
 
             Get-WebnovelRealE2EObjectProperty -Payload $payload -Name 'recoverability' -Default 'terminal' | Should Be 'retriable'
+        }
+    }
+}
+
+Describe 'Get-WebnovelRealE2EItemCount' {
+    BeforeAll {
+        $script:realE2EModule = Import-Module $modulePath -Force -PassThru
+    }
+
+    It 'counts a single PSCustomObject as one item' {
+        InModuleScope $realE2EModule.Name {
+            $count = Get-WebnovelRealE2EItemCount -Items ([pscustomobject]@{ passed = $true })
+
+            $count | Should Be 1
+        }
+    }
+
+    It 'counts arrays and null values predictably' {
+        InModuleScope $realE2EModule.Name {
+            Get-WebnovelRealE2EItemCount -Items @([pscustomobject]@{ passed = $true }, [pscustomobject]@{ passed = $false }) | Should Be 2
+            Get-WebnovelRealE2EItemCount -Items $null | Should Be 0
+        }
+    }
+}
+
+Describe 'Test-WebnovelRealE2EProjectOutputs' {
+    BeforeAll {
+        $script:realE2EModule = Import-Module $modulePath -Force -PassThru
+    }
+
+    It 'treats a single matching chapter file as a valid chapter output' {
+        InModuleScope $realE2EModule.Name {
+            $projectRoot = Join-Path $TestDrive 'project'
+            $chapterDir = Join-Path $projectRoot $script:WebnovelChapterDir
+            $summaryDir = Join-Path $projectRoot '.webnovel\summaries'
+            $outlineDir = Join-Path $projectRoot $script:WebnovelOutlineDir
+            New-Item -ItemType Directory -Path $chapterDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $summaryDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $outlineDir -Force | Out-Null
+
+            'chapter one' | Set-Content -Path (Join-Path $chapterDir 'chapter-0001.md')
+            1..3 | ForEach-Object {
+                "summary $_" | Set-Content -Path (Join-Path $summaryDir ('ch{0:d4}.md' -f $_))
+            }
+            'volume plan' | Set-Content -Path (Join-Path $outlineDir 'volume-01-plan.md')
+
+            $stateDir = Join-Path $projectRoot '.webnovel'
+            New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+            @{
+                progress = @{ current_chapter = 3 }
+                planning = @{ volume_plans = @{ '1' = @{ outline_file = '大纲/volume-01-plan.md' } } }
+            } | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $stateDir 'state.json')
+
+            $outputs = Test-WebnovelRealE2EProjectOutputs -ProjectRoot $projectRoot
+
+            $outputs.chapter_files.ch1 | Should Be $true
         }
     }
 }

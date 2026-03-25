@@ -41,6 +41,18 @@ def _ensure_str(data: Union[str, bytes, None]) -> str:
     return str(data)
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _env_csv(name: str, default: str) -> list[str]:
+    raw = os.environ.get(name, default)
+    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
+
+
 @dataclass
 class JsonExtractionResult:
     payload: Optional[Dict[str, Any]]
@@ -411,6 +423,11 @@ class LLMRunner:
             "runner": self.__class__.__name__,
             "provider": getattr(self, "provider", None),
             "model": getattr(self, "model", None),
+            "primary_model": getattr(self, "model", None),
+            "fallback_model": getattr(self, "fallback_model", None),
+            "fallback_enabled": getattr(self, "fallback_enabled", None),
+            "fallback_steps": getattr(self, "fallback_steps", None),
+            "fallback_on": getattr(self, "fallback_on", None),
             "base_url": getattr(self, "base_url", None),
             "timeout_seconds": timeout_seconds,
             "context_metrics": prompt_bundle.get("context_metrics"),
@@ -509,9 +526,15 @@ class LLMRunner:
 
         error = dict(result.error)
         code = str(error.get("code") or "").strip()
-        normalized_message = STEP_ERROR_MESSAGES.get(code)
-        if normalized_message:
-            error["message"] = normalized_message
+        if error.get("fallback_exhausted"):
+            error["message"] = "默认模型重试耗尽且自动降级失败。"
+        else:
+            normalized_message = STEP_ERROR_MESSAGES.get(code)
+            if normalized_message:
+                original_message = str(error.get("message") or "").strip()
+                if original_message and original_message != normalized_message and not error.get("original_message"):
+                    error["original_message"] = original_message
+                error["message"] = normalized_message
         result.error = error
         return result
 
@@ -645,6 +668,10 @@ class OpenAICompatibleRunner(LLMRunner):
         self.temperature = float(os.environ.get("WEBNOVEL_LLM_TEMPERATURE", "0.1"))
         self.max_request_retries = max(0, int(os.environ.get("WEBNOVEL_LLM_MAX_RETRIES", "2")))
         self.retry_backoff_seconds = max(0.1, float(os.environ.get("WEBNOVEL_LLM_RETRY_BACKOFF_SECONDS", "1.0")))
+        self.fallback_model = (os.environ.get("WEBNOVEL_LLM_FALLBACK_MODEL") or "gpt-5.4-mini").strip()
+        self.fallback_enabled = _env_flag("WEBNOVEL_LLM_ENABLE_FALLBACK", True)
+        self.fallback_steps = [item.lower() for item in _env_csv("WEBNOVEL_LLM_FALLBACK_STEPS", "draft,polish")]
+        self.fallback_on = [item.upper() for item in _env_csv("WEBNOVEL_LLM_FALLBACK_ON", "LLM_TIMEOUT,LLM_HTTP_ERROR")]
         self._health_checked_at_epoch = 0.0
         self._connection_status = "not_checked"
         self._connection_checked_at: Optional[str] = None
@@ -741,6 +768,93 @@ class OpenAICompatibleRunner(LLMRunner):
             "connection_checked_at": self._connection_checked_at,
             "connection_error": self._connection_error,
         }
+
+    def _request_payload(self, model: str, prompt_text: str) -> Dict[str, Any]:
+        return {
+            "model": model,
+            "temperature": self.temperature,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Return exactly one JSON object. Do not wrap it in markdown fences.",
+                },
+                {"role": "user", "content": prompt_text},
+            ],
+        }
+
+    def _request_for_model(self, model: str, prompt_text: str) -> urlrequest.Request:
+        return urlrequest.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(self._request_payload(model, prompt_text)).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+
+    def _fallback_enabled_for_step(self, step_name: Any) -> bool:
+        normalized = str(step_name or "").strip().lower()
+        if not self.fallback_enabled:
+            return False
+        if not self.fallback_model or self.fallback_model == self.model:
+            return False
+        return normalized in set(self.fallback_steps)
+
+    def _should_trigger_fallback(self, step_name: Any, error: Dict[str, Any]) -> bool:
+        if not self._fallback_enabled_for_step(step_name):
+            return False
+        code = str(error.get("code") or "").upper()
+        if code not in set(self.fallback_on):
+            return False
+        if code == "LLM_HTTP_ERROR":
+            status_code = int(error.get("http_status") or 0)
+            return 500 <= status_code < 600
+        return code == "LLM_TIMEOUT"
+
+    def _max_fallback_attempts_for_step(self, step_name: Any) -> int:
+        return 1 if self._fallback_enabled_for_step(step_name) else 0
+
+    def _base_attempt_metadata(
+        self,
+        *,
+        attempt: int,
+        timeout_seconds: int,
+        effective_model: str,
+        primary_model: str,
+        fallback_model: Optional[str],
+        fallback_used: bool,
+        attempt_models: list[str],
+        fallback_trigger_error_code: Optional[str],
+        fallback_trigger_http_status: Optional[int],
+    ) -> Dict[str, Any]:
+        return {
+            "attempt": attempt,
+            "timeout_seconds": timeout_seconds,
+            "retry_count": max(0, attempt - 1),
+            "effective_model": effective_model,
+            "primary_model": primary_model,
+            "fallback_model": fallback_model,
+            "fallback_used": fallback_used,
+            "fallback_trigger_error_code": fallback_trigger_error_code,
+            "fallback_trigger_http_status": fallback_trigger_http_status,
+            "attempt_models": list(attempt_models),
+        }
+
+    def _finalize_error_info(
+        self,
+        error: Dict[str, Any],
+        *,
+        effective_model: str,
+        fallback_used: bool,
+        fallback_exhausted: bool,
+    ) -> Dict[str, Any]:
+        error_info = dict(error)
+        error_info["fallback_used"] = fallback_used
+        error_info["effective_model"] = effective_model
+        error_info["fallback_exhausted"] = fallback_exhausted
+        return error_info
 
     def _execute(
         self,
@@ -944,56 +1058,86 @@ class OpenAICompatibleRunner(LLMRunner):
                 error={
                     "code": "LLM_NOT_CONFIGURED",
                     "message": STEP_ERROR_MESSAGES["LLM_NOT_CONFIGURED"],
+                    "fallback_used": False,
+                    "effective_model": self.model or "",
+                    "fallback_exhausted": False,
+                },
+                metadata={
+                    "attempt": 1,
+                    "retry_count": 0,
+                    "timeout_seconds": self._timeout_seconds_for_step(step_spec.get("name")),
+                    "effective_model": self.model or "",
+                    "primary_model": self.model or "",
+                    "fallback_model": self.fallback_model or None,
+                    "fallback_used": False,
+                    "fallback_trigger_error_code": None,
+                    "fallback_trigger_http_status": None,
+                    "attempt_models": [],
                 },
             )
 
-        payload = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Return exactly one JSON object. Do not wrap it in markdown fences.",
-                },
-                {"role": "user", "content": prompt_text},
-            ],
-        }
-        req = urlrequest.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
-
         step_name = step_spec.get("name")
         timeout_seconds = self._timeout_seconds_for_step(step_name)
-        max_attempts = self._max_attempts_for_step(step_name)
+        primary_model = self.model
+        fallback_model = self.fallback_model if self._fallback_enabled_for_step(step_name) else None
+        max_primary_attempts = self._max_attempts_for_step(step_name)
+        max_fallback_attempts = self._max_fallback_attempts_for_step(step_name)
+        attempt_models: list[str] = []
+        fallback_trigger_error_code: Optional[str] = None
+        fallback_trigger_http_status: Optional[int] = None
         last_result: Optional[StepResult] = None
 
-        for attempt in range(1, max_attempts + 1):
+        def _emit(event_name: str, payload: Dict[str, Any]) -> None:
+            if progress_callback:
+                progress_callback(event_name, payload)
+
+        def _run_attempt(*, effective_model: str, fallback_used: bool, fallback_exhausted: bool) -> StepResult:
+            nonlocal attempt_models
+            attempt = len(attempt_models) + 1
+            attempt_models = [*attempt_models, effective_model]
             attempt_output_file = self._attempt_output_file(output_file, attempt)
-            metadata: Dict[str, Any] = {
-                "attempt": attempt,
-                "timeout_seconds": timeout_seconds,
-                "retry_count": attempt - 1,
+            metadata = self._base_attempt_metadata(
+                attempt=attempt,
+                timeout_seconds=timeout_seconds,
+                effective_model=effective_model,
+                primary_model=primary_model,
+                fallback_model=fallback_model,
+                fallback_used=fallback_used,
+                attempt_models=attempt_models,
+                fallback_trigger_error_code=fallback_trigger_error_code,
+                fallback_trigger_http_status=fallback_trigger_http_status,
+            )
+            event_payload = {
+                "attempt": metadata["attempt"],
+                "retry_count": metadata["retry_count"],
+                "timeout_seconds": metadata["timeout_seconds"],
+                "effective_model": metadata["effective_model"],
+                "primary_model": metadata["primary_model"],
+                "fallback_model": metadata["fallback_model"],
+                "fallback_used": metadata["fallback_used"],
+                "fallback_trigger_error_code": metadata["fallback_trigger_error_code"],
+                "fallback_trigger_http_status": metadata["fallback_trigger_http_status"],
             }
+            req = self._request_for_model(effective_model, prompt_text)
             try:
-                if progress_callback:
-                    progress_callback("request_dispatched", {"attempt": attempt, "retry_count": attempt - 1})
-                    progress_callback("awaiting_model_response", {"attempt": attempt, "retry_count": attempt - 1})
+                _emit("request_dispatched", event_payload)
+                _emit("awaiting_model_response", event_payload)
                 with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
                     raw_response = response.read().decode("utf-8", errors="replace")
                 attempt_output_file.write_text(raw_response, encoding="utf-8")
+                output_file.write_text(raw_response, encoding="utf-8")
             except urlerror.HTTPError as exc:
                 raw_response = exc.read().decode("utf-8", errors="replace")
                 attempt_output_file.write_text(raw_response, encoding="utf-8")
-                error_info = self._http_error_info(exc, raw_response, attempt, timeout_seconds)
+                output_file.write_text(raw_response, encoding="utf-8")
+                error_info = self._finalize_error_info(
+                    self._http_error_info(exc, raw_response, attempt, timeout_seconds),
+                    effective_model=effective_model,
+                    fallback_used=fallback_used,
+                    fallback_exhausted=fallback_exhausted,
+                )
                 self._write_attempt_metadata(attempt_output_file, metadata | error_info)
-                last_result = StepResult(
+                return StepResult(
                     step_name=step_spec["name"],
                     success=False,
                     return_code=int(exc.code),
@@ -1006,27 +1150,18 @@ class OpenAICompatibleRunner(LLMRunner):
                     error=error_info,
                     metadata=metadata,
                 )
-                if self._should_retry_error(error_info) and attempt < max_attempts:
-                    if progress_callback:
-                        progress_callback(
-                            "step_retry_scheduled",
-                            {
-                                "attempt": attempt + 1,
-                                "retry_count": attempt,
-                                "error_code": error_info.get("code"),
-                                "http_status": error_info.get("http_status"),
-                            },
-                        )
-                    self._sleep_before_retry(attempt, step_name)
-                    continue
-                output_file.write_text(raw_response, encoding="utf-8")
-                return last_result
             except (urlerror.URLError, TimeoutError, OSError) as exc:
                 raw_error = str(exc)
                 attempt_output_file.write_text(raw_error, encoding="utf-8")
-                error_info = self._request_error_info(exc, attempt, timeout_seconds)
+                output_file.write_text(raw_error, encoding="utf-8")
+                error_info = self._finalize_error_info(
+                    self._request_error_info(exc, attempt, timeout_seconds),
+                    effective_model=effective_model,
+                    fallback_used=fallback_used,
+                    fallback_exhausted=fallback_exhausted,
+                )
                 self._write_attempt_metadata(attempt_output_file, metadata | error_info)
-                last_result = StepResult(
+                return StepResult(
                     step_name=step_spec["name"],
                     success=False,
                     return_code=124 if error_info["code"] == "LLM_TIMEOUT" else 111,
@@ -1039,37 +1174,25 @@ class OpenAICompatibleRunner(LLMRunner):
                     error=error_info,
                     metadata=metadata,
                 )
-                if self._should_retry_error(error_info) and attempt < max_attempts:
-                    if progress_callback:
-                        progress_callback(
-                            "step_retry_scheduled",
-                            {
-                                "attempt": attempt + 1,
-                                "retry_count": attempt,
-                                "error_code": error_info.get("code"),
-                            },
-                        )
-                    self._sleep_before_retry(attempt, step_name)
-                    continue
-                output_file.write_text(raw_error, encoding="utf-8")
-                return last_result
 
-            if progress_callback:
-                progress_callback("response_received", {"attempt": attempt, "retry_count": attempt - 1})
+            _emit("response_received", event_payload)
             try:
-                if progress_callback:
-                    progress_callback("parsing_output", {"attempt": attempt, "retry_count": attempt - 1})
+                _emit("parsing_output", event_payload)
                 parsed = json.loads(raw_response)
             except json.JSONDecodeError as exc:
-                error_info = {
-                    "code": "LLM_INVALID_RESPONSE",
-                    "message": str(exc),
-                    "attempt": attempt,
-                    "retryable": False,
-                    "timeout_seconds": timeout_seconds,
-                }
+                error_info = self._finalize_error_info(
+                    {
+                        "code": "LLM_INVALID_RESPONSE",
+                        "message": str(exc),
+                        "attempt": attempt,
+                        "retryable": False,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                    effective_model=effective_model,
+                    fallback_used=fallback_used,
+                    fallback_exhausted=fallback_exhausted,
+                )
                 self._write_attempt_metadata(attempt_output_file, metadata | error_info | {"parse_stage": "raw_response_invalid_json"})
-                output_file.write_text(raw_response, encoding="utf-8")
                 return StepResult(
                     step_name=step_spec["name"],
                     success=False,
@@ -1086,15 +1209,19 @@ class OpenAICompatibleRunner(LLMRunner):
 
             choices = parsed.get("choices")
             if not isinstance(choices, list) or not choices:
-                error_info = {
-                    "code": "LLM_INVALID_RESPONSE",
-                    "message": "response.choices is missing or empty",
-                    "attempt": attempt,
-                    "retryable": False,
-                    "timeout_seconds": timeout_seconds,
-                }
+                error_info = self._finalize_error_info(
+                    {
+                        "code": "LLM_INVALID_RESPONSE",
+                        "message": "response.choices is missing or empty",
+                        "attempt": attempt,
+                        "retryable": False,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                    effective_model=effective_model,
+                    fallback_used=fallback_used,
+                    fallback_exhausted=fallback_exhausted,
+                )
                 self._write_attempt_metadata(attempt_output_file, metadata | error_info | {"parse_stage": "choices_missing"})
-                output_file.write_text(raw_response, encoding="utf-8")
                 return StepResult(
                     step_name=step_spec["name"],
                     success=False,
@@ -1119,18 +1246,22 @@ class OpenAICompatibleRunner(LLMRunner):
                 }
             )
             self._write_attempt_metadata(attempt_output_file, metadata)
-            output_file.write_text(raw_response, encoding="utf-8")
 
             if extraction.payload is None:
-                error_info = {
-                    "code": "INVALID_STEP_OUTPUT",
-                    "message": STEP_ERROR_MESSAGES["INVALID_STEP_OUTPUT"],
-                    "attempt": attempt,
-                    "retryable": False,
-                    "timeout_seconds": timeout_seconds,
-                    "parse_stage": extraction.stage,
-                    "raw_output_present": bool(content.strip()),
-                }
+                error_info = self._finalize_error_info(
+                    {
+                        "code": "INVALID_STEP_OUTPUT",
+                        "message": STEP_ERROR_MESSAGES["INVALID_STEP_OUTPUT"],
+                        "attempt": attempt,
+                        "retryable": False,
+                        "timeout_seconds": timeout_seconds,
+                        "parse_stage": extraction.stage,
+                        "raw_output_present": bool(content.strip()),
+                    },
+                    effective_model=effective_model,
+                    fallback_used=fallback_used,
+                    fallback_exhausted=fallback_exhausted,
+                )
                 return StepResult(
                     step_name=step_spec["name"],
                     success=False,
@@ -1157,6 +1288,78 @@ class OpenAICompatibleRunner(LLMRunner):
                 output_file=str(attempt_output_file),
                 metadata=metadata,
             )
+
+        for primary_attempt in range(1, max_primary_attempts + 1):
+            last_result = _run_attempt(
+                effective_model=primary_model,
+                fallback_used=False,
+                fallback_exhausted=False,
+            )
+            if last_result.success:
+                return last_result
+            error_info = last_result.error or {}
+            if self._should_retry_error(error_info) and primary_attempt < max_primary_attempts:
+                _emit(
+                    "step_retry_scheduled",
+                    {
+                        "attempt": len(attempt_models) + 1,
+                        "retry_count": len(attempt_models),
+                        "error_code": error_info.get("code"),
+                        "http_status": error_info.get("http_status"),
+                        "effective_model": primary_model,
+                        "primary_model": primary_model,
+                        "fallback_model": fallback_model,
+                        "fallback_used": False,
+                    },
+                )
+                self._sleep_before_retry(primary_attempt, step_name)
+                continue
+            if self._should_trigger_fallback(step_name, error_info) and fallback_model and max_fallback_attempts > 0:
+                fallback_trigger_error_code = str(error_info.get("code") or "") or None
+                fallback_trigger_http_status = (
+                    int(error_info.get("http_status"))
+                    if error_info.get("http_status") is not None
+                    else None
+                )
+                _emit(
+                    "llm_fallback_scheduled",
+                    {
+                        "attempt": len(attempt_models) + 1,
+                        "retry_count": len(attempt_models),
+                        "error_code": fallback_trigger_error_code,
+                        "http_status": fallback_trigger_http_status,
+                        "effective_model": fallback_model,
+                        "primary_model": primary_model,
+                        "fallback_model": fallback_model,
+                        "fallback_used": True,
+                    },
+                )
+                break
+            return last_result
+        else:
+            if last_result is not None:
+                return last_result
+
+        for _fallback_attempt in range(1, max_fallback_attempts + 1):
+            _emit(
+                "llm_fallback_started",
+                {
+                    "attempt": len(attempt_models) + 1,
+                    "retry_count": len(attempt_models),
+                    "effective_model": fallback_model,
+                    "primary_model": primary_model,
+                    "fallback_model": fallback_model,
+                    "fallback_used": True,
+                    "fallback_trigger_error_code": fallback_trigger_error_code,
+                    "fallback_trigger_http_status": fallback_trigger_http_status,
+                },
+            )
+            last_result = _run_attempt(
+                effective_model=str(fallback_model),
+                fallback_used=True,
+                fallback_exhausted=True,
+            )
+            return last_result
 
         if last_result is not None:
             return last_result

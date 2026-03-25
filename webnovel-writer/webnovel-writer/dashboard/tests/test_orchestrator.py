@@ -14,7 +14,14 @@ from dashboard.orchestrator import OrchestrationService
 from scripts.data_modules.state_file import ProjectStateCorruptedError
 
 
-def step_result(step_name: str, *, success: bool = True, payload: dict | None = None, error: dict | None = None) -> StepResult:
+def step_result(
+    step_name: str,
+    *,
+    success: bool = True,
+    payload: dict | None = None,
+    error: dict | None = None,
+    metadata: dict | None = None,
+) -> StepResult:
     payload = payload if payload is not None else {"result": "ok"}
     return StepResult(
         step_name=step_name,
@@ -27,6 +34,7 @@ def step_result(step_name: str, *, success: bool = True, payload: dict | None = 
         prompt_file="prompt.md",
         output_file="output.txt",
         error=error,
+        metadata=metadata,
     )
 
 
@@ -346,6 +354,172 @@ def test_external_step_watchdog_fails_instead_of_hanging(tmp_path: Path):
     assert error_path.is_file()
 
 
+def test_orchestrator_records_fallback_events_and_runtime_status(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "draft", "type": "llm", "instructions": "do", "output_schema": {}}]}
+
+    class FallbackSuccessRunner(MappingRunner):
+        runs_dirname = "llm-runs"
+        timeout_ms = 1000
+        max_request_retries = 1
+        retry_backoff_seconds = 0
+        model = "gpt-5.4"
+        fallback_model = "gpt-5.4-mini"
+
+        def _timeout_seconds_for_step(self, step_name):
+            return 1
+
+        def _max_fallback_attempts_for_step(self, step_name):
+            return 1
+
+        def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
+            if progress_callback:
+                progress_callback("request_dispatched", {"attempt": 1, "retry_count": 0, "effective_model": "gpt-5.4"})
+                progress_callback("awaiting_model_response", {"attempt": 1, "retry_count": 0, "effective_model": "gpt-5.4"})
+                progress_callback("step_retry_scheduled", {"attempt": 2, "retry_count": 1, "error_code": "LLM_TIMEOUT", "effective_model": "gpt-5.4"})
+                progress_callback(
+                    "llm_fallback_scheduled",
+                    {
+                        "attempt": 3,
+                        "retry_count": 2,
+                        "error_code": "LLM_TIMEOUT",
+                        "primary_model": "gpt-5.4",
+                        "fallback_model": "gpt-5.4-mini",
+                        "effective_model": "gpt-5.4-mini",
+                    },
+                )
+                progress_callback(
+                    "llm_fallback_started",
+                    {
+                        "attempt": 3,
+                        "retry_count": 2,
+                        "primary_model": "gpt-5.4",
+                        "fallback_model": "gpt-5.4-mini",
+                        "effective_model": "gpt-5.4-mini",
+                    },
+                )
+                progress_callback("response_received", {"attempt": 3, "retry_count": 2, "effective_model": "gpt-5.4-mini"})
+            return step_result(
+                step_spec["name"],
+                payload={"chapter_file": "正文/ch0001.md", "content": "正文", "anti_ai_force_check": "pass", "change_summary": []},
+                metadata={
+                    "attempt": 3,
+                    "retry_count": 2,
+                    "timeout_seconds": 1,
+                    "effective_model": "gpt-5.4-mini",
+                    "primary_model": "gpt-5.4",
+                    "fallback_model": "gpt-5.4-mini",
+                    "fallback_used": True,
+                    "fallback_trigger_error_code": "LLM_TIMEOUT",
+                    "fallback_trigger_http_status": None,
+                    "attempt_models": ["gpt-5.4", "gpt-5.4", "gpt-5.4-mini"],
+                },
+            )
+
+    service = OrchestrationService(project_root, runner=FallbackSuccessRunner())
+    task = service.store.create_task("write", {"chapter": 1}, workflow)
+
+    asyncio.run(service._run_task(task["id"]))
+    refreshed = service.get_task(task["id"])
+    events = service.get_events(task["id"])
+    messages = [event["message"] for event in events]
+    runtime = refreshed["runtime_status"]
+
+    assert refreshed["status"] == "completed"
+    assert "llm_fallback_scheduled" in messages
+    assert "llm_fallback_started" in messages
+    assert "llm_fallback_succeeded" in messages
+    assert runtime["fallback_used"] is True
+    assert runtime["primary_model"] == "gpt-5.4"
+    assert runtime["fallback_model"] == "gpt-5.4-mini"
+    assert runtime["effective_model"] == "gpt-5.4-mini"
+
+
+def test_orchestrator_surfaces_fallback_failure_attribution(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "draft", "type": "llm", "instructions": "do", "output_schema": {}}]}
+
+    class FallbackFailureRunner(MappingRunner):
+        runs_dirname = "llm-runs"
+        timeout_ms = 1000
+        max_request_retries = 0
+        retry_backoff_seconds = 0
+
+        def _timeout_seconds_for_step(self, step_name):
+            return 1
+
+        def _max_fallback_attempts_for_step(self, step_name):
+            return 1
+
+        def run(self, step_spec, workspace, prompt_bundle, progress_callback=None):
+            if progress_callback:
+                progress_callback(
+                    "llm_fallback_scheduled",
+                    {
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "error_code": "LLM_TIMEOUT",
+                        "primary_model": "gpt-5.4",
+                        "fallback_model": "gpt-5.4-mini",
+                        "effective_model": "gpt-5.4-mini",
+                    },
+                )
+                progress_callback(
+                    "llm_fallback_started",
+                    {
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "primary_model": "gpt-5.4",
+                        "fallback_model": "gpt-5.4-mini",
+                        "effective_model": "gpt-5.4-mini",
+                    },
+                )
+            return step_result(
+                step_spec["name"],
+                success=False,
+                payload=None,
+                error={
+                    "code": "LLM_TIMEOUT",
+                    "message": "写作模型请求超时。",
+                    "attempt": 2,
+                    "retryable": True,
+                    "timeout_seconds": 1,
+                    "fallback_used": True,
+                    "effective_model": "gpt-5.4-mini",
+                    "fallback_exhausted": True,
+                },
+                metadata={
+                    "attempt": 2,
+                    "retry_count": 1,
+                    "timeout_seconds": 1,
+                    "effective_model": "gpt-5.4-mini",
+                    "primary_model": "gpt-5.4",
+                    "fallback_model": "gpt-5.4-mini",
+                    "fallback_used": True,
+                    "fallback_trigger_error_code": "LLM_TIMEOUT",
+                    "fallback_trigger_http_status": None,
+                    "attempt_models": ["gpt-5.4", "gpt-5.4-mini"],
+                },
+            )
+
+    service = OrchestrationService(project_root, runner=FallbackFailureRunner())
+    task = service.store.create_task("write", {"chapter": 1}, workflow)
+
+    asyncio.run(service._run_task(task["id"]))
+    failed_task = service.get_task(task["id"])
+    events = service.get_events(task["id"])
+    runtime = failed_task["runtime_status"]
+
+    assert failed_task["status"] == "failed"
+    assert failed_task["error"]["fallback_used"] is True
+    assert failed_task["error"]["fallback_exhausted"] is True
+    assert failed_task["error"]["message"] == "默认模型重试耗尽且自动降级失败。"
+    assert runtime["fallback_used"] is True
+    assert runtime["effective_model"] == "gpt-5.4-mini"
+    assert runtime["phase_detail"] == "默认模型重试耗尽且自动降级失败。"
+    assert any(event["message"] == "llm_fallback_failed" for event in events)
+
+
 def test_runtime_status_aggregates_retry_and_waiting_approval(tmp_path: Path):
     project_root = make_project(tmp_path)
     service = OrchestrationService(project_root, runner=MappingRunner())
@@ -441,6 +615,101 @@ def test_approve_writeback_marks_task_resuming_before_scheduler_runs(tmp_path: P
     assert approved["approval_status"] == "approved"
     assert approval_event["payload"]["resume_from_step"] == "approval-gate"
     assert approval_event["payload"]["reason"] == "继续回写"
+
+
+def test_retry_task_rejects_skipping_chapter_brief_approval(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {
+        "name": "write",
+        "version": 1,
+        "steps": [
+            {"name": "story-director", "type": "internal"},
+            {"name": "chapter-director", "type": "internal"},
+            {"name": "chapter-brief-approval", "type": "internal"},
+            {"name": "context", "type": "llm"},
+        ],
+    }
+    task = service.store.create_task("write", {"chapter": 1}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow)
+    service.store.mark_waiting_for_approval(
+        task["id"],
+        "chapter-brief-approval",
+        {"status": "pending", "requested_at": "2026-03-16T10:05:00", "next_step": "context"},
+        status="awaiting_chapter_brief_approval",
+        approval_kind="chapter_brief",
+    )
+
+    with pytest.raises(ValueError, match="chapter-brief-approval"):
+        service.retry_task(task["id"], resume_from_step="context")
+
+
+def test_retry_task_rejects_skipping_writeback_approval(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {
+        "name": "write",
+        "version": 1,
+        "steps": [
+            {"name": "context", "type": "llm"},
+            {"name": "approval-gate", "type": "internal"},
+            {"name": "data-sync", "type": "llm"},
+        ],
+    }
+    task = service.store.create_task("write", {"chapter": 1, "require_manual_approval": True}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow)
+    service.store.mark_waiting_for_approval(
+        task["id"],
+        "approval-gate",
+        {"status": "pending", "requested_at": "2026-03-16T10:05:00", "next_step": "data-sync"},
+    )
+
+    with pytest.raises(ValueError, match="approval-gate"):
+        service.retry_task(task["id"], resume_from_step="data-sync")
+
+
+def test_approve_writeback_rejects_non_waiting_task(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    workflow = {"name": "write", "version": 1, "steps": [{"name": "context", "type": "llm"}]}
+    task = service.store.create_task("write", {"chapter": 1}, workflow)
+    service.store.update_task(task["id"], workflow_spec=workflow, status="failed", current_step="context", error={"code": "STEP_FAILED"})
+
+    with pytest.raises(ValueError, match="等待审批"):
+        service.approve_writeback(task["id"], "不应提前批准")
+
+
+def test_validate_output_rejects_context_missing_story_plan_and_director_brief(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    step = {
+        "name": "context",
+        "required_output_keys": ["story_plan", "director_brief", "task_brief", "contract_v2", "draft_prompt"],
+    }
+
+    error = service._validate_output(step, {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"})
+
+    assert error is not None
+    assert error["code"] == "INVALID_STEP_OUTPUT"
+    assert error["missing_required_keys"] == ["story_plan", "director_brief"]
+
+
+def test_validate_output_rejects_review_missing_agent_and_chapter(tmp_path: Path):
+    project_root = make_project(tmp_path)
+    service = OrchestrationService(project_root, runner=MappingRunner())
+    step = {
+        "name": "consistency-review",
+        "required_output_keys": ["agent", "chapter", "overall_score", "pass", "issues", "metrics", "summary"],
+    }
+
+    error = service._validate_output(
+        step,
+        {"overall_score": 92, "pass": True, "issues": [], "metrics": {}, "summary": "ok"},
+    )
+
+    assert error is not None
+    assert error["code"] == "INVALID_STEP_OUTPUT"
+    assert error["missing_required_keys"] == ["agent", "chapter"]
 
 
 def test_long_running_step_emits_progress_and_heartbeat(tmp_path: Path):

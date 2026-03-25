@@ -722,3 +722,70 @@ test('recoverable invalid step output task renders system fluctuation guidance f
 })
 
 
+test('task detail shows automatic fallback success status for completed write task', () => {
+    const task = {
+        id: 'task-write-fallback-success-1',
+        task_type: 'write',
+        status: 'completed',
+        current_step: 'draft',
+        updated_at: '2026-03-25T10:05:00Z',
+        runtime_status: {
+            phase_label: '草稿生成',
+            phase_detail: '已自动切换到 gpt-5.4-mini 完成当前步骤。',
+            effective_model: 'gpt-5.4-mini',
+            primary_model: 'gpt-5.4',
+            fallback_model: 'gpt-5.4-mini',
+            fallback_used: true,
+        },
+        request: { chapter: 9 },
+        artifacts: {},
+    }
+
+    renderTaskCenter([task], task)
+
+    expect(screen.getAllByText('已自动切换到 gpt-5.4-mini 完成当前步骤。').length).toBeGreaterThan(0)
+    expect(screen.getByText('实际模型')).not.toBeNull()
+    expect(screen.getAllByText('gpt-5.4-mini').length).toBeGreaterThan(0)
+    expect(screen.getByText('默认模型')).not.toBeNull()
+    expect(screen.getByText('gpt-5.4')).not.toBeNull()
+})
+
+
+test('task detail preserves fallback failure attribution for failed write task', () => {
+    const task = {
+        id: 'task-write-fallback-failed-1',
+        task_type: 'write',
+        status: 'failed',
+        current_step: 'draft',
+        updated_at: '2026-03-25T10:08:00Z',
+        runtime_status: {
+            phase_label: '草稿生成',
+            phase_detail: '默认模型重试耗尽且自动降级失败。',
+            effective_model: 'gpt-5.4-mini',
+            primary_model: 'gpt-5.4',
+            fallback_model: 'gpt-5.4-mini',
+            fallback_used: true,
+            error_code: 'LLM_TIMEOUT',
+        },
+        request: { chapter: 10 },
+        error: {
+            code: 'LLM_TIMEOUT',
+            message: '默认模型重试耗尽且自动降级失败。',
+            details: {
+                fallback_used: true,
+                primary_model: 'gpt-5.4',
+                fallback_model: 'gpt-5.4-mini',
+                effective_model: 'gpt-5.4-mini',
+            },
+        },
+        artifacts: {},
+    }
+
+    renderTaskCenter([task], task)
+
+    expect(screen.getAllByText('默认模型重试耗尽且自动降级失败。').length).toBeGreaterThan(0)
+    expect(screen.getByText('回退模型')).not.toBeNull()
+    expect(screen.getAllByText('gpt-5.4-mini').length).toBeGreaterThan(0)
+})
+
+

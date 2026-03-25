@@ -127,6 +127,8 @@
         "agents/consistency-checker.md"
       ],
       "required_output_keys": [
+        "agent",
+        "chapter",
         "overall_score",
         "pass",
         "issues",
@@ -151,6 +153,8 @@
         "agents/continuity-checker.md"
       ],
       "required_output_keys": [
+        "agent",
+        "chapter",
         "overall_score",
         "pass",
         "issues",
@@ -175,6 +179,8 @@
         "agents/ooc-checker.md"
       ],
       "required_output_keys": [
+        "agent",
+        "chapter",
         "overall_score",
         "pass",
         "issues",

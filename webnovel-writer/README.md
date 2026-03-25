@@ -75,17 +75,19 @@ tools\Start-Webnovel-Writer.bat shell
 
 ## 写作主链
 
-当前 `write` 主链已经切到“先看章节简报，再写正文”的双阶段流程：
+当前 `write` 主链以 `webnovel-writer/workflow_specs/write.json` 为唯一真源。
 
-- 阶段 A：`story-director -> chapter-director -> chapter-brief-approval`
-- 阶段 B：`context -> draft -> consistency-review -> continuity-review -> ooc-review -> review-summary -> polish -> approval-gate -> data-sync`
+当前真实链路固定为：
+
+- `story-director -> chapter-director -> chapter-brief-approval -> context -> draft -> consistency-review -> continuity-review -> ooc-review -> review-summary -> polish -> approval-gate -> data-sync`
 
 默认行为：
 
 - 每章先停在 `awaiting_chapter_brief_approval`
-- 先批准章节简报，再进入正文阶段
-- 只有显式传入 `require_manual_approval = true` 时，正文才会停在回写确认
-- `data-sync` 会把长期状态写回 `.webnovel`
+- 必须先批准章节 brief（章节简报），再进入 `context` 和正文生成阶段
+- 只有显式传入 `require_manual_approval = true` 时，任务才会在 `approval-gate` 再次停下等待回写审批
+- `context` 与 3 个 review step（审查步骤）都执行严格输出合同校验
+- `data-sync` 负责把长期状态写回 `.webnovel`
 
 ## 修稿主链
 
@@ -145,3 +147,13 @@ Notes:
 - `npm test` is now the single frontend test entrypoint.
 - `npm run test:state` keeps the `node:test` logic-only suite.
 - `npm run test:ui` keeps the Vitest + `jsdom` suite and now includes previously omitted test files.
+
+## LLM fallback（模型自动降级）
+
+当写作主链使用 `WEBNOVEL_LLM_PROVIDER=openai-compatible` 且默认模型为 `gpt-5.4` 时，`draft` / `polish` 现已支持自动降级到 `gpt-5.4-mini`：
+
+- 先按原模型完成同模重试
+- 仅在 `LLM_TIMEOUT` 或可重试 `5xx` `LLM_HTTP_ERROR` 时自动切换
+- 降级是否发生、实际使用模型、触发错误和尝试顺序都会写入 `.webnovel/observability`
+
+环境变量说明见 [webnovel-writer/.env.example](./webnovel-writer/.env.example) 和 [docs/operations.md](./docs/operations.md)。

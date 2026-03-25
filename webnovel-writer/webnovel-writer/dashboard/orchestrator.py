@@ -144,6 +144,10 @@ RUNTIME_EVENT_LABELS = {
     "step_heartbeat": "任务仍在运行",
     "step_retry_scheduled": "已安排步骤重试",
     "step_retry_started": "步骤重试开始",
+    "llm_fallback_scheduled": "已安排自动降级",
+    "llm_fallback_started": "自动降级已开始",
+    "llm_fallback_succeeded": "自动降级已完成当前步骤",
+    "llm_fallback_failed": "自动降级后仍失败",
     "Waiting for chapter brief approval": "等待人工确认章节 brief",
     "Chapter brief approved": "已批准 chapter brief",
     "Chapter brief rejected": "已驳回 chapter brief",
@@ -2266,6 +2270,34 @@ class OrchestrationService:
             "http_status",
             fallback=(task.get("error") or {}).get("http_status") or (step_result.get("error") or {}).get("http_status"),
         )
+        effective_model = self._resolve_runtime_value(
+            task,
+            step_key,
+            runtime_events,
+            "effective_model",
+            fallback=(task.get("error") or {}).get("effective_model") or (step_result.get("metadata") or {}).get("effective_model"),
+        )
+        primary_model = self._resolve_runtime_value(
+            task,
+            step_key,
+            runtime_events,
+            "primary_model",
+            fallback=(task.get("error") or {}).get("primary_model") or (step_result.get("metadata") or {}).get("primary_model"),
+        )
+        fallback_model = self._resolve_runtime_value(
+            task,
+            step_key,
+            runtime_events,
+            "fallback_model",
+            fallback=(task.get("error") or {}).get("fallback_model") or (step_result.get("metadata") or {}).get("fallback_model"),
+        )
+        fallback_used = self._resolve_runtime_value(
+            task,
+            step_key,
+            runtime_events,
+            "fallback_used",
+            fallback=(task.get("error") or {}).get("fallback_used", (step_result.get("metadata") or {}).get("fallback_used")),
+        )
         step_state = self._resolve_runtime_step_state(task, last_event, attempt=attempt)
         if task.get("task_type") == "plan" and (task.get("artifacts") or {}).get("plan_blocked"):
             step_state = "failed"
@@ -2306,6 +2338,10 @@ class OrchestrationService:
             "waiting_since": self._format_runtime_datetime(waiting_since),
             "error_code": error_code,
             "http_status": http_status,
+            "effective_model": effective_model,
+            "primary_model": primary_model,
+            "fallback_model": fallback_model,
+            "fallback_used": fallback_used,
             "recoverability": task_error_details.get("recoverability") if isinstance(task_error_details, dict) else None,
             "suggested_resume_step": task_error_details.get("suggested_resume_step") if isinstance(task_error_details, dict) else None,
         }
@@ -2330,6 +2366,12 @@ class OrchestrationService:
             retryable = (task.get("error") or {}).get("retryable", (step_result.get("error") or {}).get("retryable"))
         error_code = payload.get("error_code") or (task.get("error") or {}).get("code") or (step_result.get("error") or {}).get("code")
         http_status = payload.get("http_status") or (task.get("error") or {}).get("http_status")
+        effective_model = payload.get("effective_model") or (task.get("error") or {}).get("effective_model") or (step_result.get("metadata") or {}).get("effective_model")
+        primary_model = payload.get("primary_model") or (task.get("error") or {}).get("primary_model") or (step_result.get("metadata") or {}).get("primary_model")
+        fallback_model = payload.get("fallback_model") or (task.get("error") or {}).get("fallback_model") or (step_result.get("metadata") or {}).get("fallback_model")
+        fallback_used = payload.get("fallback_used")
+        if fallback_used is None:
+            fallback_used = (task.get("error") or {}).get("fallback_used", (step_result.get("metadata") or {}).get("fallback_used"))
         step_state = self._resolve_runtime_step_state(task, last_event if isinstance(last_event, dict) else None, attempt=attempt)
         step_started_at = self._resolve_summary_step_started_at(task, step_key, last_event if isinstance(last_event, dict) else None)
         waiting_since = self._resolve_summary_waiting_since(task, step_state, last_event if isinstance(last_event, dict) else None)
@@ -2371,6 +2413,10 @@ class OrchestrationService:
             "waiting_since": self._format_runtime_datetime(waiting_since),
             "error_code": error_code,
             "http_status": http_status,
+            "effective_model": effective_model,
+            "primary_model": primary_model,
+            "fallback_model": fallback_model,
+            "fallback_used": fallback_used,
             "recoverability": task_error_details.get("recoverability") if isinstance(task_error_details, dict) else None,
             "suggested_resume_step": task_error_details.get("suggested_resume_step") if isinstance(task_error_details, dict) else None,
         }
@@ -2780,6 +2826,10 @@ class OrchestrationService:
         if step_state == "rejected":
             return "任务已被拒绝，不会继续执行回写。"
         if step_state == "failed":
+            if (task.get("error") or {}).get("fallback_exhausted"):
+                return "默认模型重试耗尽且自动降级失败。"
+            if (task.get("error") or {}).get("fallback_used"):
+                return "默认模型失败，自动降级后仍失败。"
             error_code = (task.get("error") or {}).get("code")
             if error_code == PLAN_INPUT_BLOCKED_CODE:
                 return "当前规划信息不足，需要先回总览页补录后再运行 plan。"
@@ -2837,6 +2887,23 @@ class OrchestrationService:
             if attempt:
                 return f"正在进行第 {attempt} 次尝试。"
             return "步骤重试已开始。"
+        if message == "llm_fallback_scheduled":
+            fallback_model = payload.get("fallback_model")
+            if fallback_model:
+                return f"默认模型重试耗尽，准备自动切换到 {fallback_model}。"
+            return "默认模型重试耗尽，准备自动降级。"
+        if message == "llm_fallback_started":
+            fallback_model = payload.get("fallback_model")
+            if fallback_model:
+                return f"已自动切换到 {fallback_model}，正在继续当前步骤。"
+            return "已开始自动降级，正在继续当前步骤。"
+        if message == "llm_fallback_succeeded":
+            fallback_model = payload.get("fallback_model") or payload.get("effective_model")
+            if fallback_model:
+                return f"已自动切换到 {fallback_model} 完成当前步骤。"
+            return "自动降级已完成当前步骤。"
+        if message == "llm_fallback_failed":
+            return "默认模型重试耗尽且自动降级失败。"
         if message == "Writeback approved":
             return "你已批准回写，系统正在继续执行后续写回步骤。"
         if message == "Resume target scheduled":
@@ -3055,7 +3122,7 @@ class OrchestrationService:
             raise ValueError("任务已取消，不能直接重试。")
         if task_error.get("retryable") is False:
             raise ValueError("当前任务不允许重试。")
-        target_step = resume_from_step or self._determine_resume_from_step(current_task)
+        target_step = self._validate_requested_resume_from_step(current_task, resume_from_step)
         preserve_approval = bool(
             current_task.get("approval_status") == "approved" and target_step in {"chapter-brief-approval", "approval-gate", "data-sync", "repair-writeback"}
         )
@@ -3069,6 +3136,17 @@ class OrchestrationService:
         )
         self._schedule(task_id, resume_from_step=target_step)
         return self.store.get_task(task_id)
+
+    def _validate_requested_resume_from_step(self, task: Dict[str, Any], requested_step: Optional[str]) -> Optional[str]:
+        target_step = requested_step or self._determine_resume_from_step(task)
+        status = str(task.get("status") or "")
+        if status == "awaiting_chapter_brief_approval" and target_step != "chapter-brief-approval":
+            raise ValueError("等待 chapter brief 审批的任务只能从 chapter-brief-approval 恢复。")
+        if status == "awaiting_writeback_approval":
+            allowed_step = "repair-writeback" if task.get("task_type") == "repair" else "approval-gate"
+            if target_step != allowed_step:
+                raise ValueError(f"等待回写审批的任务只能从 {allowed_step} 恢复。")
+        return target_step
 
     def cancel_task(self, task_id: str, reason: str = "") -> Dict[str, Any]:
         task = self.store.get_task(task_id)
@@ -3108,6 +3186,8 @@ class OrchestrationService:
             )
             self._schedule(task_id, resume_from_step=resume_step)
             return self.store.get_task(task_id)
+        if status != "awaiting_writeback_approval":
+            raise ValueError("当前任务不处于等待审批状态，不能提前批准。")
 
         self.store.update_task(task_id, approval_status="approved", status="resuming_writeback")
         self.store.append_event(
@@ -4238,6 +4318,7 @@ class OrchestrationService:
             error_info=result.error or {"code": "STEP_FAILED", "message": "step execution failed"},
             result=result,
         )
+        failure_error = self._normalize_llm_failure_attribution(failure_error)
         self.store.mark_failed(
             task_id,
             step_name,
@@ -4390,9 +4471,18 @@ class OrchestrationService:
                 retry_backoff_seconds = max(0.0, float(getattr(self.runner, "retry_backoff_seconds", 0.0) or 0.0))
         else:
             retry_backoff_seconds = max(0.0, float(getattr(self.runner, "retry_backoff_seconds", 0.0) or 0.0))
+        fallback_attempts_method = getattr(self.runner, "_max_fallback_attempts_for_step", None)
+        if callable(fallback_attempts_method):
+            try:
+                fallback_attempts = max(0, int(fallback_attempts_method(step_name)))
+            except Exception:
+                fallback_attempts = 0
+        else:
+            fallback_attempts = 0
         retry_wait_budget = sum(retry_backoff_seconds * (2 ** attempt) for attempt in range(retry_count))
         grace_seconds = 15.0
-        return max(request_timeout_seconds + grace_seconds, request_timeout_seconds * (retry_count + 1) + retry_wait_budget + grace_seconds)
+        total_attempt_budget = request_timeout_seconds * (retry_count + 1 + fallback_attempts)
+        return max(request_timeout_seconds + grace_seconds, total_attempt_budget + retry_wait_budget + grace_seconds)
 
     def _llm_run_dir(self, task_id: str, step_name: str) -> Path:
         runs_dirname = str(getattr(self.runner, "runs_dirname", "llm-runs") or "llm-runs")
@@ -4539,6 +4629,14 @@ class OrchestrationService:
             payload=payload,
         )
         metadata = result.metadata or {}
+        if payload.get("fallback_used"):
+            self.store.append_event(
+                task_id,
+                "info" if result.success else "error",
+                "llm_fallback_succeeded" if result.success else "llm_fallback_failed",
+                step_name=step_name,
+                payload=payload,
+            )
         if metadata.get("json_extraction_recovered"):
             self.store.append_event(
                 task_id,
@@ -4564,6 +4662,14 @@ class OrchestrationService:
                     "suggested_resume_step": ((result.error.get("details") or {}).get("suggested_resume_step")),
                 },
             )
+
+    def _normalize_llm_failure_attribution(self, error_info: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(error_info or {})
+        if normalized.get("fallback_exhausted"):
+            normalized["message"] = "默认模型重试耗尽且自动降级失败。"
+        elif normalized.get("fallback_used"):
+            normalized["message"] = "默认模型失败，自动降级后仍失败。"
+        return normalized
 
     def _current_llm_config_signature(self) -> Optional[str]:
         fingerprint = {
@@ -4618,6 +4724,14 @@ class OrchestrationService:
             "missing_required_keys",
             "watchdog_timeout_seconds",
             "llm_config_signature",
+            "effective_model",
+            "primary_model",
+            "fallback_model",
+            "fallback_used",
+            "fallback_trigger_error_code",
+            "fallback_trigger_http_status",
+            "attempt_models",
+            "fallback_exhausted",
         ):
             if key == "error_code":
                 value = error.get("code")
@@ -7400,8 +7514,6 @@ class OrchestrationService:
     def _validate_output(self, step: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
         required = step.get("required_output_keys", [])
         missing = [key for key in required if key not in payload]
-        if str(step.get("name") or "").strip().lower() == "context":
-            missing = [key for key in missing if key not in {"director_brief", "story_plan"}]
         if missing:
             return {
                 "code": "INVALID_STEP_OUTPUT",
@@ -8101,6 +8213,11 @@ class OrchestrationService:
         steps = [step["name"] for step in workflow.get("steps", [])]
         step_results = ((task.get("artifacts") or {}).get("step_results") or {})
         current_step = task.get("current_step")
+        status = str(task.get("status") or "")
+        if status == "awaiting_chapter_brief_approval":
+            return "chapter-brief-approval"
+        if status == "awaiting_writeback_approval":
+            return "repair-writeback" if task.get("task_type") == "repair" else "approval-gate"
         if current_step in {"polish", "data-sync", "repair-writeback"}:
             return current_step
         if task.get("task_type") == "write" and task.get("approval_status") == "approved":

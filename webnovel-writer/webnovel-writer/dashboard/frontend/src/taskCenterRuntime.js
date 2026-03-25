@@ -1,4 +1,5 @@
 export function resolveRuntimeBadgeLabel(task) {
+    if (isApprovalAwaitingTask(task)) return '待审批'
     if (task?.artifacts?.plan_blocked) return '待补信息'
     const stepState = task?.runtime_status?.step_state
     if (stepState === 'interrupted') return '已中断'
@@ -14,6 +15,7 @@ export function resolveRuntimeBadgeLabel(task) {
 }
 
 export function resolveRuntimeBadgeTone(task) {
+    if (isApprovalAwaitingTask(task)) return 'warning'
     if (task?.artifacts?.plan_blocked) return 'warning'
     const stepState = task?.runtime_status?.step_state
     if (stepState === 'running') return 'info'
@@ -36,13 +38,16 @@ export function mapContinuationToneToBadgeTone(tone) {
 }
 
 export function buildRuntimeSummary(task) {
-    if (task?.artifacts?.plan_blocked) return '需先回总览补录规划信息'
+    if (isApprovalAwaitingTask(task)) {
+        return buildApprovalRuntimeSummary(task)
+    }
+    if (task?.artifacts?.plan_blocked) return '需先回总览页补录规划信息'
     const runtime = task?.runtime_status || {}
     const parts = []
     if (runtime.phase_label) parts.push(runtime.phase_label)
     if (runtime.phase_detail) parts.push(runtime.phase_detail)
     if (runtime.step_state === 'interrupted' || runtime.step_state === 'cancelled' || runtime.step_state === 'rejected') {
-        return parts.join(' · ') || resolveRuntimeBadgeLabel(task)
+        return parts.join(' 路 ') || resolveRuntimeBadgeLabel(task)
     }
     if (runtime.step_state === 'retrying' && runtime.attempt) {
         parts.push(`第 ${runtime.attempt} 次尝试`)
@@ -58,12 +63,37 @@ export function buildRuntimeSummary(task) {
         parts.push(`耗时 ${formatRuntimeDuration(runtime.running_seconds)}`)
     }
     if (!parts.length) return '暂无实时状态'
-    return parts.join(' · ')
+    return parts.join(' 路 ')
 }
 
 export function isRuntimeActiveTask(task) {
     const stepState = task?.runtime_status?.step_state
     return stepState === 'running' || stepState === 'retrying' || stepState === 'resuming_writeback'
+}
+
+function isApprovalAwaitingTask(task) {
+    const status = String(task?.status || '').trim()
+    const approvalStatus = String(task?.approval_status || '').trim()
+    const stepState = String(task?.runtime_status?.step_state || '').trim()
+    return approvalStatus === 'pending'
+        || status === 'awaiting_chapter_brief_approval'
+        || status === 'awaiting_writeback_approval'
+        || stepState === 'waiting_approval'
+}
+
+function buildApprovalRuntimeSummary(task) {
+    const runtime = task?.runtime_status || {}
+    const parts = []
+    if (runtime.phase_label) parts.push(runtime.phase_label)
+    if (runtime.phase_detail) parts.push(runtime.phase_detail)
+    if (task?.status === 'awaiting_chapter_brief_approval') {
+        parts.push('后续重规划已完成，等待人工确认新简报后开写')
+    } else if (task?.status === 'awaiting_writeback_approval') {
+        parts.push('等待人工批准回写')
+    } else {
+        parts.push('等待人工审批')
+    }
+    return parts.join(' 路 ')
 }
 
 export function withLiveRuntimeStatus(task, nowMs) {
@@ -136,11 +166,21 @@ export function buildEventPayloadTags(payload) {
         ['timeout_seconds', '超时'],
         ['http_status', 'HTTP'],
         ['error_code', '错误码'],
+        ['effective_model', '实际模型'],
+        ['primary_model', '默认模型'],
+        ['fallback_model', '回退模型'],
+        ['fallback_used', '自动降级'],
     ]
     pairs.forEach(([key, label]) => {
         const value = payload?.[key]
         if (value === null || value === undefined || value === '') return
-        items.push({ label, value: key === 'timeout_seconds' ? `${value} 秒` : String(value) })
+        let displayValue = String(value)
+        if (key === 'timeout_seconds') {
+            displayValue = `${value} 秒`
+        } else if (key === 'fallback_used') {
+            displayValue = value ? '是' : '否'
+        }
+        items.push({ label, value: displayValue })
     })
     return items
 }

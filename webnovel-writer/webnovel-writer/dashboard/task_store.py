@@ -11,7 +11,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from filelock import FileLock, Timeout
 
@@ -242,26 +242,18 @@ class TaskStore:
             return None
 
     def update_task(self, task_id: str, **updates: Any) -> Dict[str, Any]:
-        with self._lock:
-            task = self.get_task(task_id)
-            if task is None:
-                raise KeyError(task_id)
+        def _mutate(task: Dict[str, Any]) -> None:
             task.update(updates)
             task["updated_at"] = _now_iso()
-            self._write_task(task)
-            return task
+        return self._mutate_task(task_id, _mutate)
 
     def save_step_result(self, task_id: str, step_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
-        with self._lock:
-            task = self.get_task(task_id)
-            if task is None:
-                raise KeyError(task_id)
+        def _mutate(task: Dict[str, Any]) -> None:
             artifacts = task.setdefault("artifacts", {})
             step_results = artifacts.setdefault("step_results", {})
             step_results[step_name] = result
             task["updated_at"] = _now_iso()
-            self._write_task(task)
-            return task
+        return self._mutate_task(task_id, _mutate)
 
     def append_event(
         self,
@@ -364,14 +356,13 @@ class TaskStore:
         return rows[-limit:]
 
     def mark_running(self, task_id: str, step_name: Optional[str]) -> Dict[str, Any]:
-        task = self.get_task(task_id)
-        return self.update_task(
-            task_id,
-            status="running",
-            current_step=step_name,
-            started_at=task.get("started_at") or _now_iso(),
-            error=None,
-        )
+        def _mutate(task: Dict[str, Any]) -> None:
+            task["status"] = "running"
+            task["current_step"] = step_name
+            task["started_at"] = task.get("started_at") or _now_iso()
+            task["error"] = None
+            task["updated_at"] = _now_iso()
+        return self._mutate_task(task_id, _mutate)
 
     def mark_waiting_for_approval(
         self,
@@ -382,10 +373,7 @@ class TaskStore:
         status: str = "awaiting_writeback_approval",
         approval_kind: str = "writeback",
     ) -> Dict[str, Any]:
-        with self._lock:
-            task = self.get_task(task_id)
-            if task is None:
-                raise KeyError(task_id)
+        def _mutate(task: Dict[str, Any]) -> None:
             artifacts = task.setdefault("artifacts", {})
             approval_artifacts = dict(artifacts.get("approval") or {})
             approval_record = {
@@ -404,8 +392,7 @@ class TaskStore:
             task["approval_status"] = "pending"
             task["current_step"] = step_name
             task["updated_at"] = _now_iso()
-            self._write_task(task)
-            return task
+        return self._mutate_task(task_id, _mutate)
 
     def mark_completed(self, task_id: str) -> Dict[str, Any]:
         return self.update_task(
@@ -456,10 +443,7 @@ class TaskStore:
         )
 
     def reset_for_retry(self, task_id: str, *, preserve_approval: bool = False) -> Dict[str, Any]:
-        with self._lock:
-            task = self.get_task(task_id)
-            if task is None:
-                raise KeyError(task_id)
+        def _mutate(task: Dict[str, Any]) -> None:
             failed_step = task.get("current_step")
             artifacts = task.setdefault("artifacts", {})
             step_results = artifacts.setdefault("step_results", {})
@@ -474,20 +458,19 @@ class TaskStore:
             task["finished_at"] = None
             task["error"] = None
             task["updated_at"] = _now_iso()
-            self._write_task(task)
-            return task
+        return self._mutate_task(task_id, _mutate)
 
     def prepare_for_resume(self, task_id: str, *, resume_from_step: Optional[str], reason: str) -> Dict[str, Any]:
-        return self.update_task(
-            task_id,
-            status="queued",
-            current_step=resume_from_step,
-            finished_at=None,
-            error=None,
-            recovered_at=_now_iso(),
-            resume_from_step=resume_from_step,
-            resume_reason=reason,
-        )
+        def _mutate(task: Dict[str, Any]) -> None:
+            task["status"] = "queued"
+            task["current_step"] = resume_from_step
+            task["finished_at"] = None
+            task["error"] = None
+            task["recovered_at"] = _now_iso()
+            task["resume_from_step"] = resume_from_step
+            task["resume_reason"] = reason
+            task["updated_at"] = _now_iso()
+        return self._mutate_task(task_id, _mutate)
 
     def mark_stale_running_tasks(self, active_task_ids: Optional[set[str]] = None) -> int:
         active = active_task_ids or set()
@@ -515,16 +498,88 @@ class TaskStore:
         return self.base_dir / f"{task_id}.events.jsonl"
 
     def _record_runtime_event(self, task_id: str, event: Dict[str, Any]) -> None:
-        with self._lock:
-            task = self.get_task(task_id)
-            if task is None:
-                return
+        def _mutate(task: Dict[str, Any]) -> None:
             runtime_meta = task.setdefault("runtime_meta", {})
             runtime_meta["last_event"] = self._compact_runtime_event(event)
             if str(event.get("message") or "") != "step_heartbeat":
                 runtime_meta["last_non_heartbeat_event"] = self._compact_runtime_event(event)
                 task["updated_at"] = str(event.get("timestamp") or _now_iso())
-            self._write_task(task)
+        try:
+            self._mutate_task(task_id, _mutate)
+        except KeyError:
+            return
+
+    def _mutate_task(self, task_id: str, mutator: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        with self._lock:
+            def _apply(path: Path) -> Dict[str, Any]:
+                task = self._read_task_file(path)
+                if task is None:
+                    raise KeyError(task_id)
+                mutator(task)
+                self._write_task_file(path, task)
+                return task
+
+            return self._with_task_file_lock(task_id, _apply)
+
+    def _read_task_file(self, path: Path) -> Optional[Dict[str, Any]]:
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            logger.warning("任务文件 JSON 解析失败，文件: %s，错误: %s", path, e)
+            return None
+
+    def _with_task_file_lock(self, task_id: str, callback: Callable[[Path], Any]) -> Any:
+        path = self._task_path(task_id)
+        lock_path = self._locks_dir / f"{task_id}.lock"
+        file_lock = FileLock(lock_path)
+        lock_key = f"task:{task_id}:{threading.get_ident()}"
+        lock_acquired = False
+        try:
+            logger.debug("尝试获取文件锁，任务ID: %s，锁路径: %s", task_id, lock_path)
+            file_lock.acquire(timeout=FILE_LOCK_TIMEOUT)
+            lock_acquired = True
+            self._register_lock_acquire(lock_key, lock_path)
+            logger.debug("文件锁获取成功，任务ID: %s", task_id)
+            return callback(path)
+        except Timeout:
+            logger.error(
+                "文件锁获取超时，任务ID: %s，锁路径: %s，超时时间: %d秒",
+                task_id, lock_path, FILE_LOCK_TIMEOUT
+            )
+            raise
+        finally:
+            if lock_acquired:
+                try:
+                    file_lock.release()
+                    self._register_lock_release(lock_key)
+                    logger.debug("文件锁释放成功，任务ID: %s", task_id)
+                except Exception as e:
+                    logger.warning("文件锁释放失败，任务ID: %s，错误: %s", task_id, e)
+
+    def _write_task_file(self, path: Path, task: Dict[str, Any]) -> None:
+        tmp_suffix = f".tmp.{os.getpid()}.{threading.get_ident()}"
+        tmp_path = path.with_suffix(f".json{tmp_suffix}")
+        try:
+            json_content = json.dumps(task, ensure_ascii=False, indent=2)
+            tmp_path.write_text(json_content, encoding="utf-8")
+            logger.debug("临时文件写入成功，路径: %s，大小: %d 字节", tmp_path, len(json_content))
+            os.replace(str(tmp_path), str(path))
+            logger.debug("原子替换完成，任务ID: %s，最终路径: %s", task.get("id"), path)
+        except Exception as e:
+            logger.error(
+                "任务写入失败，任务ID: %s，错误类型: %s，错误信息: %s\n调用栈:\n%s",
+                task.get("id"), type(e).__name__, str(e), traceback.format_exc()
+            )
+            raise
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                    logger.debug("清理临时文件成功，路径: %s", tmp_path)
+                except Exception as e:
+                    logger.warning("清理临时文件失败，路径: %s，错误: %s", tmp_path, e)
 
     def _compact_runtime_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         payload = event.get("payload") or {}
@@ -568,55 +623,6 @@ class TaskStore:
             IOError: 文件写入失败
         """
         task_id = task["id"]
-        path = self._task_path(task_id)
-        lock_path = self._locks_dir / f"{task_id}.lock"
-        file_lock = FileLock(lock_path)
-        lock_key = f"task:{task_id}:{threading.get_ident()}"
-        
-        tmp_suffix = f".tmp.{os.getpid()}.{threading.get_ident()}"
-        tmp_path = path.with_suffix(f".json{tmp_suffix}")
-        
-        lock_acquired = False
-        try:
-            logger.debug("尝试获取文件锁，任务ID: %s，锁路径: %s", task_id, lock_path)
-            file_lock.acquire(timeout=FILE_LOCK_TIMEOUT)
-            lock_acquired = True
-            self._register_lock_acquire(lock_key, lock_path)
-            logger.debug("文件锁获取成功，任务ID: %s", task_id)
-            
-            json_content = json.dumps(task, ensure_ascii=False, indent=2)
-            tmp_path.write_text(json_content, encoding="utf-8")
-            logger.debug("临时文件写入成功，路径: %s，大小: %d 字节", tmp_path, len(json_content))
-            
-            os.replace(str(tmp_path), str(path))
-            logger.debug("原子替换完成，任务ID: %s，最终路径: %s", task_id, path)
-            
-        except Timeout:
-            logger.error(
-                "文件锁获取超时，任务ID: %s，锁路径: %s，超时时间: %d秒",
-                task_id, lock_path, FILE_LOCK_TIMEOUT
-            )
-            raise
-        except Exception as e:
-            logger.error(
-                "任务写入失败，任务ID: %s，错误类型: %s，错误信息: %s\n调用栈:\n%s",
-                task_id, type(e).__name__, str(e), traceback.format_exc()
-            )
-            raise
-        finally:
-            if lock_acquired:
-                try:
-                    file_lock.release()
-                    self._register_lock_release(lock_key)
-                    logger.debug("文件锁释放成功，任务ID: %s", task_id)
-                except Exception as e:
-                    logger.warning("文件锁释放失败，任务ID: %s，错误: %s", task_id, e)
-            
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                    logger.debug("清理临时文件成功，路径: %s", tmp_path)
-                except Exception as e:
-                    logger.warning("清理临时文件失败，路径: %s，错误: %s", tmp_path, e)
+        self._with_task_file_lock(task_id, lambda path: self._write_task_file(path, task))
 
 

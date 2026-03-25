@@ -1263,11 +1263,11 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         target_root.mkdir(parents=True, exist_ok=True)
         title = (request.title or target_root.name or 'My Novel').strip() or 'My Novel'
         genre = (request.genre or '\u7384\u5e7b').strip() or '\u7384\u5e7b'
-        script_path = Path(__file__).resolve().parent.parent / 'scripts' / 'init_project.py'
+        package_root = Path(__file__).resolve().parent.parent
         completed = await asyncio.to_thread(
             run,
-            [sys.executable, str(script_path), str(target_root), title, genre],
-            cwd=str(Path(__file__).resolve().parent.parent),
+            [sys.executable, '-m', 'scripts.init_project', str(target_root), title, genre],
+            cwd=str(package_root),
             capture_output=True,
             text=True,
             encoding='utf-8',

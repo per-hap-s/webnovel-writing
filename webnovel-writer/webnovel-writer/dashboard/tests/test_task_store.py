@@ -8,6 +8,7 @@ import json
 import multiprocessing
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -369,6 +370,18 @@ class TestStepResult:
 
         assert loaded["artifacts"]["step_results"]["context"]["success"] is True
         assert loaded["artifacts"]["step_results"]["draft"]["word_count"] == 2000
+
+    def test_update_task_preserves_step_results_after_stale_read(self, task_store: TaskStore, sample_workflow: dict, monkeypatch: pytest.MonkeyPatch):
+        task = task_store.create_task("write", {"chapter": 1}, sample_workflow)
+        stale_snapshot = deepcopy(task_store.get_task(task["id"]))
+        task_store.save_step_result(task["id"], "context", {"success": True, "output": "章节内容"})
+
+        monkeypatch.setattr(task_store, "get_task", lambda task_id: deepcopy(stale_snapshot) if task_id == task["id"] else None)
+
+        updated = task_store.update_task(task["id"], approval_status="pending")
+
+        assert updated["approval_status"] == "pending"
+        assert updated["artifacts"]["step_results"]["context"]["output"] == "章节内容"
 
 
 class TestTaskRetrieval:

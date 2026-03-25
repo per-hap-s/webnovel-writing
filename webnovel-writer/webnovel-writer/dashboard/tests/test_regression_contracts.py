@@ -13,7 +13,7 @@ PROJECT_BOOTSTRAP_SECTION_PATH = DASHBOARD_ROOT / 'frontend' / 'src' / 'projectB
 FRONTEND_SRC_ROOT = DASHBOARD_ROOT / 'frontend' / 'src'
 ENV_EXAMPLE_PATH = PACKAGE_ROOT / '.env.example'
 REVIEW_STEP_NAMES = {'consistency-review', 'continuity-review', 'ooc-review'}
-EXPECTED_REVIEW_KEYS = ['overall_score', 'pass', 'issues', 'metrics', 'summary']
+EXPECTED_REVIEW_KEYS = ['agent', 'chapter', 'overall_score', 'pass', 'issues', 'metrics', 'summary']
 
 
 def _load_json(path: Path) -> dict:

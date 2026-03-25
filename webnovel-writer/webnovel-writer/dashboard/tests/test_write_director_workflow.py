@@ -102,8 +102,20 @@ def long_content(title: str) -> str:
     return f"# {title}\n" + ("Rain archive memory cost " * 50)
 
 
-def review_payload(score: float = 91.0, *, issues: list[dict] | None = None, passed: bool = True) -> dict:
+def context_payload(chapter: int = 1) -> dict:
     return {
+        "story_plan": {"anchor_chapter": chapter, "chapters": [chapter]},
+        "director_brief": {"chapter": chapter, "chapter_goal": "Push the anomaly thread forward"},
+        "task_brief": {"chapter": chapter},
+        "contract_v2": {"chapter": chapter},
+        "draft_prompt": "write",
+    }
+
+
+def review_payload(step_name: str, chapter: int = 1, score: float = 91.0, *, issues: list[dict] | None = None, passed: bool = True) -> dict:
+    return {
+        "agent": step_name,
+        "chapter": chapter,
         "overall_score": score,
         "pass": passed,
         "issues": issues or [],
@@ -118,11 +130,11 @@ def test_write_task_waits_for_chapter_brief_approval_before_context(tmp_path: Pa
     content = long_content("Chapter 1")
     runner = SequenceRunner(
         {
-            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "context": step_result("context", context_payload()),
             "draft": step_result("draft", {"chapter_file": chapter_file, "content": content, "word_count": len(''.join(content.split()))}),
-            "consistency-review": step_result("consistency-review", review_payload()),
-            "continuity-review": step_result("continuity-review", review_payload()),
-            "ooc-review": step_result("ooc-review", review_payload()),
+            "consistency-review": step_result("consistency-review", review_payload("consistency-review")),
+            "continuity-review": step_result("continuity-review", review_payload("continuity-review")),
+            "ooc-review": step_result("ooc-review", review_payload("ooc-review")),
             "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
             "data-sync": step_result("data-sync", {"files_written": [chapter_file], "summary_file": ".webnovel/summaries/ch0001.md", "state_updated": True, "index_updated": True}),
         }
@@ -145,11 +157,11 @@ def test_approved_chapter_brief_resumes_write_and_auto_completes_writeback(tmp_p
     content = long_content("Chapter 1")
     runner = SequenceRunner(
         {
-            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "context": step_result("context", context_payload()),
             "draft": step_result("draft", {"chapter_file": chapter_file, "content": content, "word_count": len(''.join(content.split()))}),
-            "consistency-review": step_result("consistency-review", review_payload()),
-            "continuity-review": step_result("continuity-review", review_payload()),
-            "ooc-review": step_result("ooc-review", review_payload()),
+            "consistency-review": step_result("consistency-review", review_payload("consistency-review")),
+            "continuity-review": step_result("continuity-review", review_payload("continuity-review")),
+            "ooc-review": step_result("ooc-review", review_payload("ooc-review")),
             "polish": step_result("polish", {"chapter_file": chapter_file, "content": content, "anti_ai_force_check": "pass", "change_summary": []}),
             "data-sync": step_result(
                 "data-sync",
@@ -194,11 +206,11 @@ def test_write_uses_word_count_from_same_source_as_selected_content(tmp_path: Pa
     polished_word_count = len("".join(polished_content.split()))
     runner = SequenceRunner(
         {
-            "context": step_result("context", {"task_brief": {}, "contract_v2": {}, "draft_prompt": "write"}),
+            "context": step_result("context", context_payload()),
             "draft": step_result("draft", {"chapter_file": chapter_file, "content": draft_content, "word_count": draft_word_count}),
-            "consistency-review": step_result("consistency-review", review_payload()),
-            "continuity-review": step_result("continuity-review", review_payload()),
-            "ooc-review": step_result("ooc-review", review_payload()),
+            "consistency-review": step_result("consistency-review", review_payload("consistency-review")),
+            "continuity-review": step_result("continuity-review", review_payload("continuity-review")),
+            "ooc-review": step_result("ooc-review", review_payload("ooc-review")),
             "polish": step_result(
                 "polish",
                 {

@@ -555,6 +555,52 @@ function Stop-WebnovelDashboardProcess {
     }
 }
 
+function ConvertTo-WebnovelStartProcessArgumentList {
+    param(
+        [string[]]$Arguments
+    )
+
+    $quotedArguments = foreach ($argument in $Arguments) {
+        $text = if ($null -eq $argument) { '' } else { [string]$argument }
+        if ($text.Length -gt 0 -and $text -notmatch '[\s"]') {
+            $text
+            continue
+        }
+
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.Append('"')
+        $backslashCount = 0
+
+        foreach ($character in $text.ToCharArray()) {
+            if ($character -eq '\') {
+                $backslashCount++
+                continue
+            }
+
+            if ($character -eq '"') {
+                [void]$builder.Append('\', ($backslashCount * 2) + 1)
+                [void]$builder.Append('"')
+                $backslashCount = 0
+                continue
+            }
+
+            if ($backslashCount -gt 0) {
+                [void]$builder.Append('\', $backslashCount)
+                $backslashCount = 0
+            }
+            [void]$builder.Append($character)
+        }
+
+        if ($backslashCount -gt 0) {
+            [void]$builder.Append('\', $backslashCount * 2)
+        }
+        [void]$builder.Append('"')
+        $builder.ToString()
+    }
+
+    return @($quotedArguments)
+}
+
 function Start-WebnovelDashboardServer {
     param(
         [string]$PythonExe,
@@ -581,7 +627,8 @@ function Start-WebnovelDashboardServer {
         $argumentList += @('--project-root', $ProjectRoot)
     }
 
-    return Start-Process -FilePath $PythonExe -WorkingDirectory $AppRoot -ArgumentList $argumentList -PassThru -NoNewWindow
+    $safeArgumentList = ConvertTo-WebnovelStartProcessArgumentList -Arguments $argumentList
+    return Start-Process -FilePath $PythonExe -WorkingDirectory $AppRoot -ArgumentList $safeArgumentList -PassThru -NoNewWindow
 }
 
 function Wait-WebnovelDashboardHealthy {
@@ -635,6 +682,7 @@ Export-ModuleMember -Function `
     Get-WebnovelDashboardHealthProbeSpec, `
     Get-WebnovelDashboardBaseUrl, `
     Get-WebnovelDashboardBrowserUrl, `
+    ConvertTo-WebnovelStartProcessArgumentList, `
     Resolve-WebnovelDashboardPortAction, `
     Start-WebnovelDashboardServer, `
     Stop-WebnovelDashboardProcess, `

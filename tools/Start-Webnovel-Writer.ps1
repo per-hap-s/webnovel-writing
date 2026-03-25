@@ -73,17 +73,19 @@ function Start-DashboardWindow([switch]$LanMode) {
         $argList += '-Lan'
     }
 
-    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $workspaceRoot -ArgumentList $argList | Out-Null
+    $safeArgList = ConvertTo-WebnovelStartProcessArgumentList -Arguments $argList
+    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $workspaceRoot -ArgumentList $safeArgList | Out-Null
 }
 
 function Start-LoginWindow {
     Test-LauncherExists $loginLauncher 'Codex CLI login launcher'
-    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $repoRoot -ArgumentList @(
+    $safeArgList = ConvertTo-WebnovelStartProcessArgumentList -Arguments @(
         '-NoExit',
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
         '-File', $loginLauncher
-    ) | Out-Null
+    )
+    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $repoRoot -ArgumentList $safeArgList | Out-Null
 }
 
 function Start-ProjectShell {
@@ -91,12 +93,13 @@ function Start-ProjectShell {
     if ($ProjectRoot -and (Test-Path $ProjectRoot)) {
         $targetRoot = (Resolve-Path $ProjectRoot).Path
     }
-    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $targetRoot -ArgumentList @(
+    $safeArgList = ConvertTo-WebnovelStartProcessArgumentList -Arguments @(
         '-NoExit',
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
         '-Command', "Set-Location -LiteralPath '$targetRoot'"
-    ) | Out-Null
+    )
+    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $targetRoot -ArgumentList $safeArgList | Out-Null
 }
 
 function Open-Guide {
@@ -114,7 +117,8 @@ switch projects, and use the tools page.
     }
     $utf8Bom = New-Object System.Text.UTF8Encoding($true)
     [System.IO.File]::WriteAllText($guidePath, $content, $utf8Bom)
-    Start-Process -FilePath 'notepad.exe' -ArgumentList $guidePath | Out-Null
+    $safeArgList = ConvertTo-WebnovelStartProcessArgumentList -Arguments @($guidePath)
+    Start-Process -FilePath 'notepad.exe' -ArgumentList $safeArgList | Out-Null
 }
 
 function Pause-ForReturn([string]$Message) {

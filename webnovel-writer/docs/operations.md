@@ -373,3 +373,27 @@ Rules:
 - `dashboard/frontend/dist/` remains committed; when runtime source files change, rebuild and commit the matching `dist/` update in the same change.
 - If a change touches `supervisor` / `supervisor-audit` or task-resume semantics, run `& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1'` before release.
 - If a change touches `bootstrap` input contracts or the `plan / write / review / repair` mainline, run `& '.\tools\Tests\Run-Webnovel-RealE2E.ps1'` before release.
+
+## LLM fallback（模型自动降级）
+
+当 `WEBNOVEL_LLM_PROVIDER=openai-compatible` 且默认模型为 `gpt-5.4` 时，`write -> draft` 与 `write -> polish` 现在支持自动降级（fallback）策略。
+
+- 先执行现有同模重试（same-model retry），不改 `WEBNOVEL_LLM_MAX_RETRIES`
+- 仅当最终错误属于 `LLM_TIMEOUT` 或可重试 `5xx` 的 `LLM_HTTP_ERROR` 时，才会切到回退模型
+- 默认回退模型是 `gpt-5.4-mini`
+- `4xx`、配置错误、解析错误、`INVALID_STEP_OUTPUT` 都不会触发自动降级
+
+相关环境变量：
+
+```text
+WEBNOVEL_LLM_ENABLE_FALLBACK=true
+WEBNOVEL_LLM_FALLBACK_MODEL=gpt-5.4-mini
+WEBNOVEL_LLM_FALLBACK_STEPS=draft,polish
+WEBNOVEL_LLM_FALLBACK_ON=LLM_TIMEOUT,LLM_HTTP_ERROR
+```
+
+排查时优先查看 `.webnovel/observability/llm-runs/<task-step>/`：
+
+- `request.json`：主模型 / 回退模型与超时预算
+- `raw-output*.meta.json`：每次 attempt（尝试）的实际模型、触发错误、HTTP 状态
+- `result.json` / `error.json`：最终 `effective_model`、`fallback_used`、`fallback_exhausted`

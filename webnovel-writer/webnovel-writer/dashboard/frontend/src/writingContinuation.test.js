@@ -176,4 +176,62 @@ describe('buildTaskContinuationSummary', () => {
         expect(summary.nextStep).toBe('确认新简报并开写')
         expect(summary.summary).toContain('重规划已完成')
     })
+
+    test('completed write task with blocking review summary is not marked continuable', () => {
+        const summary = buildTaskContinuationSummary({
+            task: {
+                task_type: 'write',
+                status: 'completed',
+                artifacts: {
+                    review_summary: {
+                        blocking: true,
+                        issues: [{ title: '设定冲突' }],
+                    },
+                    writeback: {
+                        story_alignment: { satisfied: ['主线推进'], missed: [], deferred: [] },
+                        director_alignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+                    },
+                },
+            },
+            storyPlan: { anchor_chapter: 10 },
+            directorBrief: { chapter_goal: '推进主线' },
+            storyAlignment: { satisfied: ['主线推进'], missed: [], deferred: [] },
+            directorAlignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+            storyRefresh: null,
+            guardedRun: null,
+            guardedBatchRun: null,
+            resumeRun: null,
+            operatorActions: [],
+        })
+
+        expect(summary.heading).toBe('继续前必须处理审查阻断')
+        expect(summary.continuation).toBe(WRITING_CONTINUATION.blocked)
+    })
+
+    test('completed write task with missed alignment is not marked ready for next chapter', () => {
+        const summary = buildTaskContinuationSummary({
+            task: {
+                task_type: 'write',
+                status: 'completed',
+                artifacts: {
+                    writeback: {
+                        story_alignment: { satisfied: ['主线推进'], missed: ['伏笔未兑现'], deferred: [] },
+                        director_alignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+                    },
+                },
+            },
+            storyPlan: { anchor_chapter: 10 },
+            directorBrief: { chapter_goal: '推进主线' },
+            storyAlignment: { satisfied: ['主线推进'], missed: ['伏笔未兑现'], deferred: [] },
+            directorAlignment: { satisfied: ['兑现钩子'], missed: [], deferred: [] },
+            storyRefresh: null,
+            guardedRun: null,
+            guardedBatchRun: null,
+            resumeRun: null,
+            operatorActions: [],
+        })
+
+        expect(summary.heading).toBe('本章未达继续条件，需人工复核')
+        expect(summary.continuation).toBe('需人工复核')
+    })
 })

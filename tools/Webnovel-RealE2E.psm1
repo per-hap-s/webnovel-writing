@@ -203,6 +203,19 @@ function Get-WebnovelRealE2ETwitterNowIso {
     (Get-Date).ToUniversalTime().ToString('o')
 }
 
+function Get-WebnovelRealE2EItemCount {
+    [CmdletBinding()]
+    param(
+        $Items
+    )
+
+    if ($null -eq $Items) {
+        return 0
+    }
+
+    return @($Items).Count
+}
+
 function Get-WebnovelRealE2EFailureCategory {
     [CmdletBinding()]
     param(
@@ -228,6 +241,18 @@ function Get-WebnovelRealE2EPlaywrightScript {
     }
 
     Join-Path $env:CODEX_HOME 'skills\playwright\scripts\playwright_cli.ps1'
+}
+
+function Get-WebnovelRealE2ELastExitCode {
+    [CmdletBinding()]
+    param()
+
+    $exitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+    if ($null -eq $exitCodeVariable) {
+        return 0
+    }
+
+    return [int]$exitCodeVariable.Value
 }
 
 function Get-WebnovelRealE2ENewPlaywrightFile {
@@ -278,13 +303,29 @@ function Invoke-WebnovelRealE2ECapture {
     try {
         if ($Open) {
             & $PlaywrightScript open $Url --browser msedge --headed | Tee-Object -FilePath $TranscriptPath -Append | Out-Null
+            $openExitCode = Get-WebnovelRealE2ELastExitCode
+            if ($openExitCode -ne 0) {
+                throw ("Playwright open failed for {0} (exit code {1}). See transcript: {2}" -f $Name, $openExitCode, $TranscriptPath)
+            }
         } else {
             & $PlaywrightScript goto $Url | Tee-Object -FilePath $TranscriptPath -Append | Out-Null
+            $gotoExitCode = Get-WebnovelRealE2ELastExitCode
+            if ($gotoExitCode -ne 0) {
+                throw ("Playwright goto failed for {0} (exit code {1}). See transcript: {2}" -f $Name, $gotoExitCode, $TranscriptPath)
+            }
         }
 
         Start-Sleep -Milliseconds 1200
         & $PlaywrightScript snapshot | Tee-Object -FilePath $TranscriptPath -Append | Out-Null
+        $snapshotExitCode = Get-WebnovelRealE2ELastExitCode
+        if ($snapshotExitCode -ne 0) {
+            throw ("Playwright snapshot failed for {0} (exit code {1}). See transcript: {2}" -f $Name, $snapshotExitCode, $TranscriptPath)
+        }
         & $PlaywrightScript screenshot | Tee-Object -FilePath $TranscriptPath -Append | Out-Null
+        $screenshotExitCode = Get-WebnovelRealE2ELastExitCode
+        if ($screenshotExitCode -ne 0) {
+            throw ("Playwright screenshot failed for {0} (exit code {1}). See transcript: {2}" -f $Name, $screenshotExitCode, $TranscriptPath)
+        }
     } finally {
         Pop-Location
     }
@@ -952,7 +993,7 @@ function Test-WebnovelRealE2EProjectOutputs {
         Test-Path (Join-Path $ProjectRoot ('.webnovel\summaries\ch{0:d4}.md' -f $_))
     }
     $chapterFiles = 1..3 | ForEach-Object {
-        (Get-WebnovelRealE2EChapterFileHits -ProjectRoot $ProjectRoot -Chapter $_).Count -gt 0
+        (Get-WebnovelRealE2EItemCount -Items (Get-WebnovelRealE2EChapterFileHits -ProjectRoot $ProjectRoot -Chapter $_)) -gt 0
     }
     $volumePlanExists = Test-Path (Join-Path (Join-Path $ProjectRoot $script:WebnovelOutlineDir) 'volume-01-plan.md')
     $statePath = Join-Path $ProjectRoot '.webnovel\state.json'
@@ -1192,7 +1233,7 @@ function Invoke-WebnovelRealE2E {
         $repairRan = $false
         if ($reviewSummary) {
             $repairCandidate = @($reviewSummary.repair_candidates | Where-Object { [bool]($_.auto_rewrite_eligible) -and [int]($_.chapter) -gt 0 } | Select-Object -First 1)
-            if ($repairCandidate.Count -gt 0) {
+            if ((Get-WebnovelRealE2EItemCount -Items $repairCandidate) -gt 0) {
                 $repairRan = $true
                 $repairChapter = [int]$repairCandidate[0].chapter
                 $repairRequest = New-WebnovelRealE2ERepairRequestBody -ProjectRoot $Config.ProjectRoot -SourceTaskId ([string]$reviewTask.id) -RepairCandidate $repairCandidate[0]
@@ -1222,7 +1263,8 @@ function Invoke-WebnovelRealE2E {
         }
 
         $pageResults = Test-WebnovelRealE2EDashboardPages -Config $Config -BaseUrl $baseUrl -ProjectRoot $Config.ProjectRoot
-        if (@($pageResults | Where-Object { -not $_.passed }).Count -gt 0) {
+        $failedPageResults = @($pageResults | Where-Object { -not $_.passed })
+        if ((Get-WebnovelRealE2EItemCount -Items $failedPageResults) -gt 0) {
             $pageRegression = $true
             $phaseResults.Add([ordered]@{ name = 'Dashboard'; conclusion = 'failed'; detail = 'At least one dashboard page exposed a visible regression.' }) | Out-Null
         } else {
@@ -1244,7 +1286,8 @@ function Invoke-WebnovelRealE2E {
         }
         if (-not $environmentBlocked -and -not $mainlineFailed -and $_.Exception.Message -notin @('environment_blocked')) {
             $mainlineFailed = $true
-            if (@($phaseResults | Where-Object { $_.name -eq 'Mainline' }).Count -eq 0) {
+            $mainlinePhaseResults = @($phaseResults | Where-Object { $_.name -eq 'Mainline' })
+            if ((Get-WebnovelRealE2EItemCount -Items $mainlinePhaseResults) -eq 0) {
                 $phaseResults.Add([ordered]@{ name = 'Mainline'; conclusion = 'failed'; detail = $minimalRepro }) | Out-Null
             }
         }

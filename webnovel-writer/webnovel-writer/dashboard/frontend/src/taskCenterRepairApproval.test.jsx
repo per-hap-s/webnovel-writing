@@ -88,6 +88,8 @@ test('repair task awaiting approval shows repair target and writeback actions', 
     renderTaskCenter([task], task)
 
     expect(screen.getAllByText('第 2 章局部修稿').length).toBeGreaterThan(0)
+    expect(screen.getByText('待审批')).not.toBeNull()
+    expect(screen.getByText('等待人工批准回写')).not.toBeNull()
     expect(screen.getByText('等待你确认回写')).not.toBeNull()
 
     await user.click(screen.getByRole('button', { name: '批准回写' }))

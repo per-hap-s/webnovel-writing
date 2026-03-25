@@ -303,3 +303,57 @@ Describe 'Get-WebnovelDashboardHealthProbeSpec' {
         $probe.Uri | Should Match 'project_root=D%3A%5CCodexProjects%5CProject1'
     }
 }
+
+Describe 'ConvertTo-WebnovelStartProcessArgumentList' {
+    BeforeAll {
+        $script:launcherModule = Import-Module $modulePath -Force -PassThru
+    }
+
+    It 'quotes arguments that contain spaces and leaves simple flags untouched' {
+        $result = ConvertTo-WebnovelStartProcessArgumentList -Arguments @(
+            '-File',
+            'D:\CodexProjects\webnovel writing\tools\Launch-Webnovel-Dashboard.ps1',
+            '-ProjectRoot',
+            'D:\CodexProjects\webnovel writing\project root',
+            '-NoProfile'
+        )
+
+        $result | Should Be @(
+            '-File',
+            '"D:\CodexProjects\webnovel writing\tools\Launch-Webnovel-Dashboard.ps1"',
+            '-ProjectRoot',
+            '"D:\CodexProjects\webnovel writing\project root"',
+            '-NoProfile'
+        )
+    }
+}
+
+Describe 'Start-WebnovelDashboardServer' {
+    BeforeAll {
+        $script:launcherModule = Import-Module $modulePath -Force -PassThru
+    }
+
+    It 'passes quoted workspace and project roots when starting python through Start-Process' {
+        Mock -ModuleName $launcherModule.Name Start-Process {
+            [pscustomobject]@{ Id = 4242 }
+        }
+
+        $result = Start-WebnovelDashboardServer `
+            -PythonExe 'C:\Python311\python.exe' `
+            -AppRoot 'D:\CodexProjects\webnovel writing\webnovel-writer' `
+            -WorkspaceRoot 'D:\CodexProjects\webnovel writing' `
+            -ProjectRoot 'D:\CodexProjects\webnovel writing\demo project' `
+            -ListenHost '127.0.0.1' `
+            -Port 8765
+
+        $result.Id | Should Be 4242
+        Assert-MockCalled Start-Process -ModuleName $launcherModule.Name -Times 1 -Exactly -Scope It -ParameterFilter {
+            $FilePath -eq 'C:\Python311\python.exe' -and
+            $WorkingDirectory -eq 'D:\CodexProjects\webnovel writing\webnovel-writer' -and
+            $ArgumentList[0] -eq '-m' -and
+            $ArgumentList[1] -eq 'dashboard.server' -and
+            $ArgumentList[3] -eq '"D:\CodexProjects\webnovel writing"' -and
+            $ArgumentList[10] -eq '"D:\CodexProjects\webnovel writing\demo project"'
+        }
+    }
+}

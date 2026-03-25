@@ -33,14 +33,35 @@ def step_result(
     error: dict | None = None,
     metadata: dict | None = None,
 ) -> StepResult:
+    normalized_payload = dict(payload)
+    if success and step_name == "context":
+        normalized_payload = {
+            "story_plan": {"anchor_chapter": 1, "chapters": [1]},
+            "director_brief": {"chapter": 1, "chapter_goal": "Advance the anomaly thread"},
+            "task_brief": {"chapter": 1},
+            "contract_v2": {},
+            "draft_prompt": "write",
+            **normalized_payload,
+        }
+    if success and step_name in {"consistency-review", "continuity-review", "ooc-review"}:
+        normalized_payload = {
+            "agent": step_name,
+            "chapter": 1,
+            "overall_score": 91.0,
+            "pass": True,
+            "issues": [],
+            "metrics": {"consistency": 91.0},
+            "summary": "ok",
+            **normalized_payload,
+        }
     return StepResult(
         step_name=step_name,
         success=success,
         return_code=0 if success else 1,
         timing_ms=10,
-        stdout=stdout if stdout is not None else json.dumps(payload, ensure_ascii=False),
+        stdout=stdout if stdout is not None else json.dumps(normalized_payload, ensure_ascii=False),
         stderr="",
-        structured_output=payload,
+        structured_output=normalized_payload,
         prompt_file="prompt.md",
         output_file="output.json",
         error=None if success else (error or {"code": "STEP_FAILED", "message": "failed"}),
@@ -204,6 +225,8 @@ def long_content(title: str = "Chapter") -> str:
 
 def review_payload(score: float = 91.0, *, issues: list[dict] | None = None, passed: bool = True) -> dict:
     return {
+        "agent": "review",
+        "chapter": 1,
         "overall_score": score,
         "pass": passed,
         "issues": issues or [],

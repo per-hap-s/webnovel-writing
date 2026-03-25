@@ -287,10 +287,12 @@ function buildGuardedBatchContinuation(task, guardedBatchRun, operatorActions, c
 function buildWriteContinuation(task, storyRefresh, contractSignals, operatorActions) {
     const primaryAction = firstPrimaryAction(operatorActions)
     const reviewIssueCount = resolveReviewIssueCount(task, null, null)
-    const reviewBlocked = String(task?.error?.code || '').trim() === 'REVIEW_GATE_BLOCKED'
+    const reviewBlocked = task?.artifacts?.review_summary?.blocking === true
+        || String(task?.error?.code || '').trim() === 'REVIEW_GATE_BLOCKED'
+    const writebackArtifacts = task?.artifacts?.writeback || task?.artifacts || {}
     const missedCount =
-        normalizeList(task?.artifacts?.writeback?.director_alignment?.missed).length
-        + normalizeList(task?.artifacts?.writeback?.story_alignment?.missed).length
+        normalizeList(writebackArtifacts?.director_alignment?.missed).length
+        + normalizeList(writebackArtifacts?.story_alignment?.missed).length
 
     if (task?.status === 'awaiting_chapter_brief_approval') {
         return buildSummary({
@@ -361,10 +363,10 @@ function buildWriteContinuation(task, storyRefresh, contractSignals, operatorAct
     if (task?.status === 'completed' && missedCount > 0) {
         return buildSummary({
             tone: 'warning',
-            heading: '本章已完成，但建议复核后再继续',
-            continuation: '建议复核',
+            heading: '本章未达继续条件，需人工复核',
+            continuation: '需人工复核',
             nextStep: '查看对齐结果后决定是否继续',
-            summary: '当前章节已完成写回，但仍存在未满足的多章规划或章节目标约束，建议先人工复核。',
+            summary: '当前章节写回虽已完成，但故事对齐或章节目标仍有未满足项，需人工复核后才能继续。',
             reasons: contractSignals,
             actionLabel: primaryAction?.label,
         })
