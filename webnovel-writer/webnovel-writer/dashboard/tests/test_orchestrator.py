@@ -244,6 +244,25 @@ def test_probe_rag_returns_client_probe(tmp_path: Path):
     mock_get_client.return_value.probe.assert_called_once()
 
 
+def test_sequential_services_do_not_reuse_previous_project_rag_env(tmp_path: Path):
+    positive_root = make_project(tmp_path / "positive")
+    negative_root = make_project(tmp_path / "negative")
+    (negative_root / ".env").write_text(
+        "WEBNOVEL_RAG_BASE_URL=http://127.0.0.1:9/v1\n"
+        "WEBNOVEL_RAG_API_KEY=negative-key\n"
+        "WEBNOVEL_RAG_EMBED_MODEL=BAAI/bge-m3\n"
+        "WEBNOVEL_RAG_RERANK_MODEL=BAAI/bge-reranker-v2-m3\n",
+        encoding="utf-8",
+    )
+
+    positive_service = OrchestrationService(positive_root)
+    negative_service = OrchestrationService(negative_root)
+
+    assert positive_service.config.embed_base_url == "https://api.siliconflow.cn/v1"
+    assert negative_service.config.embed_base_url == "http://127.0.0.1:9/v1"
+    assert negative_service.config.embed_api_key == "negative-key"
+
+
 def test_retry_keeps_failed_step_and_queues_again(tmp_path: Path):
     project_root = make_project(tmp_path)
 

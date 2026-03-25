@@ -82,6 +82,14 @@ from .watcher import FileWatcher
 logger = logging.getLogger(__name__)
 
 
+DASHBOARD_APP_ROOT = Path(__file__).resolve().parents[1]
+APP_ENV_FALLBACK_KEYS = frozenset({'WEBNOVEL_RAG_API_KEY'})
+
+
+def _application_env_path() -> Path:
+    return DASHBOARD_APP_ROOT / '.env'
+
+
 class APIError(Exception):
     """
     自定义 API 错误异常类
@@ -722,8 +730,14 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         return f'{value[:4]}***{value[-4:]}'
 
     def _project_env_or_os(project_root_value: Path | None = None) -> dict[str, str]:
+        app_values = {
+            key: value
+            for key, value in _parse_env_values(_application_env_path()).items()
+            if key in APP_ENV_FALLBACK_KEYS
+        }
         values = _parse_env_values(_project_env_path(project_root_value))
         merged = dict(os.environ)
+        merged.update(app_values)
         merged.update(values)
         return merged
 
@@ -752,6 +766,9 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
                 '项目状态文件损坏，请检查最近一次写回。',
                 {'original_message': str(exc)},
             ) from exc
+
+    def _require_project_state(project_root_value: Path) -> None:
+        _read_state_data(project_root_value)
 
     def _planning_profile_payload(state_data: dict[str, Any], project_root_value: Path) -> dict[str, Any]:
         project_info = state_data.get('project_info') or {}
@@ -1208,7 +1225,9 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/project/director-hub')
     def get_director_hub(request: Request):
-        return _get_request_orchestrator(request).get_director_hub()
+        project_root_value = _resolve_request_project_root(request)
+        _require_project_state(project_root_value)
+        return _get_request_orchestrator(explicit_root=str(project_root_value)).get_director_hub()
 
     @app.get('/api/project/continuity-ledger')
     def get_continuity_ledger(request: Request):
@@ -1370,7 +1389,9 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/tasks/summary')
     def list_task_summaries(request: Request, limit: int = 50):
-        return _get_request_orchestrator(request).list_task_summaries(limit=limit)
+        project_root_value = _resolve_request_project_root(request)
+        _require_project_state(project_root_value)
+        return _get_request_orchestrator(explicit_root=str(project_root_value)).list_task_summaries(limit=limit)
 
     def _create_task(task_type: str, request: TaskRequest, http_request: Request):
         project_root_value = request.project_root or str(_resolve_request_project_root(http_request))
@@ -1503,7 +1524,9 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     @app.get('/api/tasks/{task_id}/detail')
     def get_task_detail(task_id: str, request: Request, event_limit: int = 200):
-        payload = _get_request_orchestrator(request).get_task_detail(task_id, event_limit=event_limit)
+        project_root_value = _resolve_request_project_root(request)
+        _require_project_state(project_root_value)
+        payload = _get_request_orchestrator(explicit_root=str(project_root_value)).get_task_detail(task_id, event_limit=event_limit)
         if not payload:
             raise HTTPException(404, '未找到任务。')
         return payload

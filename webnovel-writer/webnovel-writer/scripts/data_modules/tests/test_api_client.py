@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import asyncio
@@ -14,8 +14,8 @@ TEST_ROOT = Path(__file__).resolve().parents[2]
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-from data_modules.api_client import EmbeddingAPIClient, ModalAPIClient, RAGRequestError, RerankAPIClient, get_client
-from data_modules.config import DataModulesConfig
+from scripts.data_modules.api_client import EmbeddingAPIClient, ModalAPIClient, RAGRequestError, RerankAPIClient, get_client
+from scripts.data_modules.config import DataModulesConfig
 
 
 class FakeResponse:
@@ -258,3 +258,4 @@ def test_modal_client_probe_reports_connectivity_failure(tmp_path, monkeypatch):
 
     assert probe['connection_status'] == 'failed'
     assert probe['connection_error']['code'] == 'RAG_SERVICE_UNAVAILABLE'
+

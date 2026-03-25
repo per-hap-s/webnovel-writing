@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJSON, normalizeError, postJSON } from './api.js'
 import { executeOperatorAction as executeRuntimeOperatorAction } from './operatorActionRuntime.js'
 import { isRuntimeActiveTask } from './taskCenterRuntime.js'
@@ -41,6 +41,7 @@ export function TaskCenterPageSection({
     const [actionError, setActionError] = useState(null)
     const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
     const [pendingActionKey, setPendingActionKey] = useState('')
+    const previousSelectedTaskIdRef = useRef(null)
     const liveSelectedTask = detailTask || selectedTask || null
     const detailTasks = rawTasks || tasks
     const requestParams = useMemo(
@@ -72,13 +73,18 @@ export function TaskCenterPageSection({
     useEffect(() => {
         let cancelled = false
         if (!selectedTaskId) {
+            previousSelectedTaskIdRef.current = null
             setDetailTask(null)
             setEvents([])
             setActionError(null)
             return () => {}
         }
-        setDetailTask(selectedTask || null)
-        setEvents([])
+        const isSameSelection = previousSelectedTaskIdRef.current === selectedTaskId
+        previousSelectedTaskIdRef.current = selectedTaskId
+        if (!isSameSelection) {
+            setDetailTask(selectedTask || null)
+            setEvents([])
+        }
         setActionError(null)
         fetchJSON(`/api/tasks/${selectedTaskId}/detail`, requestParams)
             .then((payload) => {
@@ -88,8 +94,10 @@ export function TaskCenterPageSection({
             })
             .catch((error) => {
                 if (cancelled) return
-                setDetailTask(selectedTask || null)
-                setEvents([])
+                if (!isSameSelection) {
+                    setDetailTask(selectedTask || null)
+                    setEvents([])
+                }
                 setActionError(normalizeError(error))
             })
         return () => {

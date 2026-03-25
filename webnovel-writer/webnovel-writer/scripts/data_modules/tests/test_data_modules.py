@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Data Modules 单元测试
@@ -24,8 +24,8 @@ from data_modules import (
     SceneMeta,
     StyleSample,
 )
-import data_modules.index_manager as index_manager_module
-from data_modules.index_manager import (
+import scripts.data_modules.index_manager as index_manager_module
+from scripts.data_modules.index_manager import (
     EntityMeta,
     StateChangeMeta,
     RelationshipMeta,
@@ -1676,3 +1676,4 @@ class TestSQLiteConcurrency:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

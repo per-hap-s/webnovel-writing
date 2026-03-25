@@ -22,16 +22,20 @@ from typing import Any, Dict, List
 
 from runtime_compat import enable_windows_utf8_stdio
 
-try:
-    from chapter_paths import find_chapter_file, volume_num_for_chapter
-except ImportError:  # pragma: no cover
-    from scripts.chapter_paths import find_chapter_file, volume_num_for_chapter
+
+def _ensure_package_root_on_path() -> None:
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+
+
+_ensure_package_root_on_path()
+
+from scripts.chapter_paths import find_chapter_file, volume_num_for_chapter
 
 
 def _ensure_scripts_path():
-    scripts_dir = Path(__file__).resolve().parent
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+    _ensure_package_root_on_path()
 
 
 _CHAPTER_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
@@ -115,7 +119,7 @@ def _volume_num_for_chapter_from_state(project_root: Path, chapter_num: int) -> 
 
 def find_project_root(start_path: Path | None = None) -> Path:
     """解析真实书项目根（包含 `.webnovel/state.json` 的目录）。"""
-    from project_locator import resolve_project_root
+    from scripts.project_locator import resolve_project_root
 
     if start_path is None:
         return resolve_project_root()
@@ -383,8 +387,8 @@ def _search_with_rag(
     top_k: int,
 ) -> Dict[str, Any]:
     _ensure_scripts_path()
-    from data_modules.config import DataModulesConfig
-    from data_modules.rag_adapter import RAGAdapter
+    from scripts.data_modules.config import DataModulesConfig
+    from scripts.data_modules.rag_adapter import RAGAdapter
 
     config = DataModulesConfig.from_project_root(project_root)
     adapter = RAGAdapter(config)
@@ -431,7 +435,7 @@ def _search_with_rag(
 
 def _load_rag_assist(project_root: Path, chapter_num: int, outline: str) -> Dict[str, Any]:
     _ensure_scripts_path()
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.config import DataModulesConfig
 
     config = DataModulesConfig.from_project_root(project_root)
     enabled = bool(getattr(config, "context_rag_assist_enabled", True))
@@ -462,8 +466,8 @@ def _load_rag_assist(project_root: Path, chapter_num: int, outline: str) -> Dict
 def _load_contract_context(project_root: Path, chapter_num: int) -> Dict[str, Any]:
     """Build context via ContextManager and return selected sections."""
     _ensure_scripts_path()
-    from data_modules.config import DataModulesConfig
-    from data_modules.context_manager import ContextManager
+    from scripts.data_modules.config import DataModulesConfig
+    from scripts.data_modules.context_manager import ContextManager
 
     config = DataModulesConfig.from_project_root(project_root)
     manager = ContextManager(config)

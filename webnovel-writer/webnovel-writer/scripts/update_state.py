@@ -55,6 +55,15 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 
+def _ensure_package_root_on_path() -> None:
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+
+
+_ensure_package_root_on_path()
+
+
 def positive_int(value: str) -> int:
     """
     验证参数是否为正整数。
@@ -107,7 +116,7 @@ def non_negative_int(value: str) -> int:
 # ============================================================================
 from security_utils import create_secure_directory, atomic_write_json, restore_from_backup
 from project_locator import resolve_state_file
-from data_modules.state_validator import (
+from scripts.data_modules.state_validator import (
     normalize_foreshadowing_status,
     normalize_state_runtime_sections,
 )

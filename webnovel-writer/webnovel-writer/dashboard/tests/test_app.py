@@ -220,6 +220,30 @@ def test_rag_status_success(client: TestClient, mock_orchestrator: MagicMock):
     mock_orchestrator.probe_rag.assert_called_once()
 
 
+def test_rag_status_uses_request_project_root(mock_project_root: Path):
+    other_root = mock_project_root.parent / "other-project"
+    (other_root / ".webnovel").mkdir(parents=True)
+    (other_root / ".webnovel" / "state.json").write_text(
+        json.dumps({"project_info": {"title": "Other Root"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    orchestrator_one = MagicMock(spec=OrchestrationService)
+    orchestrator_two = MagicMock(spec=OrchestrationService)
+    orchestrator_one.probe_rag.return_value = {"connection_status": "connected", "provider": "siliconflow"}
+    orchestrator_two.probe_rag.return_value = {"connection_status": "failed", "provider": "siliconflow"}
+
+    with patch("dashboard.app.OrchestrationService", side_effect=[orchestrator_one, orchestrator_two]):
+        app = create_app(project_root=mock_project_root)
+        with TestClient(app) as client:
+            response = client.get("/api/rag/status", params={"project_root": str(other_root)})
+
+    assert response.status_code == 200
+    assert response.json()["connection_status"] == "failed"
+    orchestrator_one.probe_rag.assert_not_called()
+    orchestrator_two.probe_rag.assert_called_once()
+
+
 def test_cancel_task_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
     mock_orchestrator.cancel_task.return_value = {
         "id": "task-1",
@@ -266,6 +290,25 @@ def test_task_summary_endpoint_calls_orchestrator(client: TestClient, mock_orche
     mock_orchestrator.list_task_summaries.assert_called_once_with(limit=10)
 
 
+def test_task_summary_endpoint_uses_explicit_project_root_contract(mock_project_root: Path, mock_orchestrator: MagicMock, tmp_path: Path):
+    other_project_root = tmp_path / "other-novel"
+    (other_project_root / ".webnovel").mkdir(parents=True)
+    (other_project_root / ".webnovel" / "state.json").write_text(
+        json.dumps({"project_info": {"title": "Other Root"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with patch("dashboard.app.OrchestrationService", return_value=mock_orchestrator) as orchestration_cls:
+        app = create_app(project_root=mock_project_root)
+        app.state.orchestrator = mock_orchestrator
+        with TestClient(app) as client:
+            response = client.get("/api/tasks/summary", params={"project_root": str(other_project_root), "limit": 7})
+
+    assert response.status_code == 200
+    mock_orchestrator.list_task_summaries.assert_called_once_with(limit=7)
+    assert any(call.args and call.args[0] == other_project_root.resolve() for call in orchestration_cls.call_args_list)
+
+
 def test_task_detail_endpoint_calls_orchestrator(client: TestClient, mock_orchestrator: MagicMock):
     mock_orchestrator.get_task_detail.return_value = {
         "task": {"id": "task-1", "status": "resuming_writeback"},
@@ -279,6 +322,25 @@ def test_task_detail_endpoint_calls_orchestrator(client: TestClient, mock_orches
     assert payload["task"]["status"] == "resuming_writeback"
     assert payload["events"][0]["message"] == "Writeback approved"
     mock_orchestrator.get_task_detail.assert_called_once_with("task-1", event_limit=20)
+
+
+def test_director_hub_endpoint_uses_explicit_project_root_contract(mock_project_root: Path, mock_orchestrator: MagicMock, tmp_path: Path):
+    other_project_root = tmp_path / "director-novel"
+    (other_project_root / ".webnovel").mkdir(parents=True)
+    (other_project_root / ".webnovel" / "state.json").write_text(
+        json.dumps({"project_info": {"title": "Director Root"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with patch("dashboard.app.OrchestrationService", return_value=mock_orchestrator) as orchestration_cls:
+        app = create_app(project_root=mock_project_root)
+        app.state.orchestrator = mock_orchestrator
+        with TestClient(app) as client:
+            response = client.get("/api/project/director-hub", params={"project_root": str(other_project_root)})
+
+    assert response.status_code == 200
+    mock_orchestrator.get_director_hub.assert_called_once_with()
+    assert any(call.args and call.args[0] == other_project_root.resolve() for call in orchestration_cls.call_args_list)
 
 
 def test_review_approve_calls_orchestrator_and_returns_resuming_status(client: TestClient, mock_orchestrator: MagicMock):
@@ -690,6 +752,19 @@ def test_save_rag_settings_updates_env_and_status(client: TestClient, mock_proje
     assert data["settings"]["has_api_key"] is True
 
 
+def test_get_rag_settings_falls_back_to_app_root_env(client: TestClient, tmp_path: Path):
+    app_root_env = tmp_path / ".env"
+    app_root_env.write_text("WEBNOVEL_RAG_API_KEY=app-root-key\n", encoding="utf-8")
+
+    with patch("dashboard.app._application_env_path", return_value=app_root_env):
+        response = client.get("/api/settings/rag")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["has_api_key"] is True
+    assert data["api_key_masked"]
+
+
 def test_planning_profile_endpoints_sync_state_and_outline(client: TestClient, mock_project_root: Path):
     state_path = mock_project_root / ".webnovel" / "state.json"
     seeded = json.loads(state_path.read_text(encoding="utf-8"))
@@ -798,6 +873,28 @@ def test_project_info_supports_request_scoped_project_root(client: TestClient, m
     assert response.json()["dashboard_context"]["project_initialized"] is True
 
 
+def test_request_scoped_uninitialized_project_root_returns_consistent_not_found_payload(
+    client: TestClient,
+    mock_project_root: Path,
+):
+    uninitialized_root = mock_project_root.parent / "uninitialized-project"
+    (uninitialized_root / ".webnovel").mkdir(parents=True)
+
+    responses = [
+        client.get("/api/project/info", params={"project_root": str(uninitialized_root)}),
+        client.get("/api/tasks/summary", params={"project_root": str(uninitialized_root)}),
+        client.get("/api/project/director-hub", params={"project_root": str(uninitialized_root)}),
+        client.get("/api/tasks/task-1/detail", params={"project_root": str(uninitialized_root)}),
+    ]
+
+    payloads = [response.json() for response in responses]
+    assert {response.status_code for response in responses} == {404}
+    assert payloads[0] == payloads[1] == payloads[2] == payloads[3]
+    assert payloads[0]["code"] == "NOT_FOUND"
+    assert payloads[0]["message"] == "未找到 state.json。"
+    assert payloads[0]["details"]["status_code"] == 404
+
+
 def test_create_app_keeps_project_context_isolated_per_instance(mock_project_root: Path):
     other_root = mock_project_root.parent / "other-project"
     (other_root / ".webnovel").mkdir(parents=True)
@@ -826,6 +923,36 @@ def test_create_app_keeps_project_context_isolated_per_instance(mock_project_roo
     assert response_two.status_code == 200
     assert response_two.json()["project_info"]["title"] == "Other Root"
     assert response_two.json()["dashboard_context"]["project_root"] == str(other_root)
+
+
+def test_task_detail_supports_request_scoped_project_root(
+    mock_project_root: Path,
+    mock_orchestrator: MagicMock,
+    tmp_path: Path,
+):
+    other_root = tmp_path / "task-detail-project"
+    (other_root / ".webnovel").mkdir(parents=True)
+    (other_root / ".webnovel" / "state.json").write_text(
+        json.dumps({"project_info": {"title": "Task Detail Root"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    mock_orchestrator.get_task_detail.return_value = {
+        "task": {"id": "task-1", "status": "running"},
+        "events": [{"id": "evt-1", "message": "Task started"}],
+    }
+
+    with patch("dashboard.app.OrchestrationService", return_value=mock_orchestrator) as orchestration_cls:
+        app = create_app(project_root=mock_project_root)
+        app.state.orchestrator = mock_orchestrator
+        with TestClient(app) as client:
+            response = client.get("/api/tasks/task-1/detail", params={"project_root": str(other_root), "event_limit": 12})
+
+    assert response.status_code == 200
+    assert response.json()["task"]["status"] == "running"
+    assert response.json()["events"][0]["message"] == "Task started"
+    mock_orchestrator.get_task_detail.assert_called_once_with("task-1", event_limit=12)
+    assert any(call.args and call.args[0] == other_root.resolve() for call in orchestration_cls.call_args_list)
 
 
 def test_save_llm_settings_does_not_leak_into_other_project_defaults(mock_project_root: Path, monkeypatch: pytest.MonkeyPatch):

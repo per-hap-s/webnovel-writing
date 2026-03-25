@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from data_modules.config import DataModulesConfig
-from data_modules.context_ranker import ContextRanker
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.context_ranker import ContextRanker
 
 
 def test_rank_recent_summaries_prefers_recency_and_hook(tmp_path):
@@ -52,4 +52,5 @@ def test_rank_pack_adds_context_contract_meta(tmp_path):
     ranked = ranker.rank_pack(pack, chapter=12)
     assert ranked["meta"]["context_contract_version"] == "v2"
     assert ranked["meta"]["ranker"]["enabled"] is True
+
 

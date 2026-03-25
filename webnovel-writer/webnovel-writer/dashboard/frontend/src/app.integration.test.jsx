@@ -76,9 +76,18 @@ vi.mock('./appSections.jsx', async () => {
                 {`launch-${template.key}`}
             </button>
         ),
-        TaskCenterPageSection: ({ tasks, selectedTask }) => {
+        TaskCenterPageSection: ({ tasks, selectedTask, onSelectTask }) => {
             const summary = selectedTask ? buildWritingTaskListSummary({ task: selectedTask }) : null
-            return <div>{`selected:${selectedTask?.id || 'none'};count:${tasks.length};summary:${summary?.continuationLabel || 'none'}|${summary?.primaryActionLabel || 'none'}`}</div>
+            return (
+                <div>
+                    {tasks.map((task) => (
+                        <button key={task.id} onClick={() => onSelectTask?.(task.id)}>
+                            {`select-${task.id}`}
+                        </button>
+                    ))}
+                    <div>{`selected:${selectedTask?.id || 'none'};count:${tasks.length};summary:${summary?.continuationLabel || 'none'}|${summary?.primaryActionLabel || 'none'}`}</div>
+                </div>
+            )
         },
     }
 })
@@ -431,6 +440,171 @@ test('director hub failure degrades only the panel and keeps overview usable', a
     expect(screen.getByText('总字数')).not.toBeNull()
 })
 
+test('director hub refresh failure keeps the last successful snapshot visible', async () => {
+    setProjectModeUrl()
+    let failDirectorHub = false
+
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') {
+            return Promise.resolve({
+                project_info: { title: 'Night Rain Archive', genre: '都市异能' },
+                dashboard_context: { project_initialized: true, project_root: 'C:/novel' },
+                progress: { current_chapter: 1, total_words: 3607 },
+            })
+        }
+        if (path === '/api/project/director-hub') {
+            if (failDirectorHub) {
+                return Promise.reject({
+                    displayMessage: '创作工作台服务暂未返回有效接口数据，请刷新或重新启动工作台。',
+                    code: 'HTML_RESPONSE',
+                    rawMessage: '后端返回了页面内容而不是接口数据。',
+                    details: { path: '/api/project/director-hub' },
+                })
+            }
+            return Promise.resolve({
+                current_chapter: 9,
+                current_brief: {
+                    chapter: 9,
+                    chapter_goal: 'Lead with scene action',
+                    primary_conflict: 'The protagonist must decide before the clue disappears.',
+                },
+                story_plan: {
+                    anchor_chapter: 9,
+                    rationale: 'This story plan uses active foreshadowing, knowledge conflicts and hooks to keep the rain archive line under pressure.',
+                },
+                continuity: {
+                    plot_threads: [{ title: 'Archive thread', urgency: 'high' }],
+                    rule_assertions: [{ name: 'One rewind burns one memory' }],
+                },
+                voice_bible: {},
+            })
+        }
+        if (path === '/api/tasks/summary') return Promise.resolve([])
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('Lead with scene action')).not.toBeNull()
+
+    failDirectorHub = true
+    const onMessage = subscribeSSEMock.mock.calls[0][0]
+
+    act(() => {
+        onMessage({ data: '{"kind":"modified"}' })
+    })
+    await waitFor(() => {
+        expect(screen.getByText('创作指挥台暂时无法刷新，请稍后重试。')).not.toBeNull()
+        expect(screen.getByText('Lead with scene action')).not.toBeNull()
+        expect(screen.getByText('The protagonist must decide before the clue disappears.')).not.toBeNull()
+    })
+})
+
+test('sse overflow triggers fallback refresh and keeps the selected task', async () => {
+    const user = userEvent.setup()
+    let taskFetchCount = 0
+    tasksResponse = [
+        {
+            id: 'task-a',
+            task_type: 'write',
+            status: 'running',
+            current_step: 'draft',
+            request: { chapter: 9 },
+            runtime_status: { target_label: '第 9 章', step_state: 'running' },
+        },
+        {
+            id: 'task-b',
+            task_type: 'review',
+            status: 'queued',
+            current_step: 'review-summary',
+            request: { chapter_range: '9-10' },
+            runtime_status: { target_label: '第 9-10 章' },
+        },
+    ]
+
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 8, total_words: 12000 } })
+        if (path === '/api/project/director-hub') return Promise.resolve({ current_chapter: 9, current_brief: {}, story_plan: {}, continuity: {}, voice_bible: {} })
+        if (path === '/api/tasks/summary') {
+            taskFetchCount += 1
+            return Promise.resolve(tasksResponse)
+        }
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        return Promise.resolve({})
+    })
+    setProjectModeUrl('tasks')
+
+    render(<App />)
+
+    expect(await screen.findByText('selected:task-a;count:2;summary:等待完成|none')).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: 'select-task-b' }))
+    expect(await screen.findByText('selected:task-b;count:2;summary:none|none')).not.toBeNull()
+
+    const sseOptions = subscribeSSEMock.mock.calls[0][1]
+    act(() => {
+        sseOptions.onOverflow?.()
+    })
+
+    await waitFor(() => {
+        expect(taskFetchCount).toBeGreaterThanOrEqual(2)
+        expect(screen.getByText('selected:task-b;count:2;summary:none|none')).not.toBeNull()
+        expect(screen.getByText('实时同步已断开')).not.toBeNull()
+    })
+})
+
+test('polling fallback refreshes active tasks after sse disconnect', async () => {
+    vi.useFakeTimers()
+    let taskFetchCount = 0
+    tasksResponse = [
+        {
+            id: 'task-poll',
+            task_type: 'write',
+            status: 'running',
+            current_step: 'draft',
+            request: { chapter: 12 },
+            runtime_status: { target_label: '第 12 章', step_state: 'running' },
+        },
+    ]
+
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') return Promise.resolve({ progress: { current_chapter: 11, total_words: 16000 } })
+        if (path === '/api/project/director-hub') return Promise.resolve({ current_chapter: 12, current_brief: {}, story_plan: {}, continuity: {}, voice_bible: {} })
+        if (path === '/api/tasks/summary') {
+            taskFetchCount += 1
+            return Promise.resolve(tasksResponse)
+        }
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') return Promise.resolve({ configured: false })
+        return Promise.resolve({})
+    })
+    setProjectModeUrl('tasks')
+
+    render(<App />)
+    await act(async () => {
+        await Promise.resolve()
+    })
+    expect(taskFetchCount).toBe(1)
+
+    const sseOptions = subscribeSSEMock.mock.calls[0][1]
+    act(() => {
+        sseOptions.onError?.()
+    })
+
+    await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+        await Promise.resolve()
+    })
+
+    expect(taskFetchCount).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText('selected:task-poll;count:1;summary:等待完成|none')).not.toBeNull()
+})
+
 test('workbench tools page uses pure-Chinese labels for user-facing actions', async () => {
     const user = userEvent.setup()
 
@@ -491,6 +665,47 @@ test('status probe failures stay local to status pills instead of showing a glob
     expect(screen.queryByText('引擎状态刷新失败')).toBeNull()
     expect(screen.getByText('写作引擎探活异常，请稍后重试')).not.toBeNull()
     expect(screen.getByText('检索引擎探活异常，请稍后重试')).not.toBeNull()
+})
+
+test('rag status only shows healthy when the live probe is actually connected', async () => {
+    setProjectModeUrl()
+    fetchJSONMock.mockImplementation((path) => {
+        if (path === '/api/workbench/hub') return Promise.resolve(buildHubPayload())
+        if (path === '/api/project/info') {
+            return Promise.resolve({
+                project_info: { title: 'Night Rain Archive', genre: '都市异能' },
+                dashboard_context: { project_initialized: true, project_root: 'C:/novel' },
+                progress: { current_chapter: 1, total_words: 3607 },
+            })
+        }
+        if (path === '/api/project/director-hub') {
+            return Promise.resolve({
+                current_chapter: 2,
+                current_brief: {},
+                story_plan: { anchor_chapter: 1, planning_horizon: 4, rationale: 'Story plan' },
+                continuity: {},
+                voice_bible: {},
+            })
+        }
+        if (path === '/api/tasks/summary') return Promise.resolve([])
+        if (path === '/api/llm/status') return Promise.resolve({ installed: false })
+        if (path === '/api/rag/status') {
+            return Promise.resolve({
+                configured: true,
+                embed_model: 'BAAI/bge-m3',
+                effective_status: 'failed',
+                connection_status: 'not_checked',
+                connection_error: { code: 'RAG_TIMEOUT', details: { stage: 'embedding' } },
+            })
+        }
+        return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    expect((await screen.findAllByText('项目总览')).length).toBeGreaterThan(0)
+    expect(screen.getByText('检索引擎连接失败：embedding / RAG_TIMEOUT')).not.toBeNull()
+    expect(screen.queryByText('检索引擎已配置 BAAI/bge-m3')).toBeNull()
 })
 
 test('overview primary action surfaces request errors', async () => {

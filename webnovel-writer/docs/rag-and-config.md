@@ -60,6 +60,11 @@ WEBNOVEL_RAG_API_KEY=your_rag_api_key
 
 当前实现里，Embedding 和 Rerank 共用同一个 `WEBNOVEL_RAG_API_KEY`。
 
+Dashboard 里的 RAG 状态也以真实探活结果为准：
+
+- 只有探活返回 `connected` 时，界面才会显示“已连接”
+- 仅“已配置”但探活失败、超时或未连通时，会显示“未连接”或“连接失败”，不会再按可用状态展示
+
 ## 面板后端接口
 
 如果要从自定义脚本调用，而不是手工点界面，可使用：
@@ -78,6 +83,7 @@ WEBNOVEL_RAG_API_KEY=your_rag_api_key
 当前行为可以概括为：
 
 - Dashboard 设置页读取和保存时，优先围绕项目根目录 `.env`
+- 若项目 `.env` 未提供 `WEBNOVEL_RAG_API_KEY`，Dashboard 运行时和 readonly audit 会回退读取应用根目录 `.env` 里的同名变量
 - 任务执行阶段仍会尊重已显式导出的环境变量
 - CLI 运行时会优先保留显式环境变量，再补充项目 `.env`
 

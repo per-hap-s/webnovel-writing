@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 EntityLinker extra tests + CLI
@@ -8,13 +8,13 @@ import sys
 
 import pytest
 
-from data_modules.entity_linker import EntityLinker, main as linker_main
-from data_modules.index_manager import IndexManager, EntityMeta
+from scripts.data_modules.entity_linker import EntityLinker, main as linker_main
+from scripts.data_modules.index_manager import IndexManager, EntityMeta
 
 
 @pytest.fixture
 def temp_project(tmp_path):
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.config import DataModulesConfig
     cfg = DataModulesConfig.from_project_root(tmp_path)
     cfg.ensure_dirs()
     return cfg
@@ -95,3 +95,4 @@ def test_entity_linker_cli(temp_project, monkeypatch, capsys):
     run_cli(["--project-root", root, "list-aliases", "--entity", "xiaoyan"])
 
     capsys.readouterr()
+

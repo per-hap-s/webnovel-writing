@@ -378,54 +378,79 @@ export function SupervisorAuditPage({ projectInfo, tasks, onTaskCreated, onOpenT
         setAuditFocusedStableKey('')
     }
 
+    function runAuditDownload(action) {
+        try {
+            setAuditError(null)
+            action()
+        } catch (err) {
+            setAuditError(normalizeError(err))
+        }
+    }
+
     function handleDownloadAuditMarkdown() {
-        downloadTextFile(
-            `supervisor-audit-ch${String(projectInfo?.progress?.current_chapter || 0).padStart(4, '0')}.md`,
-            buildSupervisorAuditMarkdown({
-                projectInfo,
-                entries: filteredAuditLogEntries,
-                tasks,
-                filters: {
-                    category: auditCategoryFilter,
-                    action: auditActionFilter,
-                    status: auditStatusFilter,
-                    chapter: auditChapterFilter,
-                    view_mode: auditViewMode,
-                    group_focus: auditGroupFocus,
-                },
-            }),
-            'text/markdown;charset=utf-8',
-        )
+        runAuditDownload(() => {
+            downloadTextFile(
+                `supervisor-audit-ch${String(projectInfo?.progress?.current_chapter || 0).padStart(4, '0')}.md`,
+                buildSupervisorAuditMarkdown({
+                    projectInfo,
+                    entries: filteredAuditLogEntries,
+                    tasks,
+                    filters: {
+                        category: auditCategoryFilter,
+                        action: auditActionFilter,
+                        status: auditStatusFilter,
+                        chapter: auditChapterFilter,
+                        view_mode: auditViewMode,
+                        group_focus: auditGroupFocus,
+                    },
+                }),
+                'text/markdown;charset=utf-8',
+            )
+        })
     }
 
     function handleDownloadAuditJson() {
-        downloadTextFile('supervisor-audit.json', JSON.stringify(filteredAuditLogEntries, null, 2), 'application/json;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile('supervisor-audit.json', JSON.stringify(filteredAuditLogEntries, null, 2), 'application/json;charset=utf-8')
+        })
     }
 
     function handleDownloadAuditHealthMarkdown() {
-        downloadTextFile('supervisor-audit-health.md', buildSupervisorAuditHealthMarkdown({ projectInfo, health: auditHealth }), 'text/markdown;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile('supervisor-audit-health.md', buildSupervisorAuditHealthMarkdown({ projectInfo, health: auditHealth }), 'text/markdown;charset=utf-8')
+        })
     }
 
     function handleDownloadAuditHealthJson() {
-        downloadTextFile('supervisor-audit-health.json', JSON.stringify(auditHealth || {}, null, 2), 'application/json;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile('supervisor-audit-health.json', JSON.stringify(auditHealth || {}, null, 2), 'application/json;charset=utf-8')
+        })
     }
 
     function handleDownloadAuditRepairPreviewMarkdown() {
-        downloadTextFile('supervisor-audit-repair-preview.md', buildSupervisorAuditRepairPreviewMarkdown({ projectInfo, preview: auditRepairPreview }), 'text/markdown;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile('supervisor-audit-repair-preview.md', buildSupervisorAuditRepairPreviewMarkdown({ projectInfo, preview: auditRepairPreview }), 'text/markdown;charset=utf-8')
+        })
     }
 
     function handleDownloadAuditRepairPreviewJson() {
-        downloadTextFile('supervisor-audit-repair-preview.json', JSON.stringify(auditRepairPreview || {}, null, 2), 'application/json;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile('supervisor-audit-repair-preview.json', JSON.stringify(auditRepairPreview || {}, null, 2), 'application/json;charset=utf-8')
+        })
     }
 
     function handleDownloadAuditRepairReport(item) {
         if (!item) return
-        downloadTextFile(item.filename || 'repair-report.json', JSON.stringify(item.content || item, null, 2), 'application/json;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile(item.filename || 'repair-report.json', JSON.stringify(item.content || item, null, 2), 'application/json;charset=utf-8')
+        })
     }
 
     function handleDownloadAuditChecklist(item) {
         if (!item?.content) return
-        downloadTextFile(item.filename || 'supervisor-checklist.md', item.content, 'text/markdown;charset=utf-8')
+        runAuditDownload(() => {
+            downloadTextFile(item.filename || 'supervisor-checklist.md', item.content, 'text/markdown;charset=utf-8')
+        })
     }
 
     return (

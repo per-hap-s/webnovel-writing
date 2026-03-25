@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sys
@@ -15,7 +15,7 @@ def _ensure_scripts_on_path() -> None:
 
 def _load_webnovel_module():
     _ensure_scripts_on_path()
-    import data_modules.webnovel as webnovel_module
+    import scripts.data_modules.webnovel as webnovel_module
 
     return webnovel_module
 
@@ -218,3 +218,4 @@ def test_quality_trend_report_writes_to_book_root_when_input_is_workspace_root(t
     assert output_path.is_file()
     assert (book_root / ".webnovel" / "index.db").is_file()
     assert not (workspace_root / ".webnovel" / "index.db").exists()
+

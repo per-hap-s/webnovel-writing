@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import json
 import tempfile
 
-from data_modules.config import DataModulesConfig
-from data_modules.index_manager import (
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.index_manager import (
     IndexManager,
     ChapterReadingPowerMeta,
     EntityMeta,
@@ -233,3 +233,4 @@ def test_relationship_graph_prefers_index_db_data():
         assert "mermaid" in graph
         assert "药老" in graph
         assert "师徒" in graph
+

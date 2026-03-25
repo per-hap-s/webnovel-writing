@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,6 +51,8 @@ def update_project_state(project_root: str | Path, mutator: StateMutator, *, str
             next_state = result
         if not isinstance(next_state, dict):
             raise ProjectStateError("project state mutator must return a dict or mutate in place")
+        if next_state == current_state:
+            return current_state
         atomic_write_json(state_path, next_state, use_lock=False, backup=True)
         return next_state
 
@@ -66,3 +69,19 @@ def _read_state_file(state_path: Path, *, strict: bool = True) -> dict[str, Any]
     if not isinstance(payload, dict):
         raise ProjectStateCorruptedError(f"state.json root must be an object: {state_path}")
     return payload
+
+
+def _alias_module_name() -> None:
+    module = sys.modules.get(__name__)
+    if module is None:
+        return
+    if __name__.startswith("scripts.data_modules"):
+        alias = __name__.replace("scripts.data_modules", "data_modules", 1)
+    elif __name__.startswith("data_modules"):
+        alias = __name__.replace("data_modules", "scripts.data_modules", 1)
+    else:
+        return
+    sys.modules.setdefault(alias, module)
+
+
+_alias_module_name()

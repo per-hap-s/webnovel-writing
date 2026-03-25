@@ -66,6 +66,19 @@ def test_frontend_exposes_writing_model_status():
     assert 'formatWritingModelDetail(llmStatus)' in source
 
 
+def test_frontend_status_copy_flows_through_shared_helpers():
+    app_source = APP_PATH.read_text(encoding='utf-8-sig')
+    control_source = CONTROL_PAGE_PATH.read_text(encoding='utf-8-sig')
+    helper_source = (FRONTEND_SRC_ROOT / 'serviceStatus.js').read_text(encoding='utf-8-sig')
+
+    assert "from './serviceStatus.js'" in app_source
+    assert "from './serviceStatus.js'" in control_source
+    assert 'formatRagStatusLabel' in helper_source
+    assert 'formatRagDetail' in helper_source
+    assert 'formatWritingModelPill' in helper_source
+    assert 'formatWritingModelDetail' in helper_source
+
+
 def test_frontend_reads_project_info_from_state_json_shape():
     source = _read_frontend_sources('App.jsx', 'controlPage.jsx')
     assert 'const projectMeta = projectInfo?.project_info || projectInfo || {}' in source

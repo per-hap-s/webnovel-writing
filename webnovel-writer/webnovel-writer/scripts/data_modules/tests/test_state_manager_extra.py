@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 StateManager extra tests
@@ -9,13 +9,13 @@ import sys
 
 import pytest
 
-from data_modules.state_manager import StateManager, EntityState
-from data_modules.index_manager import IndexManager, EntityMeta
+from scripts.data_modules.state_manager import StateManager, EntityState
+from scripts.data_modules.index_manager import IndexManager, EntityMeta
 
 
 @pytest.fixture
 def temp_project(tmp_path):
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.config import DataModulesConfig
     cfg = DataModulesConfig.from_project_root(tmp_path)
     cfg.ensure_dirs()
     return cfg
@@ -587,3 +587,4 @@ def test_get_entities_by_tier_uses_single_sql_query(temp_project, monkeypatch):
     assert call_count["count"] == 1
     assert set(result) == {"xiaoyan", "yaolao"}
     assert result["xiaoyan"]["tier"] == "鏍稿績"
+

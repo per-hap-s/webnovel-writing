@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import json
@@ -18,7 +18,7 @@ def test_build_chapter_context_payload_includes_disabled_rag_assist(tmp_path):
     _ensure_scripts_dir()
 
     from extract_chapter_context import build_chapter_context_payload
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.config import DataModulesConfig
 
     cfg = DataModulesConfig.from_project_root(tmp_path)
     cfg.ensure_dirs()
@@ -40,8 +40,8 @@ def test_load_rag_assist_propagates_rag_error(tmp_path, monkeypatch):
 
     import extract_chapter_context as module
 
-    from data_modules.api_client import RAGRequestError
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.api_client import RAGRequestError
+    from scripts.data_modules.config import DataModulesConfig
 
     cfg = DataModulesConfig.from_project_root(tmp_path)
     cfg.ensure_dirs()
@@ -58,7 +58,7 @@ def test_extract_chapter_outline_supports_volume_plan_from_state(tmp_path):
     _ensure_scripts_dir()
 
     from extract_chapter_context import extract_chapter_outline
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.config import DataModulesConfig
 
     cfg = DataModulesConfig.from_project_root(tmp_path)
     cfg.ensure_dirs()
@@ -95,3 +95,4 @@ def test_extract_chapter_outline_supports_volume_plan_from_state(tmp_path):
     outline = extract_chapter_outline(tmp_path, 1)
     assert 'Chapter 1' in outline
     assert '异常监控' in outline
+

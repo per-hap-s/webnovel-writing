@@ -15,6 +15,7 @@ Data Modules - 数据链模块包。
 from __future__ import annotations
 
 from importlib import import_module
+import sys
 from typing import Any
 
 
@@ -103,4 +104,20 @@ def __getattr__(name: str) -> Any:  # pragma: no cover
 
 def __dir__() -> list[str]:  # pragma: no cover
     return sorted(set(list(globals().keys()) + list(_LAZY_EXPORTS.keys())))
+
+
+def _alias_package_name() -> None:
+    module = sys.modules.get(__name__)
+    if module is None:
+        return
+    if __name__ == "scripts.data_modules":
+        alias = "data_modules"
+    elif __name__ == "data_modules":
+        alias = "scripts.data_modules"
+    else:
+        return
+    sys.modules.setdefault(alias, module)
+
+
+_alias_package_name()
 

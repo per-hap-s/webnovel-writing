@@ -479,12 +479,22 @@ export function SupervisorPage({ projectInfo, tasks, onTaskCreated, onOpenTask, 
     }
 
     function handleDownloadChecklist() {
-        downloadTextFile(`supervisor-checklist-ch${String(projectInfo?.progress?.current_chapter || 0).padStart(4, '0')}.md`, checklistMarkdown, 'text/markdown;charset=utf-8')
+        try {
+            setSupervisorError(null)
+            downloadTextFile(`supervisor-checklist-ch${String(projectInfo?.progress?.current_chapter || 0).padStart(4, '0')}.md`, checklistMarkdown, 'text/markdown;charset=utf-8')
+        } catch (err) {
+            setSupervisorError(normalizeError(err))
+        }
     }
 
     function handleDownloadSavedChecklist(item) {
         if (!item?.content) return
-        downloadTextFile(item.filename || 'supervisor-checklist.md', item.content, 'text/markdown;charset=utf-8')
+        try {
+            setSupervisorError(null)
+            downloadTextFile(item.filename || 'supervisor-checklist.md', item.content, 'text/markdown;charset=utf-8')
+        } catch (err) {
+            setSupervisorError(normalizeError(err))
+        }
     }
 
     async function handleSaveChecklistToProject() {

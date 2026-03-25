@@ -11,6 +11,7 @@ import { QualityPage } from './qualityPage.jsx'
 import { SupervisorPage } from './supervisorPage.jsx'
 import { SupervisorAuditPage } from './supervisorAuditPage.jsx'
 import { TaskCenterPage } from './taskCenterPage.jsx'
+import * as serviceStatus from './serviceStatus.js'
 import { WorkbenchPage, readLandingPreference, syncDashboardQuery } from './workbenchPage.jsx'
 
 const PROJECT_NAV_ITEMS = [
@@ -235,7 +236,6 @@ export default function App() {
             setDirectorHub(directorHubResult.value)
             setDirectorHubError(null)
         } else {
-            setDirectorHub(null)
             setDirectorHubError(normalizeError(directorHubResult.reason))
         }
 
@@ -421,8 +421,8 @@ export default function App() {
                     {projectMode ? (
                         <>
                             <StatusPill tone={connected ? 'good' : 'danger'} label={connected ? '实时同步已连接' : '实时同步已断开'} />
-                            <StatusPill tone={getWritingModelTone(llmStatus, llmStatusError)} label={formatWritingModelPill(llmStatus, llmStatusError)} />
-                            <StatusPill tone={getRagTone(ragStatus, ragStatusError)} label={formatRagStatusLabel(ragStatus, ragStatusError)} />
+                            <StatusPill tone={serviceStatus.getWritingModelTone(llmStatus, llmStatusError)} label={serviceStatus.formatWritingModelPill(llmStatus, llmStatusError, UI_COPY)} />
+                            <StatusPill tone={serviceStatus.getRagTone(ragStatus, ragStatusError)} label={serviceStatus.formatRagStatusLabel(ragStatus, ragStatusError, UI_COPY)} />
                         </>
                     ) : (
                         <StatusPill tone="warning" label="工作台模式：尚未打开项目" />
@@ -451,8 +451,8 @@ export default function App() {
                         projectInfo={projectInfo}
                         directorHub={directorHub}
                         directorHubError={directorHubError}
-                        llmStatus={mergeServiceStatusWithError(llmStatus, llmStatusError)}
-                        ragStatus={mergeServiceStatusWithError(ragStatus, ragStatusError)}
+                        llmStatus={serviceStatus.mergeServiceStatusWithError(llmStatus, llmStatusError)}
+                        ragStatus={serviceStatus.mergeServiceStatusWithError(ragStatus, ragStatusError)}
                         tasks={tasks}
                         bootstrapHint={bootstrapHint}
                         onTaskCreated={handleTaskCreated}
@@ -622,31 +622,34 @@ function formatWritingModelValue(llmStatus) {
 }
 
 function getRagTone(ragStatus, loadError) {
+    const effectiveStatus = ragStatus?.effective_status || ragStatus?.connection_status
     if (loadError) return 'warning'
     if (!ragStatus?.configured) return 'warning'
-    if (ragStatus?.connection_status === 'failed') return 'danger'
-    if (ragStatus?.connection_status === 'connected') return 'good'
+    if (effectiveStatus === 'failed') return 'danger'
+    if (effectiveStatus === 'connected') return 'good'
     return 'warning'
 }
 
 function formatRagStatusLabel(ragStatus, loadError) {
+    const effectiveStatus = ragStatus?.effective_status || ragStatus?.connection_status
+    const suffix = ragStatus?.embed_model ? ` ${ragStatus.embed_model}` : ''
     if (loadError) {
-        const suffix = ragStatus?.embed_model ? ` ${ragStatus.embed_model}` : ''
         return `${UI_COPY.retrievalEngine}探活异常，请稍后重试${suffix}`.trim()
     }
     if (!ragStatus?.configured) return `${UI_COPY.retrievalEngine}未配置`
-    if (ragStatus?.connection_status === 'failed') {
+    if (effectiveStatus === 'failed') {
         return `${UI_COPY.retrievalEngine}连接失败：${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`
     }
-    if (ragStatus?.connection_status === 'connected') {
-        return `${UI_COPY.retrievalEngine}已连接 ${ragStatus?.embed_model || ''}`.trim()
+    if (effectiveStatus === 'connected') {
+        return `${UI_COPY.retrievalEngine}已连接${suffix}`.trim()
     }
-    return `${UI_COPY.retrievalEngine}已配置 ${ragStatus?.embed_model || ''}`.trim()
+    if (effectiveStatus === 'not_configured') return `${UI_COPY.retrievalEngine}未配置`
+    return `${UI_COPY.retrievalEngine}未连接${suffix}`.trim()
 }
 
 function formatRagErrorSummary(error) {
     if (!error) return '未知错误'
-    const stage = error?.details?.stage ? String(error.details.stage) : '检索'
+    const stage = error?.details?.stage ? String(error.details.stage) : 'embedding'
     const code = error?.code || 'UNKNOWN'
     return `${stage} / ${code}`
 }

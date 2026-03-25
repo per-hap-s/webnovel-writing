@@ -11,23 +11,25 @@ quality_trend_report.py - 生成章节质量趋势报告（离线）
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 from runtime_compat import enable_windows_utf8_stdio
 
-try:
-    from project_locator import resolve_project_root
-except ImportError:  # pragma: no cover
-    from scripts.project_locator import resolve_project_root
 
-try:
-    from data_modules.config import DataModulesConfig
-    from data_modules.index_manager import IndexManager
-except ImportError:  # pragma: no cover
-    from scripts.data_modules.config import DataModulesConfig
-    from scripts.data_modules.index_manager import IndexManager
+def _ensure_package_root_on_path() -> None:
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+
+
+_ensure_package_root_on_path()
+
+from scripts.project_locator import resolve_project_root
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.index_manager import IndexManager
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:

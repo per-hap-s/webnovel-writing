@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sqlite3
@@ -11,10 +11,10 @@ TEST_ROOT = Path(__file__).resolve().parents[2]
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-from data_modules.config import DataModulesConfig
-from data_modules.index_manager import EntityMeta, IndexManager
-from data_modules.narrative_graph import NarrativeGraph
-from data_modules.narrative_models import (
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.index_manager import EntityMeta, IndexManager
+from scripts.data_modules.narrative_graph import NarrativeGraph
+from scripts.data_modules.narrative_models import (
     CharacterArcMeta,
     ForeshadowingItemMeta,
     KnowledgeStateMeta,
@@ -262,3 +262,4 @@ def test_narrative_graph_write_batch_and_context_summary(temp_project):
     assert len(summary["core_character_arcs"]) <= 1
     assert len(summary["knowledge_conflicts"]) <= 1
     assert summary["knowledge_conflicts"][0]["topic"] == "遗迹入口"
+

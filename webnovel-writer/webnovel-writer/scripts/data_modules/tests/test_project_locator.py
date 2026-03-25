@@ -86,6 +86,26 @@ def test_resolve_project_root_uses_new_workspace_pointer(tmp_path):
     assert resolved == project_root.resolve()
 
 
+def test_resolve_workspace_current_project_supports_utf8_bom_pointer_for_chinese_paths(tmp_path):
+    _ensure_scripts_on_path()
+
+    from project_locator import resolve_workspace_current_project
+
+    workspace = tmp_path / 'workspace'
+    (workspace / '.webnovel').mkdir(parents=True, exist_ok=True)
+
+    project_root = workspace / '小说项目'
+    (project_root / '.webnovel').mkdir(parents=True, exist_ok=True)
+    (project_root / '.webnovel' / 'state.json').write_text('{}', encoding='utf-8')
+
+    pointer_file = workspace / '.webnovel' / 'current-project'
+    pointer_file.write_bytes(f'\ufeff{project_root}'.encode('utf-8'))
+
+    resolved = resolve_workspace_current_project(workspace_root=workspace)
+
+    assert resolved == project_root.resolve()
+
+
 def test_resolve_project_root_uses_legacy_pointer_for_compatibility(tmp_path):
     _ensure_scripts_on_path()
 

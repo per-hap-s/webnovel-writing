@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 SQLStateManager tests
@@ -9,13 +9,13 @@ import sys
 
 import pytest
 
-import data_modules.sql_state_manager as sql_state_manager_module
-from data_modules.sql_state_manager import SQLStateManager, EntityData
+import scripts.data_modules.sql_state_manager as sql_state_manager_module
+from scripts.data_modules.sql_state_manager import SQLStateManager, EntityData
 
 
 @pytest.fixture
 def temp_project(tmp_path):
-    from data_modules.config import DataModulesConfig
+    from scripts.data_modules.config import DataModulesConfig
     cfg = DataModulesConfig.from_project_root(tmp_path)
     cfg.ensure_dirs()
     return cfg
@@ -210,3 +210,4 @@ def test_sql_state_manager_export_protagonist_and_cli(temp_project, monkeypatch,
         payload,
     ])
     assert out["status"] == "success"
+

@@ -8,17 +8,25 @@ API 配置通过环境变量读取（支持 .env 文件）：
 - WEBNOVEL_RAG_EMBED_MODEL, WEBNOVEL_RAG_RERANK_MODEL
 """
 
-import os
 import logging
+import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Mapping, Optional
 
 from runtime_compat import normalize_windows_path
 
 _logger = logging.getLogger(__name__)
+APP_ROOT_ENV_FALLBACK_KEYS = frozenset({"WEBNOVEL_RAG_API_KEY"})
+_INITIAL_ENV_KEYS = frozenset(os.environ.keys())
+_RUNTIME_ENV_MANAGED_KEYS: set[str] = set()
 
 from .context_weights import TEMPLATE_WEIGHTS_DYNAMIC_DEFAULT
+
+
+def _get_app_root_env_path() -> Path:
+    return Path(__file__).resolve().parents[2] / ".env"
 
 def _get_user_claude_root() -> Path:
     raw = os.environ.get("WEBNOVEL_CLAUDE_HOME") or os.environ.get("CLAUDE_HOME")
@@ -35,11 +43,17 @@ def _get_user_claude_root() -> Path:
     return (Path.home() / ".claude").resolve()
 
 
-def _load_dotenv_file(env_path: Path, *, override: bool = False) -> bool:
+def _parse_dotenv_file(
+    env_path: Path,
+    *,
+    allowed_keys: set[str] | frozenset[str] | None = None,
+    protected_keys: set[str] | frozenset[str] | None = None,
+) -> dict[str, str]:
     if not env_path.exists():
-        return False
+        return {}
+    parsed: dict[str, str] = {}
     try:
-        with open(env_path, "r", encoding="utf-8") as f:
+        with open(env_path, "r", encoding="utf-8-sig") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
@@ -48,17 +62,84 @@ def _load_dotenv_file(env_path: Path, *, override: bool = False) -> bool:
                     value = value.strip()
                     if not key:
                         continue
-                    # 默认不覆盖已有环境变量（保持“显式 > .env”优先级）
-                    if override or key not in os.environ:
-                        os.environ[key] = value
-        return True
+                    if allowed_keys is not None and key not in allowed_keys:
+                        continue
+                    if protected_keys is not None and key in protected_keys:
+                        continue
+                    parsed[key] = value
+        return parsed
     except (IOError, OSError, UnicodeDecodeError) as e:
         _logger.debug(
             "加载 .env 文件失败: %s, 错误: %s",
             env_path,
             e,
         )
-        return False
+        return {}
+
+
+def _apply_runtime_env_values(
+    values: Mapping[str, str],
+    *,
+    explicit_env_keys: set[str] | frozenset[str],
+) -> None:
+    global _RUNTIME_ENV_MANAGED_KEYS
+    explicit_keys = set(explicit_env_keys)
+    next_managed_keys = {key for key in values if key not in explicit_keys}
+
+    for key in list(_RUNTIME_ENV_MANAGED_KEYS):
+        if key in explicit_keys:
+            continue
+        if key not in next_managed_keys:
+            os.environ.pop(key, None)
+
+    for key, value in values.items():
+        if key in explicit_keys:
+            continue
+        os.environ[key] = value
+
+    _RUNTIME_ENV_MANAGED_KEYS = next_managed_keys
+
+
+def _collect_runtime_env_values(project_root: Optional[Path] = None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for layer in (
+        _parse_dotenv_file(_get_user_claude_root() / "webnovel-writer" / ".env"),
+        _parse_dotenv_file(
+            _get_app_root_env_path(),
+            allowed_keys=APP_ROOT_ENV_FALLBACK_KEYS,
+        ),
+        _parse_dotenv_file(Path.cwd() / ".env"),
+    ):
+        values.update(layer)
+
+    if project_root is not None:
+        values.update(_parse_dotenv_file(project_root / ".env"))
+
+    return values
+
+
+def _runtime_env_for_project(project_root: Path) -> dict[str, str]:
+    values = _collect_runtime_env_values(project_root)
+    for key in _INITIAL_ENV_KEYS:
+        if key in os.environ:
+            values[key] = os.environ[key]
+    return values
+
+
+def _get_env_text(env_values: Mapping[str, str], key: str, default: str = "") -> str:
+    value = str(env_values.get(key) or "").strip()
+    return value if value else default
+
+
+def _get_env_int(env_values: Mapping[str, str], key: str, default: int) -> int:
+    raw = str(env_values.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _logger.debug("环境变量 %s 不是有效整数: %s", key, raw)
+        return default
 
 
 def _load_dotenv():
@@ -70,27 +151,7 @@ def _load_dotenv():
     - 全局 `.env` 作为兜底：`~/.claudewebnovel writer/.env`
     """
     # 1) 当前目录（常见：用户从项目根目录执行）
-    _load_dotenv_file(Path.cwd() / ".env", override=False)
-
-    # 2) 用户级全局（常见：skills/agents 全局安装，API key 放这里最省心）
-    global_env = _get_user_claude_root() / "webnovel-writer" / ".env"
-    _load_dotenv_file(global_env, override=False)
-
-
-def _load_project_dotenv(project_root: Path) -> None:
-    """
-    加载某个项目根目录下的 `.env`（best-effort）。
-    注意：不覆盖已存在环境变量，避免意外串台。
-    """
-    try:
-        _load_dotenv_file(Path(project_root) / ".env", override=False)
-    except (TypeError, ValueError) as e:
-        _logger.debug(
-            "加载项目 .env 文件失败: %s, 错误: %s",
-            project_root,
-            e,
-        )
-        return
+    _apply_runtime_env_values(_collect_runtime_env_values(None), explicit_env_keys=_INITIAL_ENV_KEYS)
 
 def load_runtime_env(project_root: Optional[str | Path] = None) -> None:
     """
@@ -102,42 +163,18 @@ def load_runtime_env(project_root: Optional[str | Path] = None) -> None:
     - project_root/.env
     - cwd/.env and user fallback .env
     """
-    explicit_env_keys = set(os.environ.keys())
-    _load_dotenv()
-    if project_root is None:
-        return
     try:
-        root = normalize_windows_path(project_root).expanduser().resolve()
+        root = normalize_windows_path(project_root).expanduser().resolve() if project_root is not None else None
     except (OSError, RuntimeError, TypeError, ValueError) as e:
         _logger.debug(
             "Runtime env path resolve failed: %s, error: %s",
             project_root,
             e,
         )
+        _apply_runtime_env_values(_collect_runtime_env_values(None), explicit_env_keys=_INITIAL_ENV_KEYS)
         return
 
-    env_path = root / ".env"
-    if not env_path.exists():
-        return
-    try:
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip()
-                    if not key:
-                        continue
-                    if key in explicit_env_keys:
-                        continue
-                    os.environ[key] = value
-    except (IOError, OSError, UnicodeDecodeError) as e:
-        _logger.debug(
-            "???? .env ????: %s, ??: %s",
-            env_path,
-            e,
-        )
+    _apply_runtime_env_values(_collect_runtime_env_values(root), explicit_env_keys=_INITIAL_ENV_KEYS)
 
 
 _load_dotenv()
@@ -404,8 +441,19 @@ class DataModulesConfig:
             DataModulesConfig: 配置实例。
         """
         root = normalize_windows_path(project_root).expanduser().resolve()
-        _load_project_dotenv(root)
-        return cls(project_root=root)
+        runtime_env = _runtime_env_for_project(root)
+        return cls(
+            project_root=root,
+            embed_base_url=_get_env_text(runtime_env, "WEBNOVEL_RAG_BASE_URL", "https://api.siliconflow.cn/v1"),
+            embed_model=_get_env_text(runtime_env, "WEBNOVEL_RAG_EMBED_MODEL", "BAAI/bge-m3"),
+            embed_api_key=_get_env_text(runtime_env, "WEBNOVEL_RAG_API_KEY", ""),
+            rerank_base_url=_get_env_text(runtime_env, "WEBNOVEL_RAG_BASE_URL", "https://api.siliconflow.cn/v1"),
+            rerank_model=_get_env_text(runtime_env, "WEBNOVEL_RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
+            rerank_api_key=_get_env_text(runtime_env, "WEBNOVEL_RAG_API_KEY", ""),
+            api_max_retries=_get_env_int(runtime_env, "WEBNOVEL_RAG_MAX_RETRIES", 6),
+            api_retry_delay=_get_env_int(runtime_env, "WEBNOVEL_RAG_RETRY_INITIAL_DELAY_MS", 500) / 1000.0,
+            api_retry_max_delay_ms=_get_env_int(runtime_env, "WEBNOVEL_RAG_RETRY_MAX_DELAY_MS", 8000),
+        )
 
 
 _default_config: Optional[DataModulesConfig] = None
@@ -550,6 +598,22 @@ def validate_config_bounds(config: DataModulesConfig) -> bool:
         all_valid = False
     
     return all_valid
+
+
+def _alias_module_name() -> None:
+    module = sys.modules.get(__name__)
+    if module is None:
+        return
+    if __name__.startswith("scripts.data_modules"):
+        alias = __name__.replace("scripts.data_modules", "data_modules", 1)
+    elif __name__.startswith("data_modules"):
+        alias = __name__.replace("data_modules", "scripts.data_modules", 1)
+    else:
+        return
+    sys.modules.setdefault(alias, module)
+
+
+_alias_module_name()
 
 
 

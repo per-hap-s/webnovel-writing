@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 import json
 import sys
@@ -11,10 +11,10 @@ TEST_ROOT = Path(__file__).resolve().parents[2]
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-from data_modules.config import DataModulesConfig
-from data_modules.context_manager import ContextManager
-from data_modules.index_manager import EntityMeta, IndexManager
-from data_modules.narrative_graph import NarrativeGraph
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.context_manager import ContextManager
+from scripts.data_modules.index_manager import EntityMeta, IndexManager
+from scripts.data_modules.narrative_graph import NarrativeGraph
 
 
 @pytest.fixture
@@ -145,3 +145,4 @@ def test_extract_chapter_context_payload_exposes_narrative_state(temp_project):
     rendered = _render_text(payload)
     assert "叙事状态" in rendered
     assert "活跃伏笔" in rendered
+

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 StyleSampler extra tests + CLI
@@ -9,9 +9,9 @@ import json
 
 import pytest
 
-import data_modules.style_sampler as sampler_module
-from data_modules.style_sampler import StyleSampler, StyleSample, SceneType
-from data_modules.config import DataModulesConfig
+import scripts.data_modules.style_sampler as sampler_module
+from scripts.data_modules.style_sampler import StyleSampler, StyleSample, SceneType
+from scripts.data_modules.config import DataModulesConfig
 
 
 @pytest.fixture
@@ -89,3 +89,4 @@ def test_style_sampler_cli(temp_project, monkeypatch, capsys):
     run_cli(["--project-root", root, "select", "--outline", "本章有一场战斗", "--max", "2"])
 
     capsys.readouterr()
+

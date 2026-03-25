@@ -91,28 +91,16 @@ from chapter_paths import extract_chapter_num_from_filename
 from runtime_compat import enable_windows_utf8_stdio
 
 # 导入配置
-try:
-    from data_modules.config import get_config, DataModulesConfig
-    from data_modules.index_manager import IndexManager
-    from data_modules.state_validator import (
-        get_chapter_meta_entry,
-        is_resolved_foreshadowing_status,
-        normalize_foreshadowing_tier,
-        normalize_state_runtime_sections,
-        resolve_chapter_field,
-        to_positive_int,
-    )
-except ImportError:
-    from scripts.data_modules.config import get_config, DataModulesConfig
-    from scripts.data_modules.index_manager import IndexManager
-    from scripts.data_modules.state_validator import (
-        get_chapter_meta_entry,
-        is_resolved_foreshadowing_status,
-        normalize_foreshadowing_tier,
-        normalize_state_runtime_sections,
-        resolve_chapter_field,
-        to_positive_int,
-    )
+from scripts.data_modules.config import get_config, DataModulesConfig
+from scripts.data_modules.index_manager import IndexManager
+from scripts.data_modules.state_validator import (
+    get_chapter_meta_entry,
+    is_resolved_foreshadowing_status,
+    normalize_foreshadowing_tier,
+    normalize_state_runtime_sections,
+    resolve_chapter_field,
+    to_positive_int,
+)
 
 def _is_resolved_foreshadowing_status(raw_status: Any) -> bool:
     """判断伏笔是否已回收（兼容历史字段与同义词）。"""

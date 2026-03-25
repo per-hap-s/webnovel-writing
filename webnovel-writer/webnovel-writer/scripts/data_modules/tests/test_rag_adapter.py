@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import asyncio
@@ -11,10 +11,10 @@ TEST_ROOT = Path(__file__).resolve().parents[2]
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-import data_modules.rag_adapter as rag_module
-from data_modules.api_client import RAGRequestError
-from data_modules.config import DataModulesConfig
-from data_modules.rag_adapter import RAGAdapter
+import scripts.data_modules.rag_adapter as rag_module
+from scripts.data_modules.api_client import RAGRequestError
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.rag_adapter import RAGAdapter
 
 
 class StubClient:
@@ -105,3 +105,4 @@ def test_cli_search_reports_rag_error(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert 'RAG_SERVICE_UNAVAILABLE' in captured.out
+

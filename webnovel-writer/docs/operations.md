@@ -350,6 +350,8 @@ python -m pytest webnovel-writer\webnovel-writer\dashboard\tests\test_app.py -q
 
 Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer
 python -m pytest dashboard\tests\test_app.py dashboard\tests\test_orchestrator.py dashboard\tests\test_task_store.py -q
+$env:PYTHONPATH='D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\scripts'
+python -m pytest scripts\data_modules\tests\test_state_file.py scripts\data_modules\tests\test_state_manager_extra.py scripts\data_modules\tests\test_sql_state_manager.py scripts\data_modules\tests\test_webnovel_unified_cli.py -q
 python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q
 ```
 
@@ -367,4 +369,7 @@ Rules:
 - Keep `npm test` as the single frontend entrypoint for day-to-day verification.
 - `npm run test:state` is reserved for `node:test` logic files.
 - `npm run test:ui` is reserved for Vitest files and now includes the previously omitted suites.
+- `scripts\data_modules\tests\*` must run with `PYTHONPATH` pointed at `webnovel-writer\webnovel-writer\scripts`; otherwise import-path failures count as invalid verification, not product regressions.
 - `dashboard/frontend/dist/` remains committed; when runtime source files change, rebuild and commit the matching `dist/` update in the same change.
+- If a change touches `supervisor` / `supervisor-audit` or task-resume semantics, run `& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1'` before release.
+- If a change touches `bootstrap` input contracts or the `plan / write / review / repair` mainline, run `& '.\tools\Tests\Run-Webnovel-RealE2E.ps1'` before release.

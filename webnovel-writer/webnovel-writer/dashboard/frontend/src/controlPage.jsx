@@ -9,6 +9,7 @@ import {
     TaskLauncherSection,
 } from './appSections.jsx'
 import { ErrorNotice } from './sectionCommon.jsx'
+import * as serviceStatus from './serviceStatus.js'
 import { buildWritingTaskListSummary, supportsWritingTaskContinuation } from './writingTaskListSummary.js'
 
 const MODE_OPTIONS = [
@@ -92,11 +93,11 @@ export function ControlPage({ projectInfo, directorHub, directorHubError, llmSta
                     <MetricCard label="总字数" value={formatNumber(projectInfo?.progress?.total_words || 0)} />
                     <MetricCard label="当前章节" value={`第 ${projectInfo?.progress?.current_chapter || 0} 章`} />
                     <MetricCard label="题材" value={projectMeta?.genre || '未知'} />
-                    <MetricCard label={UI_COPY.writingEngine} value={formatWritingModelDetail(llmStatus)} />
-                    <MetricCard label={UI_COPY.retrievalEngine} value={formatRagDetail(ragStatus)} />
+                    <MetricCard label={UI_COPY.writingEngine} value={serviceStatus.formatWritingModelDetail(llmStatus)} />
+                    <MetricCard label={UI_COPY.retrievalEngine} value={serviceStatus.formatRagDetail(ragStatus)} />
                 </div>
                 {(ragStatus?.connection_status === 'failed' || ragStatus?.last_error) && (
-                    <div className="empty-state">{`${UI_COPY.retrievalEngine}最近错误：${formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`}</div>
+                    <div className="empty-state">{`${UI_COPY.retrievalEngine}最近错误：${serviceStatus.formatRagErrorSummary(ragStatus.connection_error || ragStatus.last_error)}`}</div>
                 )}
             </section>
 
@@ -234,7 +235,7 @@ function DirectorHubPanel({ directorHub, error }) {
                 </div>
             ) : null}
             {!error && !directorHub ? <div className="empty-state">当前还没有可展示的创作指挥台数据。</div> : null}
-            {!directorHub || error ? null : (
+            {!directorHub ? null : (
                 <>
                     <div className="director-hub-topline">
                         <span className="runtime-badge info">{`当前准备章节：${currentChapter > 0 ? `第 ${currentChapter} 章` : '未确定'}`}</span>

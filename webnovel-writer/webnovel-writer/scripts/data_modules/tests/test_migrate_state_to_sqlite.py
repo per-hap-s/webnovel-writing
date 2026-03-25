@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 migrate_state_to_sqlite tests
@@ -8,14 +8,14 @@ import json
 
 import pytest
 
-import data_modules.migrate_state_to_sqlite as migrate_module
-from data_modules.migrate_state_to_sqlite import (
+import scripts.data_modules.migrate_state_to_sqlite as migrate_module
+from scripts.data_modules.migrate_state_to_sqlite import (
     migrate_state_to_sqlite,
     _slim_world_settings,
     _slim_relationships,
 )
-from data_modules.config import DataModulesConfig
-from data_modules.index_manager import IndexManager
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.index_manager import IndexManager
 
 
 @pytest.fixture
@@ -207,3 +207,4 @@ def test_migrate_state_error_branches(tmp_path, monkeypatch):
 
     stats = migrate_state_to_sqlite(cfg, dry_run=False, backup=False, verbose=False)
     assert stats["errors"] >= 4
+

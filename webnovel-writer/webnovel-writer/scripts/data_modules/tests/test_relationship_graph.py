@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 关系事件与关系图谱测试
@@ -9,9 +9,9 @@ import sys
 
 import pytest
 
-import data_modules.index_manager as index_manager_module
-from data_modules.config import DataModulesConfig
-from data_modules.index_manager import (
+import scripts.data_modules.index_manager as index_manager_module
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.index_manager import (
     EntityMeta,
     IndexManager,
     RelationshipEventMeta,
@@ -331,3 +331,4 @@ def test_relationship_graph_cli_commands(temp_project, monkeypatch, capsys):
     )
     assert payload["status"] == "error"
     assert payload["error"]["code"] == "INVALID_RELATIONSHIP_EVENT"
+

@@ -212,6 +212,80 @@ test('task detail does not re-fetch when only runtime heartbeat metadata changes
     expect(fetchJSONMock).toHaveBeenCalledTimes(1)
 })
 
+test('task detail keeps the last successful detail payload visible when a later refresh fails', async () => {
+    const task = {
+        id: 'task-detail-stale-1',
+        task_type: 'write',
+        status: 'running',
+        current_step: 'draft',
+        approval_status: 'not_required',
+        updated_at: '2026-03-21T10:05:00Z',
+        runtime_status: { step_state: 'running', last_event_message: 'request_dispatched' },
+        request: { chapter: 1 },
+    }
+
+    fetchJSONMock
+        .mockResolvedValueOnce({
+            task: {
+                ...task,
+                artifacts: {
+                    step_results: {
+                        draft: {
+                            structured_output: { content: 'Retained detail payload' },
+                        },
+                    },
+                },
+            },
+            events: [{
+                id: 'evt-retained-1',
+                level: 'info',
+                step_name: 'draft',
+                timestamp: '2026-03-21T10:05:01Z',
+                message: 'custom retained detail',
+                payload: {},
+            }],
+        })
+        .mockRejectedValueOnce(new Error('detail refresh failed'))
+
+    const view = renderTaskCenter([task], task)
+
+    expect(await screen.findByText((content) => content.includes('Retained detail payload'))).not.toBeNull()
+
+    const updatedSummary = {
+        ...task,
+        status: 'awaiting_writeback_approval',
+        current_step: 'approval-gate',
+        runtime_status: { step_state: 'waiting_approval', last_event_message: 'step_waiting_approval' },
+    }
+
+    view.rerender(
+        <TaskCenterPageSection
+            tasks={[updatedSummary]}
+            selectedTask={updatedSummary}
+            selectedTaskId={task.id}
+            currentProjectRoot=""
+            onSelectTask={vi.fn()}
+            onMutated={vi.fn()}
+            onNavigateOverview={vi.fn()}
+            MetricCard={MetricCard}
+            translateTaskType={translateTaskType}
+            translateTaskStatus={translateTaskStatus}
+            translateStepName={translateStepName}
+            translateEventLevel={translateEventLevel}
+            translateEventMessage={translateEventMessage}
+            resolveTaskStatusLabel={resolveTaskStatusLabel}
+            resolveCurrentStepLabel={resolveCurrentStepLabel}
+            resolveApprovalStatusLabel={resolveApprovalStatusLabel}
+            resolveTargetLabel={resolveTaskTargetLabel}
+        />,
+    )
+
+    await waitFor(() => {
+        expect(screen.getByText((content) => content.includes('Retained detail payload'))).not.toBeNull()
+        expect(screen.getByText('detail refresh failed')).not.toBeNull()
+    })
+})
+
 test('approval action includes explicit project_root in shell mode', async () => {
     const user = userEvent.setup()
     const onMutated = vi.fn()

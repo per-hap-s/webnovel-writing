@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 import json
 import sys
@@ -11,8 +11,8 @@ TEST_ROOT = Path(__file__).resolve().parents[2]
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-from data_modules.config import DataModulesConfig
-from data_modules.context_manager import ContextManager
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.context_manager import ContextManager
 
 
 @pytest.fixture
@@ -135,3 +135,4 @@ def test_extract_chapter_context_payload_reuses_covering_story_plan_for_followup
     assert payload["story_plan"]["anchor_chapter"] == 3
     assert any(item["chapter"] == 4 for item in payload["story_plan"]["chapters"])
     assert payload["story_plan"]["chapters"][1]["chapter_goal"] == "Carry the warning clue into the next confrontation."
+

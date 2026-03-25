@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ContextManager and SnapshotManager tests
@@ -9,16 +9,16 @@ import logging
 
 import pytest
 
-from data_modules.config import DataModulesConfig
-from data_modules.index_manager import (
+from scripts.data_modules.config import DataModulesConfig
+from scripts.data_modules.index_manager import (
     IndexManager,
     EntityMeta,
     ChapterReadingPowerMeta,
     ReviewMetrics,
 )
-from data_modules.context_manager import ContextManager
-from data_modules.snapshot_manager import SnapshotManager, SnapshotVersionMismatch
-from data_modules.query_router import QueryRouter
+from scripts.data_modules.context_manager import ContextManager
+from scripts.data_modules.snapshot_manager import SnapshotManager, SnapshotVersionMismatch
+from scripts.data_modules.query_router import QueryRouter
 
 
 @pytest.fixture
@@ -735,3 +735,4 @@ def test_context_manager_genre_profile_prefers_project_over_project_info(temp_pr
 
     assert profile.get("genre_raw") == "xuanhuan"
     assert profile.get("genre") == "xuanhuan"
+

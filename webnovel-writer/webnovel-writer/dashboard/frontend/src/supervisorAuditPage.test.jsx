@@ -1,21 +1,25 @@
-﻿import { beforeEach, expect, test, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { buildSupervisorAuditQueryString } from './supervisorAuditState.js'
 
 const fetchJSONMock = vi.fn()
 const postJSONMock = vi.fn()
 const resolveSupervisorItemOperatorActionsMock = vi.fn((item) => item.operatorActions || [])
+const downloadTextFileMock = vi.fn()
 
 vi.mock('./api.js', () => ({
     fetchJSON: (...args) => fetchJSONMock(...args),
     postJSON: (...args) => postJSONMock(...args),
-    normalizeError: (error) => ({
-        displayMessage: error?.message || String(error),
-        code: 'REQUEST_FAILED',
-        rawMessage: error?.message || String(error),
-        details: null,
-    }),
+    normalizeError: (error) => {
+        if (error?.displayMessage) return error
+        return {
+            displayMessage: error?.message || String(error),
+            code: 'REQUEST_FAILED',
+            rawMessage: error?.message || String(error),
+            details: null,
+        }
+    },
 }))
 
 vi.mock('./operatorAction.js', () => ({
@@ -26,7 +30,19 @@ vi.mock('./recoverySemantics.js', () => ({
     resolveSupervisorRecoverySemantics: () => null,
 }))
 
+vi.mock('./dashboardPageCommon.jsx', async () => {
+    const actual = await vi.importActual('./dashboardPageCommon.jsx')
+    return {
+        ...actual,
+        downloadTextFile: (...args) => downloadTextFileMock(...args),
+    }
+})
+
 import { SupervisorAuditPage } from './supervisorAuditPage.jsx'
+
+afterEach(() => {
+    cleanup()
+})
 
 function mockAuditFetches({ items = [], logEntries = [], checklists = [], health = {}, repairPreview = {}, repairReports = [] } = {}) {
     fetchJSONMock.mockImplementation((path) => {
@@ -44,6 +60,7 @@ beforeEach(() => {
     fetchJSONMock.mockReset()
     postJSONMock.mockReset()
     resolveSupervisorItemOperatorActionsMock.mockClear()
+    downloadTextFileMock.mockReset()
     Object.defineProperty(window.navigator, 'clipboard', {
         configurable: true,
         value: { writeText: vi.fn().mockResolvedValue() },
@@ -229,4 +246,83 @@ test('executes launch, retry, and open actions from audit groups', async () => {
     expect(onOpenTask).toHaveBeenCalledWith('task-9')
 })
 
+test('copy audit group link failure surfaces an error and keeps the audit item visible', async () => {
+    const user = userEvent.setup()
+    Object.defineProperty(window.navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(new Error('clipboard blocked')) },
+    })
 
+    mockAuditFetches({
+        items: [
+            { stableKey: 'focus-key', title: 'Copy Failure Item', category: 'approval', categoryLabel: 'Approval', trackingStatus: '' },
+        ],
+        logEntries: [
+            { stableKey: 'focus-key', action: 'created', timestamp: '2026-03-20T10:00:00Z', title: 'Copy Failure Item' },
+        ],
+    })
+
+    render(
+        <SupervisorAuditPage
+            projectInfo={{ progress: { current_chapter: 8, total_words: 12000 } }}
+            tasks={[]}
+            onTaskCreated={vi.fn()}
+            onOpenTask={vi.fn()}
+            onTasksMutated={vi.fn()}
+        />,
+    )
+
+    expect((await screen.findAllByText('Copy Failure Item')).length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('button', { name: '复制深链接' }))
+
+    await waitFor(() => {
+        expect(screen.getByRole('alert').textContent || '').toContain('clipboard blocked')
+        expect(screen.getAllByText('Copy Failure Item').length).toBeGreaterThan(0)
+    })
+})
+
+test('download audit checklist failure surfaces an error without clearing audit data', async () => {
+    const user = userEvent.setup()
+
+    mockAuditFetches({
+        items: [
+            { stableKey: 'focus-key', title: 'Download Failure Item', category: 'approval', categoryLabel: 'Approval', trackingStatus: '' },
+        ],
+        logEntries: [
+            { stableKey: 'focus-key', action: 'created', timestamp: '2026-03-20T10:00:00Z', title: 'Download Failure Item' },
+        ],
+        checklists: [
+            {
+                relativePath: '.webnovel/supervisor/checklists/checklist-ch0008.md',
+                filename: 'checklist-ch0008.md',
+                chapter: 8,
+                title: 'Audit Checklist',
+                savedAt: '2026-03-20T10:00:00Z',
+                content: '# checklist',
+                summary: 'saved snapshot',
+            },
+        ],
+    })
+    downloadTextFileMock.mockImplementation(() => {
+        throw new Error('audit download failed')
+    })
+
+    render(
+        <SupervisorAuditPage
+            projectInfo={{ progress: { current_chapter: 8, total_words: 12000 } }}
+            tasks={[]}
+            onTaskCreated={vi.fn()}
+            onOpenTask={vi.fn()}
+            onTasksMutated={vi.fn()}
+        />,
+    )
+
+    expect((await screen.findAllByText('Audit Checklist')).length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('button', { name: '下载清单' }))
+
+    await waitFor(() => {
+        expect(screen.getByRole('alert').textContent || '').toContain('audit download failed')
+        expect(screen.getAllByText('Audit Checklist').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('Download Failure Item').length).toBeGreaterThan(0)
+    })
+})

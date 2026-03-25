@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-webnovel 统一入口脚本（无须 `cd`）
+webnovel 统一入口脚本（无需先 `cd`）。
 
 用法示例：
   python "<SCRIPTS_DIR>/webnovel.py" where
   python "<SCRIPTS_DIR>/webnovel.py" index stats
 
 说明：
-- 该脚本仅负责把 `.claude/scripts` 加入 sys.path，然后转发到 `data_modules.webnovel`。
-- 适配 skills/agents 在项目级或用户级（~/.claude）安装时的调用方式。
+- 该脚本负责补齐 `scripts.*` 包导入所需的 package root（包根目录）。
+- 之后再转发到 `scripts.data_modules.webnovel`。
 """
 
 from __future__ import annotations
@@ -20,12 +20,17 @@ from pathlib import Path
 from runtime_compat import enable_windows_utf8_stdio
 
 
-def main() -> None:
-    scripts_dir = Path(__file__).resolve().parent
-    sys.path.insert(0, str(scripts_dir))
+def _ensure_package_root_on_path() -> None:
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
 
-    # 延迟导入，避免 sys.path 未就绪
-    from data_modules.webnovel import main as _main
+
+_ensure_package_root_on_path()
+
+
+def main() -> None:
+    from scripts.data_modules.webnovel import main as _main
 
     _main()
 
@@ -33,4 +38,3 @@ def main() -> None:
 if __name__ == "__main__":
     enable_windows_utf8_stdio(skip_in_pytest=True)
     main()
-

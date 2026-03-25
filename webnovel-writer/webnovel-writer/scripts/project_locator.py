@@ -216,11 +216,15 @@ def _pointer_candidates(cwd: Path, *, stop_at: Optional[Path] = None) -> Iterabl
             break
 
 
+def _read_pointer_text(pointer_file: Path) -> str:
+    return pointer_file.read_text(encoding="utf-8-sig").strip()
+
+
 def _resolve_project_root_from_pointer(cwd: Path, *, stop_at: Optional[Path] = None) -> Optional[Path]:
     for pointer_file in _pointer_candidates(cwd, stop_at=stop_at):
         if not pointer_file.is_file():
             continue
-        raw = pointer_file.read_text(encoding="utf-8").strip()
+        raw = _read_pointer_text(pointer_file)
         if not raw:
             continue
         target = normalize_windows_path(raw).expanduser()
@@ -381,7 +385,7 @@ def resolve_workspace_current_project(*, workspace_root: Optional[Path] = None) 
     ws_root = _resolve_workspace_root(str(workspace_root) if workspace_root is not None else None)
     pointer_file = ws_root / CURRENT_PROJECT_POINTER_REL
     if pointer_file.is_file():
-        raw = pointer_file.read_text(encoding="utf-8").strip()
+        raw = _read_pointer_text(pointer_file)
         if raw:
             target = normalize_windows_path(raw).expanduser()
             if not target.is_absolute():

@@ -17,7 +17,7 @@ def _ensure_scripts_on_path() -> None:
 
 def _load_module():
     _ensure_scripts_on_path()
-    import data_modules.webnovel as webnovel_module
+    import scripts.data_modules.webnovel as webnovel_module
 
     return webnovel_module
 
@@ -218,4 +218,5 @@ def test_main_forwards_query_to_status_reporter(monkeypatch, tmp_path):
     assert int(exc.value.code or 0) == 0
     assert called['name'] == 'status_reporter.py'
     assert called['argv'] == ['--project-root', str(book_root), '--focus', 'urgency']
+
 

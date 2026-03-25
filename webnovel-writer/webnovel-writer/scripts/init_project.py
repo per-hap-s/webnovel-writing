@@ -29,12 +29,8 @@ import re
 # 安全修复：导入安全工具函数
 from security_utils import sanitize_commit_message, atomic_write_json, is_git_available
 from project_locator import write_current_project_pointer
-try:
-    from data_modules.config import get_config as get_data_modules_config
-    from data_modules.index_manager import IndexManager
-except ImportError:  # pragma: no cover
-    from scripts.data_modules.config import get_config as get_data_modules_config
-    from scripts.data_modules.index_manager import IndexManager
+from scripts.data_modules.config import get_config as get_data_modules_config
+from scripts.data_modules.index_manager import IndexManager
 
 
 # Windows 编码兼容性修复
