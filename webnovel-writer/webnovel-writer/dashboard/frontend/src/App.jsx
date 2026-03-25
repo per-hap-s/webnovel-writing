@@ -27,6 +27,7 @@ const PROJECT_NAV_ITEMS = [
 const WORKBENCH_TABS = [
     { id: 'hub', label: '项目主页' },
     { id: 'tools', label: '工具页' },
+    { id: 'verification', label: '验证页' },
 ]
 
 const UI_COPY = {

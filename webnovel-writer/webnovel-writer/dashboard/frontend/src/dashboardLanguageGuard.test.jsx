@@ -2,10 +2,12 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 
 const fetchJSONMock = vi.fn()
+const fetchTextMock = vi.fn()
 const postJSONMock = vi.fn()
 
 vi.mock('./api.js', () => ({
     fetchJSON: (...args) => fetchJSONMock(...args),
+    fetchText: (...args) => fetchTextMock(...args),
     postJSON: (...args) => postJSONMock(...args),
     normalizeError: (error) => ({
         displayMessage: error?.message || String(error),
@@ -21,6 +23,7 @@ import { WorkbenchPage } from './workbenchPage.jsx'
 
 beforeEach(() => {
     fetchJSONMock.mockReset()
+    fetchTextMock.mockReset()
     postJSONMock.mockReset()
 })
 
@@ -151,4 +154,38 @@ test('task center list keeps action labels and empty state Chinese-first', () =>
     )
 
     expect(screen.getByText('暂无任务')).not.toBeNull()
+})
+
+test('verification workbench page keeps empty-state copy Chinese-first', async () => {
+    fetchJSONMock.mockResolvedValue({
+        workspace_root: 'D:/workspace',
+        active_execution: null,
+        runs: [],
+    })
+
+    render(
+        <WorkbenchPage
+            hubData={{
+                workspace_root: 'D:/workspace',
+                current_project: null,
+                missing_projects: [],
+            }}
+            tab="verification"
+            currentProjectRoot=""
+            landingPreferenceKey="dashboard.landing"
+            landingPreferences={[{ value: 'hub', label: '优先打开工作台' }]}
+            onNavigate={vi.fn()}
+            onTabChange={vi.fn()}
+            onOpenProject={vi.fn()}
+            onRefresh={vi.fn()}
+        />,
+    )
+
+    await waitFor(() => {
+        expect(screen.getByText('当前没有正在运行的多子代理验证。')).not.toBeNull()
+    })
+
+    expect(screen.getByText('还没有多子代理验证历史。')).not.toBeNull()
+    expect(screen.getByText('当前没有失败步骤日志可查看。')).not.toBeNull()
+    expect(screen.queryByText(/Multi-Agent|artifact/i)).toBeNull()
 })

@@ -77,6 +77,18 @@ from .task_models import (
     WorkbenchProjectRequest,
     WorkbenchToolRequest,
 )
+from .verification_console import (
+    VerificationArtifactError,
+    build_verification_overview,
+    generate_verification_run_id,
+    get_verification_console_log_path,
+    get_verification_report_path,
+    get_verification_run_detail,
+    get_verification_step_log_path,
+    start_multi_agent_test_process,
+    verification_artifact_dir,
+    verification_console_log_paths,
+)
 from .watcher import FileWatcher
 
 logger = logging.getLogger(__name__)
@@ -252,6 +264,9 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         app.state.workspace_root = default_workspace_root
         app.state.watcher = watcher
         app.state.orchestrator = None
+        app.state.active_verification_execution = None
+        app.state.active_verification_process = None
+        app.state.active_verification_waiter = None
         if default_project_root is not None:
             webnovel = _webnovel_dir(default_project_root)
             if webnovel.is_dir():
@@ -329,6 +344,90 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
 
     def _workspace_state() -> dict[str, Any]:
         return get_workspace_registry_state(workspace_root=_get_workspace_root())
+
+    def _get_active_verification_execution() -> dict[str, Any] | None:
+        execution = getattr(app.state, 'active_verification_execution', None)
+        if not isinstance(execution, dict):
+            return None
+        return dict(execution)
+
+    def _clear_active_verification_runtime() -> None:
+        app.state.active_verification_process = None
+        app.state.active_verification_waiter = None
+
+    async def _wait_for_verification_process(process: subprocess.Popen, run_id: str) -> None:
+        exit_code = await asyncio.to_thread(process.wait)
+        execution = _get_active_verification_execution()
+        if execution is None or str(execution.get('run_id') or '') != run_id:
+            _clear_active_verification_runtime()
+            return
+
+        updated_execution = dict(execution)
+        updated_execution['status'] = 'completed'
+        updated_execution['finished_at'] = datetime.now(timezone.utc).isoformat()
+        updated_execution['last_error'] = '' if exit_code == 0 else f'验证脚本退出码为 {exit_code}。'
+        app.state.active_verification_execution = updated_execution
+        _clear_active_verification_runtime()
+
+    def _start_workbench_verification() -> dict[str, Any]:
+        current_execution = _get_active_verification_execution()
+        if current_execution and str(current_execution.get('status') or '') in {'starting', 'running'}:
+            raise APIError(409, 'VERIFICATION_ALREADY_RUNNING', '当前已有一个验证任务正在运行。', {'run_id': current_execution.get('run_id')})
+
+        workspace_root = _get_workspace_root()
+        run_id = generate_verification_run_id()
+        artifact_dir = verification_artifact_dir(workspace_root, run_id)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        console_paths = verification_console_log_paths(artifact_dir)
+        execution = {
+            'run_id': run_id,
+            'status': 'starting',
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'finished_at': '',
+            'pid': None,
+            'artifact_dir': str(artifact_dir),
+            'result_path': str((artifact_dir / 'result.json').resolve()),
+            'report_path': str((artifact_dir / 'report.md').resolve()),
+            'console_stdout_path': str(console_paths['stdout'].resolve()),
+            'console_stderr_path': str(console_paths['stderr'].resolve()),
+            'last_error': '',
+        }
+        app.state.active_verification_execution = execution
+        try:
+            process = start_multi_agent_test_process(workspace_root, artifact_dir, run_id)
+        except Exception as exc:
+            failed_execution = dict(execution)
+            failed_execution['status'] = 'failed_to_launch'
+            failed_execution['finished_at'] = datetime.now(timezone.utc).isoformat()
+            failed_execution['last_error'] = str(exc)
+            app.state.active_verification_execution = failed_execution
+            _clear_active_verification_runtime()
+            raise APIError(500, 'VERIFICATION_LAUNCH_FAILED', '验证任务启动失败。', {'error': str(exc), 'run_id': run_id})
+
+        running_execution = dict(execution)
+        running_execution['status'] = 'running'
+        running_execution['pid'] = getattr(process, 'pid', None)
+        app.state.active_verification_execution = running_execution
+        app.state.active_verification_process = process
+        app.state.active_verification_waiter = asyncio.create_task(_wait_for_verification_process(process, run_id))
+        return running_execution
+
+    def _build_verification_overview(limit: int = 10) -> dict[str, Any]:
+        return build_verification_overview(
+            _get_workspace_root(),
+            limit=limit,
+            active_execution=_get_active_verification_execution(),
+        )
+
+    def _build_verification_detail(run_id: str) -> dict[str, Any]:
+        try:
+            return get_verification_run_detail(
+                _get_workspace_root(),
+                run_id,
+                active_execution=_get_active_verification_execution(),
+            )
+        except VerificationArtifactError as exc:
+            raise APIError(exc.status_code, exc.code, exc.message) from exc
 
     def _load_project_snapshot(project_root_value: Path) -> dict[str, Any]:
         project_state = {
@@ -1196,6 +1295,43 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
     async def run_workbench_tool(action: str, request: WorkbenchToolRequest):
         project_root_value = _try_resolve_request_project_root(explicit_root=request.project_root)
         return await asyncio.to_thread(_launch_workbench_tool, action, project_root_value)
+
+    @app.get('/api/workbench/verification/overview')
+    def workbench_verification_overview(limit: int = Query(10, ge=1, le=50)):
+        return _build_verification_overview(limit=limit)
+
+    @app.post('/api/workbench/verification/run')
+    async def run_workbench_verification():
+        execution = await asyncio.to_thread(_start_workbench_verification)
+        return {'accepted': True, 'execution': execution}
+
+    @app.get('/api/workbench/verification/runs/{run_id}')
+    def get_workbench_verification_run(run_id: str):
+        return _build_verification_detail(run_id)
+
+    @app.get('/api/workbench/verification/runs/{run_id}/report')
+    def get_workbench_verification_report(run_id: str):
+        try:
+            report_path = get_verification_report_path(_get_workspace_root(), run_id)
+        except VerificationArtifactError as exc:
+            raise APIError(exc.status_code, exc.code, exc.message) from exc
+        return Response(content=report_path.read_text(encoding='utf-8'), media_type='text/markdown')
+
+    @app.get('/api/workbench/verification/runs/{run_id}/steps/{step_id}/logs/{stream}')
+    def get_workbench_verification_step_log(run_id: str, step_id: str, stream: str):
+        try:
+            log_path = get_verification_step_log_path(_get_workspace_root(), run_id, step_id, stream)
+        except VerificationArtifactError as exc:
+            raise APIError(exc.status_code, exc.code, exc.message) from exc
+        return Response(content=log_path.read_text(encoding='utf-8'), media_type='text/plain')
+
+    @app.get('/api/workbench/verification/runs/{run_id}/console/{stream}')
+    def get_workbench_verification_console_log(run_id: str, stream: str):
+        try:
+            log_path = get_verification_console_log_path(_get_workspace_root(), run_id, stream)
+        except VerificationArtifactError as exc:
+            raise APIError(exc.status_code, exc.code, exc.message) from exc
+        return Response(content=log_path.read_text(encoding='utf-8'), media_type='text/plain')
 
     @app.get('/api/project/info')
     def project_info(request: Request):

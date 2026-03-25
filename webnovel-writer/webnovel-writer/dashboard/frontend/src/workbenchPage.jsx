@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ErrorNotice, ProjectBootstrapSection } from './appSections.jsx'
 import { formatNumber } from './dashboardPageCommon.jsx'
 import { normalizeError, postJSON } from './api.js'
+import { WorkbenchVerificationPage } from './workbenchVerificationPage.jsx'
 
 const WORKBENCH_COPY = {
     openExisting: '打开已有项目',
@@ -299,6 +300,8 @@ export function WorkbenchPage({
                         )}
                     </section>
                 </>
+            ) : tab === 'verification' ? (
+                <WorkbenchVerificationPage visible />
             ) : (
                 <section className="panel full-span workbench-panel">
                     <div className="panel-title">工具页</div>
