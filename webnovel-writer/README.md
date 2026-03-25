@@ -125,16 +125,16 @@ Current recommended PowerShell commands:
 
 ```powershell
 # Repository root
-Set-Location D:\CodexProjects\Project1
+Set-Location "D:\CodexProjects\webnovel writing"
 python -m pytest webnovel-writer\webnovel-writer\dashboard\tests\test_app.py -q
 
 # Package root
-Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer
+Set-Location "D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer"
 python -m pytest dashboard\tests\test_app.py dashboard\tests\test_orchestrator.py dashboard\tests\test_task_store.py -q
 python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q
 
 # Frontend root
-Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\dashboard\frontend
+Set-Location "D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer\dashboard\frontend"
 npm test
 npm run typecheck
 npm run build

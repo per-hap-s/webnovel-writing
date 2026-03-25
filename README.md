@@ -1,4 +1,4 @@
-# Project1
+# webnovel-writing
 
 这是一个面向长篇网文创作的 AI 辅助工作台仓库，提供项目启动器、Web 仪表盘（Dashboard）、任务编排、质量审查、状态管理与写作流程支持。
 
@@ -6,6 +6,8 @@
 
 - 仓库根目录：提供 Windows 启动入口、打包脚本与外层工作区封装。
 - `webnovel-writer/`：项目核心实现，包含 CLI（命令行）、Dashboard（仪表盘）、写作工作流、数据层与相关文档。
+
+GitHub（GitHub）仓库名现为 `webnovel-writing`，如果本地目录一并重命名，推荐使用 `webnovel writing`。
 
 ## 项目能力
 
@@ -32,7 +34,7 @@ tools\Start-Webnovel-Writer.bat
 ## 仓库结构
 
 ```text
-Project1/
+repository-root/
 ├─ README.md
 ├─ README-启动说明.txt
 ├─ tools/

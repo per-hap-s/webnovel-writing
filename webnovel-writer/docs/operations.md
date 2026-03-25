@@ -110,7 +110,7 @@ http://127.0.0.1:8765/?project_root=<url-encoded-project-root>&page=quality
 
 ```powershell
 & '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -PreferredPort 8765
-& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -OutputRoot 'D:\CodexProjects\Project1\output\verification\readonly-audit\manual-run'
+& '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -OutputRoot 'D:\CodexProjects\webnovel writing\output\verification\readonly-audit\manual-run'
 & '.\tools\Tests\Run-Webnovel-ReadonlyAudit.ps1' -ProjectRoot 'D:\path\to\existing-supervisor-smoke-project'
 ```
 
@@ -160,7 +160,7 @@ http://127.0.0.1:8765/?project_root=<url-encoded-project-root>&page=quality
 
 ```powershell
 & '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -PreferredPort 8765
-& '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -OutputRoot 'D:\CodexProjects\Project1\output\verification\real-e2e\manual-run'
+& '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -OutputRoot 'D:\CodexProjects\webnovel writing\output\verification\real-e2e\manual-run'
 & '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -RunId 'manual01'
 & '.\tools\Tests\Run-Webnovel-RealE2E.ps1' -ProjectRoot 'D:\path\to\existing-project'
 ```
@@ -345,12 +345,12 @@ Use PowerShell-compatible commands only.
 Backend:
 
 ```powershell
-Set-Location D:\CodexProjects\Project1
+Set-Location "D:\CodexProjects\webnovel writing"
 python -m pytest webnovel-writer\webnovel-writer\dashboard\tests\test_app.py -q
 
-Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer
+Set-Location "D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer"
 python -m pytest dashboard\tests\test_app.py dashboard\tests\test_orchestrator.py dashboard\tests\test_task_store.py -q
-$env:PYTHONPATH='D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\scripts'
+$env:PYTHONPATH='D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer\scripts'
 python -m pytest scripts\data_modules\tests\test_state_file.py scripts\data_modules\tests\test_state_manager_extra.py scripts\data_modules\tests\test_sql_state_manager.py scripts\data_modules\tests\test_webnovel_unified_cli.py -q
 python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q
 ```
@@ -358,7 +358,7 @@ python -m pytest scripts\data_modules\tests\test_webnovel_cli_e2e_mock.py -q
 Frontend:
 
 ```powershell
-Set-Location D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\dashboard\frontend
+Set-Location "D:\CodexProjects\webnovel writing\webnovel-writer\webnovel-writer\dashboard\frontend"
 npm test
 npm run typecheck
 npm run build
