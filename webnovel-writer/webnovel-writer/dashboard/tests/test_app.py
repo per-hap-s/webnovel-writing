@@ -565,7 +565,16 @@ def test_workbench_tools_forward_to_launcher_script(mock_project_root: Path, moc
         _close_workbench_client(client)
 
 
-def _seed_multi_agent_artifacts(workspace_root: Path, run_id: str, *, invalid_result: bool = False, incomplete: bool = False) -> Path:
+def _seed_multi_agent_artifacts(
+    workspace_root: Path,
+    run_id: str,
+    *,
+    invalid_result: bool = False,
+    incomplete: bool = False,
+    running_progress: bool = False,
+    failure_fingerprint: str = "frontend.frontend-tests:test_failure",
+    rerun_of_run_id: str = "",
+) -> Path:
     artifact_dir = workspace_root / "output" / "verification" / "multi-agent-test" / run_id
     lane_logs_dir = artifact_dir / "lane-logs"
     real_e2e_dir = artifact_dir / "real-e2e"
@@ -596,6 +605,45 @@ def _seed_multi_agent_artifacts(workspace_root: Path, run_id: str, *, invalid_re
                 "issues": [],
                 "missing_paths": [],
                 "failed_commands": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "running" if running_progress else "completed",
+                "phase": "frontend" if running_progress else "finalizing",
+                "current_lane": "frontend" if running_progress else "",
+                "current_step_id": "frontend.frontend-tests" if running_progress else "",
+                "current_step_name": "frontend-tests" if running_progress else "",
+                "completed_steps": 5 if running_progress else 6,
+                "total_steps": 6,
+                "started_at": "2026-03-26T10:00:00Z",
+                "updated_at": "2026-03-26T10:04:30Z" if running_progress else "2026-03-26T10:05:00Z",
+                "last_completed_step_id": "data-cli.mock-cli-e2e",
+                "real_e2e_status": "pending" if running_progress else "skipped",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "run_id": run_id,
+                "classification": "local_blocker",
+                "next_action": "fix_local_blocker_and_rerun",
+                "failure_fingerprint": failure_fingerprint,
+                "rerun_of_run_id": rerun_of_run_id,
+                "artifact_paths": {
+                    "result": str(artifact_dir / "result.json"),
+                    "report": str(artifact_dir / "report.md"),
+                    "progress": str(artifact_dir / "progress.json"),
+                },
             },
             ensure_ascii=False,
         ),
@@ -690,12 +738,22 @@ def _seed_multi_agent_artifacts(workspace_root: Path, run_id: str, *, invalid_re
         "next_action": "fix_local_blocker_and_rerun",
         "failure_summary": "Blocking local steps failed: frontend.frontend-tests.",
         "minimal_repro": "Run frontend tests.",
+        "failure_fingerprint": failure_fingerprint,
+        "rerun_of_run_id": rerun_of_run_id,
     }
     if invalid_result:
         (artifact_dir / "result.json").write_text("{invalid-json", encoding="utf-8")
     else:
         (artifact_dir / "result.json").write_text(json.dumps(result_payload, ensure_ascii=False), encoding="utf-8")
     return artifact_dir
+
+
+def _seed_verification_runtime(workspace_root: Path, execution: dict[str, object]) -> Path:
+    runtime_dir = workspace_root / "output" / "verification" / "multi-agent-test" / "_runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime_path = runtime_dir / "active-execution.json"
+    runtime_path.write_text(json.dumps(execution, ensure_ascii=False), encoding="utf-8")
+    return runtime_path
 
 
 def test_workbench_verification_overview_returns_empty_history(mock_orchestrator: MagicMock, tmp_path: Path):
@@ -711,6 +769,46 @@ def test_workbench_verification_overview_returns_empty_history(mock_orchestrator
         assert payload["runs"] == []
     finally:
         _close_workbench_client(client)
+
+
+def test_workbench_verification_overview_restores_active_run_from_runtime_registry(mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    run_id = "20260326-run-live"
+    artifact_dir = _seed_multi_agent_artifacts(tmp_path, run_id, running_progress=True)
+    _seed_verification_runtime(
+        tmp_path,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-03-26T10:00:00Z",
+            "finished_at": "",
+            "pid": 4242,
+            "artifact_dir": str(artifact_dir),
+            "result_path": str(artifact_dir / "result.json"),
+            "report_path": str(artifact_dir / "report.md"),
+            "console_stdout_path": str(artifact_dir / "_dashboard-console.stdout.log"),
+            "console_stderr_path": str(artifact_dir / "_dashboard-console.stderr.log"),
+            "last_error": "",
+        },
+    )
+
+    with patch("dashboard.verification_console.is_verification_pid_active", return_value=True), patch(
+        "dashboard.app.is_verification_pid_active",
+        return_value=True,
+    ):
+        client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+        try:
+            response = client.get("/api/workbench/verification/overview")
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["active_execution"]["run_id"] == run_id
+            assert payload["active_execution"]["status"] == "running"
+            assert payload["active_execution"]["progress"]["phase"] == "frontend"
+            assert payload["runs"][0]["run_id"] == run_id
+            assert payload["runs"][0]["progress"]["current_step_id"] == "frontend.frontend-tests"
+        finally:
+            _close_workbench_client(client)
 
 
 def test_workbench_verification_run_starts_and_returns_active_execution(mock_orchestrator: MagicMock, tmp_path: Path):
@@ -734,6 +832,79 @@ def test_workbench_verification_run_starts_and_returns_active_execution(mock_orc
         assert payload["execution"]["pid"] == 4321
         assert payload["execution"]["run_id"]
         assert payload["execution"]["artifact_dir"].endswith(payload["execution"]["run_id"])
+    finally:
+        _close_workbench_client(client)
+
+
+def test_workbench_verification_progress_stop_and_rerun_endpoints(mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    run_id = "20260326-run-progress"
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    fake_process = MagicMock()
+    fake_process.pid = 9876
+    fake_process.poll.return_value = None
+    fake_task = SimpleNamespace()
+
+    try:
+        with patch("dashboard.app.generate_verification_run_id", return_value=run_id), patch(
+            "dashboard.app.start_multi_agent_test_process",
+            return_value=fake_process,
+        ), patch(
+            "dashboard.app.asyncio.create_task",
+            side_effect=lambda coro: (coro.close(), fake_task)[1],
+        ):
+            run_response = client.post("/api/workbench/verification/run", json={})
+
+        assert run_response.status_code == 200
+        artifact_dir = tmp_path / "output" / "verification" / "multi-agent-test" / run_id
+        progress_path = artifact_dir / "progress.json"
+        progress_path.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "phase": "backend",
+                    "current_lane": "backend",
+                    "current_step_id": "backend.dashboard-root-contract",
+                    "current_step_name": "dashboard-root-contract",
+                    "completed_steps": 1,
+                    "total_steps": 6,
+                    "started_at": "2026-03-26T10:00:00Z",
+                    "updated_at": "2026-03-26T10:01:00Z",
+                    "last_completed_step_id": "",
+                    "real_e2e_status": "pending",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        progress_response = client.get(f"/api/workbench/verification/runs/{run_id}/progress")
+        assert progress_response.status_code == 200
+        assert progress_response.json()["phase"] == "backend"
+
+        stop_response = client.post("/api/workbench/verification/run/stop", json={})
+        assert stop_response.status_code == 200
+        control_payload = json.loads((artifact_dir / "control.json").read_text(encoding="utf-8"))
+        assert control_payload["stop_requested"] is True
+        client.app.state.active_verification_execution = None
+        client.app.state.active_verification_process = None
+
+        rerun_process = MagicMock()
+        rerun_process.pid = 9988
+        rerun_process.poll.return_value = None
+        with patch("dashboard.app.generate_verification_run_id", return_value="20260326-run-rerun"), patch(
+            "dashboard.app.start_multi_agent_test_process",
+            return_value=rerun_process,
+        ), patch(
+            "dashboard.app.asyncio.create_task",
+            side_effect=lambda coro: (coro.close(), fake_task)[1],
+        ):
+            rerun_response = client.post(f"/api/workbench/verification/runs/{run_id}/rerun", json={})
+
+        assert rerun_response.status_code == 200
+        assert rerun_response.json()["execution"]["rerun_of_run_id"] == run_id
     finally:
         _close_workbench_client(client)
 
@@ -774,6 +945,8 @@ def test_workbench_verification_detail_parses_artifacts_and_exposes_log_urls(moc
         assert payload["classification"] == "local_blocker"
         assert payload["next_action"] == "fix_local_blocker_and_rerun"
         assert payload["real_e2e"]["status"] == "skipped"
+        assert payload["progress"]["phase"] == "finalizing"
+        assert payload["manifest"]["failure_fingerprint"] == "frontend.frontend-tests:test_failure"
         frontend_step = payload["lanes"][2]["steps"][0]
         assert frontend_step["failure_kind"] == "test_failure"
         assert frontend_step["combined_log_url"].endswith(f"/api/workbench/verification/runs/{run_id}/steps/frontend.frontend-tests/logs/combined")
@@ -792,9 +965,22 @@ def test_workbench_verification_log_and_report_endpoints_only_read_controlled_fi
         assert report_response.status_code == 200
         assert "Multi-Agent Test Report" in report_response.text
 
-        log_response = client.get(f"/api/workbench/verification/runs/{run_id}/steps/frontend.frontend-tests/logs/combined")
+        log_response = client.get(
+            f"/api/workbench/verification/runs/{run_id}/steps/frontend.frontend-tests/logs/combined",
+            params={"tail_lines": 1},
+        )
         assert log_response.status_code == 200
-        assert "FAILED test_app.jsx" in log_response.text
+        log_payload = log_response.json()
+        assert log_payload["content"] == "FAILED test_app.jsx"
+        assert log_payload["truncated"] is False
+        assert log_payload["stream"] == "combined"
+
+        console_response = client.get(
+            f"/api/workbench/verification/runs/{run_id}/console/stdout",
+            params={"tail_lines": 1},
+        )
+        assert console_response.status_code == 200
+        assert console_response.json()["content"] == "console stdout"
 
         missing_log_response = client.get(f"/api/workbench/verification/runs/{run_id}/steps/unknown-step/logs/combined")
         assert missing_log_response.status_code == 404
@@ -819,6 +1005,27 @@ def test_workbench_verification_invalid_result_is_listed_as_incomplete_and_detai
         detail_response = client.get(f"/api/workbench/verification/runs/{run_id}")
         assert detail_response.status_code == 409
         assert detail_response.json()["code"] == "VERIFICATION_RESULT_INVALID"
+    finally:
+        _close_workbench_client(client)
+
+
+def test_workbench_verification_history_filters_and_groups_fingerprints(mock_orchestrator: MagicMock, tmp_path: Path):
+    app_home = tmp_path / "app-home"
+    _seed_multi_agent_artifacts(tmp_path, "20260326-run-a", failure_fingerprint="frontend.frontend-tests:test_failure")
+    _seed_multi_agent_artifacts(tmp_path, "20260326-run-b", failure_fingerprint="frontend.frontend-tests:test_failure", rerun_of_run_id="20260326-run-a")
+    _seed_multi_agent_artifacts(tmp_path, "20260326-run-c", failure_fingerprint="environment:npm")
+    client = _create_workbench_client(tmp_path, mock_orchestrator, app_home)
+
+    try:
+        response = client.get(
+            "/api/workbench/verification/history",
+            params={"classification": "local_blocker", "limit": 10},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["runs"]) >= 2
+        fingerprint_group = next(item for item in payload["groups"] if item["failure_fingerprint"] == "frontend.frontend-tests:test_failure")
+        assert fingerprint_group["run_count"] >= 2
     finally:
         _close_workbench_client(client)
 

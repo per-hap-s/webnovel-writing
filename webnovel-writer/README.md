@@ -152,6 +152,8 @@ Notes:
 - `npm run test:ui` keeps the Vitest + `jsdom` suite and now includes previously omitted test files.
 - `Run-Webnovel-MultiAgentTest.ps1` is the repository-level verification entrypoint: three local lanes run in parallel first, then the mainline RealE2E (真实全链路实测) runs serially only when local results do not contain an `environment` failure and do not fail any `blocking` step.
 - The coordinator now records richer artifacts under `output/verification/multi-agent-test/`, including preflight checks, per-step failure kinds, timeout/log paths, `blocking_step_ids`, `next_action`, and `failure_summary`.
+- Dashboard 工作台现在提供独立的 `验证页`（verification console，验证控制台）：可以直接启动仓库级多子代理验证，查看 active run（活动运行）、历史 runs（运行记录）、`progress`（进度）、`next_action`（动作码）、`failure_summary`（失败摘要）、`minimal_repro`（最小复现）、`failure_fingerprint`（失败指纹）、`report.md` 与受控日志入口。
+- Dashboard 中的 verification console（验证控制台）是 workspace-level（工作区级）入口，不绑定单个小说项目；同一工作区同一时刻只允许一个 active multi-agent test（活动多子代理验证）。运行态会落盘到 `_runtime/active-execution.json` / `_runtime/last-known.json`，因此 Dashboard 重启后仍能恢复进度与历史分诊视图。
 - Dashboard 工作台现在提供独立的 `验证页`：可以直接启动仓库级多子代理验证，查看 active run（活动运行）、历史 runs（运行记录）、`next_action`（动作码）、`failure_summary`（失败摘要）、`report.md` 和受控日志入口。
 - Dashboard 里的 verification console（验证控制台）是 workspace-level（工作区级）入口，不绑定单个小说项目；同一工作区同一时刻只允许一个 active multi-agent test（活动多子代理验证）。
 

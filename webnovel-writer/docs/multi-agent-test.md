@@ -144,6 +144,9 @@ output/verification/multi-agent-test/YYYYMMDD-runid/
 - `blocking_step_ids[]`
 - `next_action`
 - `failure_summary`
+- `minimal_repro`
+- `failure_fingerprint`
+- `manifest`
 
 `next_action` 目前使用稳定 action code（动作码），不是自由文本：
 
@@ -153,7 +156,10 @@ output/verification/multi-agent-test/YYYYMMDD-runid/
 - `repair_mainline_product_flow`
 - `repair_regressed_pages`
 - `repair_readonly_audit_failures`
+- `rerun_after_cancel`
 - `ready_to_pass`
+
+`classification` 现在除了原有的 `environment_blocked` / `local_blocker` / `local_regression` / `mainline_failure` / `page_regression` / `readonly_audit_failure` / `pass` 之外，还支持 `cancelled`。
 
 `report.md` 固定输出：
 
@@ -163,6 +169,64 @@ output/verification/multi-agent-test/YYYYMMDD-runid/
 - `Verdict`
 
 并展示首个失败 step、失败类型、阻断级别、日志路径、最终 action code（动作码）和失败摘要。
+
+## Runtime Contract
+
+协调器现在会把运行态和控制文件落在标准产物目录中，供 Dashboard（仪表盘）恢复运行态、轮询进度和发出停止请求：
+
+- `output/verification/multi-agent-test/_runtime/active-execution.json`
+- `output/verification/multi-agent-test/_runtime/last-known.json`
+- `{run_id}/progress.json`
+- `{run_id}/control.json`
+- `{run_id}/manifest.json`
+
+其中：
+
+- `progress.json` 固定包含：
+  - `run_id`
+  - `status`
+  - `phase`
+  - `current_lane`
+  - `current_step_id`
+  - `current_step_name`
+  - `completed_steps`
+  - `total_steps`
+  - `started_at`
+  - `updated_at`
+  - `last_completed_step_id`
+  - `real_e2e_status`
+- `control.json` 目前只用于优雅停止，固定写入：
+  - `stop_requested`
+  - `requested_at`
+- `manifest.json` 是给 Dashboard 与未来 headless（无头）自动化复用的稳定机器契约，至少包含：
+  - `manifest_version`
+  - `run_id`
+  - `classification`
+  - `next_action`
+  - `failure_fingerprint`
+  - `artifact_paths`
+
+停止语义：
+
+- Dashboard 不会先直接强杀顶层 PowerShell（PowerShell）进程。
+- `POST /api/workbench/verification/run/stop` 先写 `control.json` 请求协调器在安全检查点退出。
+- 若 10 秒后仍未退出，Dashboard 才会执行 `Stop-Process -Force`，执行态会短暂记成 `cancelled_force_killed`，但 run 级 `classification` 仍统一归类为 `cancelled`。
+
+## Minimal Repro And Fingerprint
+
+`minimal_repro`（最小复现）和 `failure_fingerprint`（失败指纹）已经变成稳定字段：
+
+- `environment_blocked`：优先给出缺失命令、缺失路径或失败的版本探针。
+- `local_blocker` / `local_regression`：优先给出首个失败 step 的正式命令。
+- `mainline_failure` / `page_regression` / `readonly_audit_failure`：优先给出正式 `Run-Webnovel-RealE2E.ps1` 入口和关键产物路径。
+- `cancelled`：最小复现为正式协调器入口，动作码固定为 `rerun_after_cancel`。
+
+`failure_fingerprint` 生成规则固定为：
+
+- 环境问题：缺失项集合
+- 本地失败：`step_id + failure_kind`
+- RealE2E 失败：`classification + first failing page/task`
+- 已取消：固定为 `cancelled`
 
 ## RealE2E 复用边界
 
@@ -186,15 +250,26 @@ Dashboard（仪表盘）工作台现在提供 `验证页`，把仓库级 multi-a
 
 - 启动按钮只会调用正式脚本 `tools\Tests\Run-Webnovel-MultiAgentTest.ps1`。
 - Dashboard 内维护单工作区 `active_execution`（活动运行）注册表；同一时刻只允许一个 `starting` / `running` run。
+- Dashboard 重启后会先尝试从 `_runtime/active-execution.json` 恢复当前运行，再结合 PID（进程号）存活检查和 `result.json` / `progress.json` 判断为 `running`、`completed`、`incomplete` 或 `failed_to_launch`。
 - 页面默认读取最近 10 次 runs（运行记录），优先选中 active run；没有活动运行时选中最新一条历史记录。
-- 页面会展示 `classification`（分类）、`next_action`（动作码）、`failure_summary`（失败摘要）、`RealE2E` 状态，以及 `report.md`、console stdout/stderr、step 级 stdout/stderr/combined log。
+- 有活动运行时，高频轮询 `progress`，低频刷新 `overview`，页面会展示 `phase / current_lane / current_step / completed_steps / total_steps / updated_at`。
+- 页面会展示 `classification`（分类）、`next_action`（动作码）、`failure_summary`（失败摘要）、`minimal_repro`（最小复现）、`failure_fingerprint`（失败指纹）、`RealE2E` 状态，以及 `report.md`、console stdout/stderr、step 级 stdout/stderr/combined log。
+- 详情页会优先聚焦首个失败 step，并默认读取它的 `combined log`（合并日志）。
 - 所有日志读取都必须从当前 run 的 step 元数据或固定 console 文件反查，不能把 Dashboard 当作任意文件浏览器。
+- `tail_lines` 读取是按需截尾，不会把整份大日志直接回传给前端。
+- 页面支持停止当前 active run（活动运行）、重跑历史 run，并显示 `cancelled` / `rerun_after_cancel` 的分诊结果。
 
 后端接口固定挂在：
 
 - `GET /api/workbench/verification/overview`
+- `GET /api/workbench/verification/history`
 - `POST /api/workbench/verification/run`
+- `POST /api/workbench/verification/run/stop`
 - `GET /api/workbench/verification/runs/{run_id}`
+- `GET /api/workbench/verification/runs/{run_id}/progress`
+- `POST /api/workbench/verification/runs/{run_id}/rerun`
 - `GET /api/workbench/verification/runs/{run_id}/report`
-- `GET /api/workbench/verification/runs/{run_id}/steps/{step_id}/logs/{stream}`
-- `GET /api/workbench/verification/runs/{run_id}/console/{stream}`
+- `GET /api/workbench/verification/runs/{run_id}/steps/{step_id}/logs/{stream}?tail_lines=200`
+- `GET /api/workbench/verification/runs/{run_id}/console/{stream}?tail_lines=200`
+
+其中 `history`（历史）接口支持按 `classification`、`status`、`next_action` 过滤，并按 `failure_fingerprint` 聚合同类失败，便于持续分诊。

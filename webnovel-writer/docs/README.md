@@ -36,7 +36,7 @@
 - `dashboard-supervisor-language-fix-verification-2026-03-23.md`：督办页面英文泄漏修复后的复验记录，确认 `supervisor` / `supervisor-audit` 两页重新达到 `pass`
 - `dashboard-readonly-audit.md`：正式 readonly audit（只读巡检）入口、产物结构与失败归因说明
 - `dashboard-real-e2e.md`：正式 real e2e（真实全链路实测）入口、标准产物与版本级验收口径
-- `multi-agent-test.md`：仓库级 multi-agent test（多子代理测试）协调器入口，说明本地三 lane 并行 + 单主链 RealE2E 串行的验证流程、预检 contract（契约）、超时/失败类型规则与产物 schema（结构）
+- `multi-agent-test.md`：仓库级 multi-agent test（多子代理测试）协调器入口，说明本地三 lane 并行 + 单主链 RealE2E 串行的验证流程、预检 contract（契约）、超时/失败类型规则、运行态恢复/停止/重跑、失败指纹与 Dashboard verification console（验证控制台）的产物 schema（结构）
 - `dashboard-api-real-test-3ch-phase3-2026-03-21.md`：第三阶段后 `bootstrap -> plan -> write 1-3 -> review 1-3` 真实回归结果
 
 建议阅读顺序：

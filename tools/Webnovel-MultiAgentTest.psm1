@@ -47,8 +47,14 @@ function Get-WebnovelMultiAgentTestConfig {
         FrontendLanePath = Join-Path $artifactDir 'frontend-lane.json'
         ResultPath = Join-Path $artifactDir 'result.json'
         ReportPath = Join-Path $artifactDir 'report.md'
+        ProgressPath = Join-Path $artifactDir 'progress.json'
+        ControlPath = Join-Path $artifactDir 'control.json'
+        ManifestPath = Join-Path $artifactDir 'manifest.json'
         RealE2EOutputRoot = Join-Path $artifactDir 'real-e2e'
         RealE2EResultPath = Join-Path $artifactDir 'real-e2e-result.json'
+        RuntimeDir = Join-Path (Join-Path $resolvedWorkspaceRoot 'output\verification\multi-agent-test') '_runtime'
+        ActiveExecutionPath = Join-Path (Join-Path (Join-Path $resolvedWorkspaceRoot 'output\verification\multi-agent-test') '_runtime') 'active-execution.json'
+        LastKnownExecutionPath = Join-Path (Join-Path (Join-Path $resolvedWorkspaceRoot 'output\verification\multi-agent-test') '_runtime') 'last-known.json'
         RealE2EModulePath = Join-Path $resolvedWorkspaceRoot 'tools\Webnovel-RealE2E.psm1'
         PlaywrightScriptPath = Get-WebnovelMultiAgentPlaywrightScript
         NodeModulesPath = Join-Path $frontendRoot 'node_modules'
@@ -76,7 +82,8 @@ function Initialize-WebnovelMultiAgentTestArtifacts {
     foreach ($path in @(
         $Config.ArtifactDir,
         $Config.LaneLogsDir,
-        $Config.RealE2EOutputRoot
+        $Config.RealE2EOutputRoot,
+        $Config.RuntimeDir
     )) {
         New-Item -ItemType Directory -Path $path -Force | Out-Null
     }
@@ -84,6 +91,24 @@ function Initialize-WebnovelMultiAgentTestArtifacts {
     Write-WebnovelMultiAgentJson -Path $Config.RealE2EResultPath -Data @{
         skipped = $true
         reason = 'RealE2E skipped: local lanes have not requested it yet.'
+    }
+    Write-WebnovelMultiAgentJson -Path $Config.ProgressPath -Data @{
+        run_id = [string]$Config.RunId
+        status = 'starting'
+        phase = 'preflight'
+        current_lane = ''
+        current_step_id = ''
+        current_step_name = ''
+        completed_steps = 0
+        total_steps = 6
+        started_at = (Get-Date).ToUniversalTime().ToString('o')
+        updated_at = (Get-Date).ToUniversalTime().ToString('o')
+        last_completed_step_id = ''
+        real_e2e_status = 'pending'
+    }
+    Write-WebnovelMultiAgentJson -Path $Config.ControlPath -Data @{
+        stop_requested = $false
+        requested_at = ''
     }
 }
 
@@ -102,6 +127,138 @@ function Write-WebnovelMultiAgentJson {
     }
 
     $Data | ConvertTo-Json -Depth 16 | Set-Content -Path $Path -Encoding UTF8
+}
+
+function Write-WebnovelMultiAgentProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Config,
+        [Parameter(Mandatory = $true)]
+        [string]$Phase,
+        [string]$Status = 'running',
+        [string]$CurrentLane = '',
+        [string]$CurrentStepId = '',
+        [string]$CurrentStepName = '',
+        [int]$CompletedSteps = 0,
+        [int]$TotalSteps = 6,
+        [string]$LastCompletedStepId = '',
+        [string]$RealE2EStatus = 'pending'
+    )
+
+    $existing = if (Test-Path $Config.ProgressPath) {
+        try { Get-Content -Path $Config.ProgressPath -Raw | ConvertFrom-Json } catch { $null }
+    } else {
+        $null
+    }
+    $startedAt = if ($existing -and $existing.started_at) { [string]$existing.started_at } else { (Get-Date).ToUniversalTime().ToString('o') }
+    Write-WebnovelMultiAgentJson -Path $Config.ProgressPath -Data @{
+        run_id = [string]$Config.RunId
+        status = $Status
+        phase = $Phase
+        current_lane = $CurrentLane
+        current_step_id = $CurrentStepId
+        current_step_name = $CurrentStepName
+        completed_steps = $CompletedSteps
+        total_steps = $TotalSteps
+        started_at = $startedAt
+        updated_at = (Get-Date).ToUniversalTime().ToString('o')
+        last_completed_step_id = $LastCompletedStepId
+        real_e2e_status = $RealE2EStatus
+    }
+}
+
+function Get-WebnovelMultiAgentControlState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Config
+    )
+
+    if (-not (Test-Path $Config.ControlPath)) {
+        return [pscustomobject]@{ stop_requested = $false; requested_at = '' }
+    }
+    try {
+        return Get-Content -Path $Config.ControlPath -Raw | ConvertFrom-Json
+    } catch {
+        return [pscustomobject]@{ stop_requested = $false; requested_at = '' }
+    }
+}
+
+function Test-WebnovelMultiAgentStopRequested {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Config
+    )
+
+    $control = Get-WebnovelMultiAgentControlState -Config $Config
+    return ($control -and $control.stop_requested -eq $true)
+}
+
+function Get-WebnovelMultiAgentFailureFingerprint {
+    [CmdletBinding()]
+    param(
+        [string]$Classification = '',
+        [psobject]$Preflight,
+        [object[]]$LaneResults = @(),
+        [psobject]$RealE2EStatus
+    )
+
+    if ($Classification -eq 'cancelled') {
+        return 'cancelled'
+    }
+    if ($Classification -eq 'environment_blocked') {
+        $issueNames = @($Preflight.issues | ForEach-Object { [string]$_.name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($issueNames.Count -gt 0) {
+            return ('environment:{0}' -f (($issueNames | Sort-Object -Unique) -join '|'))
+        }
+    }
+    if ($Classification -in @('local_blocker', 'local_regression')) {
+        foreach ($lane in @($LaneResults)) {
+            foreach ($step in @($lane.steps)) {
+                if (-not $step.passed) {
+                    return ('{0}:{1}' -f [string]$step.id, [string]$step.failure_kind)
+                }
+            }
+        }
+    }
+    if ($Classification -in @('mainline_failure', 'page_regression', 'readonly_audit_failure')) {
+        $reason = if ($RealE2EStatus) { [string]$RealE2EStatus.reason } else { '' }
+        if (-not [string]::IsNullOrWhiteSpace($reason)) {
+            return ('{0}:{1}' -f $Classification, $reason)
+        }
+        return $Classification
+    }
+    if ($Classification -eq 'pass') {
+        return 'pass'
+    }
+    return $Classification
+}
+
+function Write-WebnovelMultiAgentManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Config,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Result
+    )
+
+    Write-WebnovelMultiAgentJson -Path $Config.ManifestPath -Data @{
+        manifest_version = 1
+        run_id = [string]$Config.RunId
+        classification = [string]$Result.classification
+        next_action = [string]$Result.next_action
+        failure_fingerprint = [string]$Result.failure_fingerprint
+        rerun_of_run_id = [string]$Result.rerun_of_run_id
+        artifact_paths = @{
+            result = [string]$Config.ResultPath
+            report = [string]$Config.ReportPath
+            progress = [string]$Config.ProgressPath
+            manifest = [string]$Config.ManifestPath
+        }
+    }
 }
 
 function Invoke-WebnovelMultiAgentProbeCommand {
@@ -672,6 +829,9 @@ function Get-WebnovelMultiAgentFinalClassification {
     if ($PreflightClassification -eq 'environment_blocked') {
         return 'environment_blocked'
     }
+    if ($LocalClassification -eq 'cancelled') {
+        return 'cancelled'
+    }
     if ($LocalClassification -eq 'environment_blocked') {
         return 'environment_blocked'
     }
@@ -696,6 +856,7 @@ function Get-WebnovelMultiAgentNextAction {
     )
 
     switch ($Classification) {
+        'cancelled' { return 'rerun_after_cancel' }
         'environment_blocked' { return 'fix_environment_first' }
         'local_blocker' { return 'fix_local_blocker_and_rerun' }
         'local_regression' {
@@ -722,6 +883,7 @@ function Get-WebnovelMultiAgentFailureSummary {
     )
 
     switch ($Classification) {
+        'cancelled' { return 'Verification was cancelled before completion.' }
         'environment_blocked' {
             $issueNames = @($Preflight.issues | ForEach-Object { [string]$_.name })
             if ($issueNames.Count -gt 0) {
@@ -753,6 +915,7 @@ function Convert-WebnovelMultiAgentActionText {
     )
 
     switch ($ActionCode) {
+        'rerun_after_cancel' { return 'rerun_after_cancel (本次验证已取消，可直接重跑)' }
         'fix_environment_first' { return 'fix_environment_first (先修环境)' }
         'fix_local_blocker_and_rerun' { return 'fix_local_blocker_and_rerun (先修本地阻断 step，再重跑协调器)' }
         'fix_non_blocking_local_regressions' { return 'fix_non_blocking_local_regressions (局部回归，优先修非阻断 lane)' }
@@ -870,6 +1033,7 @@ function Invoke-WebnovelMultiAgentTest {
     )
 
     Initialize-WebnovelMultiAgentTestArtifacts -Config $Config
+    Write-WebnovelMultiAgentProgress -Config $Config -Phase 'preflight' -Status 'running' -CompletedSteps 0 -TotalSteps 6 -RealE2EStatus 'pending'
 
     $preflight = Test-WebnovelMultiAgentPreflight -Config $Config
     Write-WebnovelMultiAgentJson -Path $Config.PreflightPath -Data $preflight
@@ -882,6 +1046,16 @@ function Invoke-WebnovelMultiAgentTest {
         blocking_step_ids = @()
         reason = 'preflight_not_started'
     }
+    $rerunOfRunId = ''
+    $requestPath = Join-Path $Config.ArtifactDir 'request.json'
+    if (Test-Path $requestPath) {
+        try {
+            $requestPayload = Get-Content -Path $requestPath -Raw | ConvertFrom-Json
+            $rerunOfRunId = [string]$requestPayload.rerun_of_run_id
+        } catch {
+            $rerunOfRunId = ''
+        }
+    }
     $realE2EStatus = [pscustomobject]@{
         status = 'skipped'
         classification = ''
@@ -889,10 +1063,44 @@ function Invoke-WebnovelMultiAgentTest {
         reason = ''
     }
     $minimalRepro = ''
+    $totalSteps = 6
 
-    if ($preflight.ready) {
+    if (Test-WebnovelMultiAgentStopRequested -Config $Config) {
+        $localDecision = [pscustomobject]@{
+            should_run_real_e2e = $false
+            classification = 'cancelled'
+            blocking_lane_names = @()
+            blocking_step_ids = @()
+            reason = 'stop_requested_before_lanes'
+        }
+        $realE2EStatus = [pscustomobject]@{
+            status = 'skipped_due_to_cancel'
+            classification = ''
+            artifact_dir = ''
+            reason = 'Verification was cancelled before local lanes started.'
+        }
+        $minimalRepro = 'Rerun the coordinator after cancellation.'
+    } elseif ($preflight.ready) {
+        Write-WebnovelMultiAgentProgress -Config $Config -Phase 'local_lanes' -Status 'running' -CurrentLane 'parallel' -CompletedSteps 0 -TotalSteps $totalSteps -RealE2EStatus 'pending'
         $laneResults = @(Invoke-WebnovelMultiAgentLocalLanes -Config $Config)
-        $localDecision = Get-WebnovelMultiAgentLaneDecision -LaneResults $laneResults
+        if (Test-WebnovelMultiAgentStopRequested -Config $Config) {
+            $localDecision = [pscustomobject]@{
+                should_run_real_e2e = $false
+                classification = 'cancelled'
+                blocking_lane_names = @()
+                blocking_step_ids = @()
+                reason = 'stop_requested_after_local_lanes'
+            }
+            $realE2EStatus = [pscustomobject]@{
+                status = 'skipped_due_to_cancel'
+                classification = ''
+                artifact_dir = ''
+                reason = 'Verification was cancelled after local lanes completed.'
+            }
+            $minimalRepro = 'Rerun the coordinator after cancellation.'
+        } else {
+            $localDecision = Get-WebnovelMultiAgentLaneDecision -LaneResults $laneResults
+        }
     } else {
         $localDecision = [pscustomobject]@{
             should_run_real_e2e = $false
@@ -905,6 +1113,7 @@ function Invoke-WebnovelMultiAgentTest {
     }
 
     if ($localDecision.should_run_real_e2e) {
+        Write-WebnovelMultiAgentProgress -Config $Config -Phase 'real_e2e' -Status 'running' -CompletedSteps $totalSteps -TotalSteps $totalSteps -RealE2EStatus 'running'
         $realE2EResult = Invoke-WebnovelMultiAgentRealE2E -Config $Config
         Write-WebnovelMultiAgentJson -Path $Config.RealE2EResultPath -Data $realE2EResult
         $realE2EStatus = @{
@@ -918,6 +1127,7 @@ function Invoke-WebnovelMultiAgentTest {
         }
     } else {
         $skipReason = switch ($localDecision.classification) {
+            'cancelled' { 'Verification was cancelled before RealE2E started.' }
             'environment_blocked' { 'Local preflight or lane execution exposed an environment blocker.' }
             'local_blocker' { 'Blocking local steps failed, so RealE2E was skipped.' }
             default { 'RealE2E was skipped by coordinator policy.' }
@@ -926,7 +1136,16 @@ function Invoke-WebnovelMultiAgentTest {
             skipped = $true
             reason = $skipReason
         }
-        $realE2EStatus.reason = $skipReason
+        if ($localDecision.classification -eq 'cancelled') {
+            $realE2EStatus = @{
+                status = 'skipped_due_to_cancel'
+                classification = ''
+                artifact_dir = ''
+                reason = $skipReason
+            }
+        } else {
+            $realE2EStatus.reason = $skipReason
+        }
         if ([string]::IsNullOrWhiteSpace($minimalRepro)) {
             $minimalRepro = $skipReason
         }
@@ -950,6 +1169,15 @@ function Invoke-WebnovelMultiAgentTest {
     if ([string]::IsNullOrWhiteSpace($minimalRepro) -and $classification -eq 'local_regression') {
         $minimalRepro = 'At least one local verification lane failed, but RealE2E remained eligible and did not report a broader blocker.'
     }
+    if ([string]::IsNullOrWhiteSpace($minimalRepro) -and $classification -eq 'cancelled') {
+        $minimalRepro = 'Rerun the coordinator after cancellation.'
+    }
+
+    $failureFingerprint = Get-WebnovelMultiAgentFailureFingerprint `
+        -Classification $classification `
+        -Preflight $preflight `
+        -LaneResults $laneResults `
+        -RealE2EStatus $realE2EStatus
 
     $result = @{
         classification = $classification
@@ -964,8 +1192,12 @@ function Invoke-WebnovelMultiAgentTest {
         next_action = $nextAction
         failure_summary = $failureSummary
         minimal_repro = $minimalRepro
+        failure_fingerprint = $failureFingerprint
+        rerun_of_run_id = $rerunOfRunId
     }
     Write-WebnovelMultiAgentJson -Path $Config.ResultPath -Data $result
+    Write-WebnovelMultiAgentProgress -Config $Config -Phase 'finalizing' -Status 'completed' -CompletedSteps $totalSteps -TotalSteps $totalSteps -LastCompletedStepId '' -RealE2EStatus ([string]$realE2EStatus.status)
+    Write-WebnovelMultiAgentManifest -Config $Config -Result $result
     $report = New-WebnovelMultiAgentReport -Result $result
     Set-Content -Path $Config.ReportPath -Value $report -Encoding UTF8
 
@@ -975,6 +1207,11 @@ function Invoke-WebnovelMultiAgentTest {
 Export-ModuleMember -Function `
     Get-WebnovelMultiAgentTestConfig, `
     Initialize-WebnovelMultiAgentTestArtifacts, `
+    Write-WebnovelMultiAgentProgress, `
+    Get-WebnovelMultiAgentControlState, `
+    Test-WebnovelMultiAgentStopRequested, `
+    Get-WebnovelMultiAgentFailureFingerprint, `
+    Write-WebnovelMultiAgentManifest, `
     Invoke-WebnovelMultiAgentProbeCommand, `
     Test-WebnovelMultiAgentPreflight, `
     Get-WebnovelMultiAgentLaneSpecs, `

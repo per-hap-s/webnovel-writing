@@ -24,6 +24,13 @@ Describe 'Get-WebnovelMultiAgentTestConfig' {
         $config.ReportPath | Should Be (Join-Path $config.ArtifactDir 'report.md')
         $config.LaneLogsDir | Should Be (Join-Path $config.ArtifactDir 'lane-logs')
         $config.RealE2EOutputRoot | Should Be (Join-Path $config.ArtifactDir 'real-e2e')
+        $config.RealE2EResultPath | Should Be (Join-Path $config.ArtifactDir 'real-e2e-result.json')
+        $config.ProgressPath | Should Be (Join-Path $config.ArtifactDir 'progress.json')
+        $config.ControlPath | Should Be (Join-Path $config.ArtifactDir 'control.json')
+        $config.ManifestPath | Should Be (Join-Path $config.ArtifactDir 'manifest.json')
+        $config.RuntimeDir | Should Be 'D:\CodexProjects\Project1\output\verification\multi-agent-test\_runtime'
+        $config.ActiveExecutionPath | Should Be 'D:\CodexProjects\Project1\output\verification\multi-agent-test\_runtime\active-execution.json'
+        $config.LastKnownExecutionPath | Should Be 'D:\CodexProjects\Project1\output\verification\multi-agent-test\_runtime\last-known.json'
         $config.RealE2EModulePath | Should Be 'D:\CodexProjects\Project1\tools\Webnovel-RealE2E.psm1'
         $config.NodeModulesPath | Should Be 'D:\CodexProjects\Project1\webnovel-writer\webnovel-writer\dashboard\frontend\node_modules'
     }
@@ -46,13 +53,19 @@ Describe 'Initialize-WebnovelMultiAgentTestArtifacts' {
         foreach ($path in @(
             $config.ArtifactDir,
             $config.LaneLogsDir,
-            $config.RealE2EOutputRoot
+            $config.RealE2EOutputRoot,
+            $config.RuntimeDir
         )) {
             Test-Path $path | Should Be $true
         }
 
         $realE2EPlaceholder = Get-Content -Path $config.RealE2EResultPath -Raw | ConvertFrom-Json
         $realE2EPlaceholder.skipped | Should Be $true
+        $progressPlaceholder = Get-Content -Path $config.ProgressPath -Raw | ConvertFrom-Json
+        $progressPlaceholder.phase | Should Be 'preflight'
+        $progressPlaceholder.completed_steps | Should Be 0
+        $controlPlaceholder = Get-Content -Path $config.ControlPath -Raw | ConvertFrom-Json
+        $controlPlaceholder.stop_requested | Should Be $false
     }
 }
 
@@ -325,6 +338,30 @@ Describe 'Get-WebnovelMultiAgentFinalClassification' {
             $classification | Should Be 'mainline_failure'
         }
     }
+
+    It 'returns cancelled when the coordinator stop path won' {
+        InModuleScope $multiAgentModule.Name {
+            $classification = Get-WebnovelMultiAgentFinalClassification `
+                -PreflightClassification 'pass' `
+                -LocalClassification 'cancelled' `
+                -RealE2EClassification ''
+
+            $classification | Should Be 'cancelled'
+        }
+    }
+}
+
+Describe 'Get-WebnovelMultiAgentNextAction' {
+    BeforeAll {
+        $script:multiAgentModule = Import-Module $modulePath -Force -PassThru
+    }
+
+    It 'maps cancelled to rerun_after_cancel' {
+        InModuleScope $multiAgentModule.Name {
+            $action = Get-WebnovelMultiAgentNextAction -Classification 'cancelled'
+            $action | Should Be 'rerun_after_cancel'
+        }
+    }
 }
 
 Describe 'Invoke-WebnovelMultiAgentTest' {
@@ -372,6 +409,8 @@ Describe 'Invoke-WebnovelMultiAgentTest' {
             $result.classification | Should Be 'pass'
             $result.real_e2e.status | Should Be 'executed'
             $result.next_action | Should Be 'ready_to_pass'
+            (Test-Path $config.ProgressPath) | Should Be $true
+            (Test-Path $config.ManifestPath) | Should Be $true
         }
     }
 
@@ -426,6 +465,46 @@ Describe 'Invoke-WebnovelMultiAgentTest' {
             $result.real_e2e.status | Should Be 'skipped'
             $result.next_action | Should Be 'fix_local_blocker_and_rerun'
             $result.blocking_step_ids | Should Be @('backend.dashboard-package-contract')
+            $result.failure_fingerprint | Should Be 'backend.dashboard-package-contract:test_failure'
+            $manifest = Get-Content -Path $config.ManifestPath -Raw | ConvertFrom-Json
+            $manifest.failure_fingerprint | Should Be 'backend.dashboard-package-contract:test_failure'
+        }
+    }
+
+    It 'returns cancelled and skips RealE2E when stop was requested before RealE2E' {
+        InModuleScope $multiAgentModule.Name {
+            Mock Initialize-WebnovelMultiAgentTestArtifacts {}
+            Mock Test-WebnovelMultiAgentPreflight {
+                [pscustomobject]@{
+                    classification = 'pass'
+                    ready = $true
+                    issues = @()
+                    missing_paths = @()
+                    failed_commands = @()
+                }
+            }
+            Mock Invoke-WebnovelMultiAgentLocalLanes {
+                @(
+                    [pscustomobject]@{ name = 'backend'; status = 'passed'; failed_step_count = 0; suspected_environment_issue = $false; steps = @(); failed_step_names = @(); blocking_step_names = @(); recommended_action = '' },
+                    [pscustomobject]@{ name = 'data-cli'; status = 'passed'; failed_step_count = 0; suspected_environment_issue = $false; steps = @(); failed_step_names = @(); blocking_step_names = @(); recommended_action = '' },
+                    [pscustomobject]@{ name = 'frontend'; status = 'passed'; failed_step_count = 0; suspected_environment_issue = $false; steps = @(); failed_step_names = @(); blocking_step_names = @(); recommended_action = '' }
+                )
+            }
+            Mock Test-WebnovelMultiAgentStopRequested { $true }
+            Mock Invoke-WebnovelMultiAgentRealE2E { throw 'RealE2E should not be executed after stop request' }
+
+            $config = Get-WebnovelMultiAgentTestConfig `
+                -WorkspaceRoot 'D:\CodexProjects\Project1' `
+                -OutputRoot (Join-Path $TestDrive 'multi-agent-test') `
+                -PreferredPort 8765 `
+                -RunId 'invoke-cancelled'
+
+            $result = Invoke-WebnovelMultiAgentTest -Config $config
+
+            Assert-MockCalled Invoke-WebnovelMultiAgentRealE2E -Times 0 -Exactly -Scope It
+            $result.classification | Should Be 'cancelled'
+            $result.next_action | Should Be 'rerun_after_cancel'
+            $result.real_e2e.status | Should Be 'skipped_due_to_cancel'
         }
     }
 }

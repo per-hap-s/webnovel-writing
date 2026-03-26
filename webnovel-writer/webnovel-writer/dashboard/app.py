@@ -79,15 +79,23 @@ from .task_models import (
 )
 from .verification_console import (
     VerificationArtifactError,
+    build_verification_history,
     build_verification_overview,
+    clear_active_execution,
+    ensure_cancelled_result,
     generate_verification_run_id,
-    get_verification_console_log_path,
+    get_verification_console_log_payload,
     get_verification_report_path,
     get_verification_run_detail,
-    get_verification_step_log_path,
+    get_verification_run_progress,
+    get_verification_step_log_payload,
+    is_verification_pid_active,
+    persist_active_execution,
+    recover_active_verification_execution,
     start_multi_agent_test_process,
     verification_artifact_dir,
     verification_console_log_paths,
+    write_verification_request_metadata,
 )
 from .watcher import FileWatcher
 
@@ -264,7 +272,7 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         app.state.workspace_root = default_workspace_root
         app.state.watcher = watcher
         app.state.orchestrator = None
-        app.state.active_verification_execution = None
+        app.state.active_verification_execution = recover_active_verification_execution(default_workspace_root)
         app.state.active_verification_process = None
         app.state.active_verification_waiter = None
         if default_project_root is not None:
@@ -349,7 +357,26 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         execution = getattr(app.state, 'active_verification_execution', None)
         if not isinstance(execution, dict):
             return None
-        return dict(execution)
+        execution_copy = dict(execution)
+        process = getattr(app.state, 'active_verification_process', None)
+        process_alive = process is not None and getattr(process, 'poll', lambda: None)() is None
+        if str(execution_copy.get('status') or '') in {'starting', 'running'} and not process_alive and not is_verification_pid_active(execution_copy.get('pid')):
+            app.state.active_verification_execution = recover_active_verification_execution(_get_workspace_root())
+            execution = getattr(app.state, 'active_verification_execution', None)
+            if not isinstance(execution, dict):
+                return None
+            execution_copy = dict(execution)
+        return execution_copy
+
+    def _set_active_verification_execution(execution: dict[str, Any] | None) -> dict[str, Any] | None:
+        if execution is None:
+            app.state.active_verification_execution = None
+            clear_active_execution(_get_workspace_root())
+            return None
+        normalized = dict(execution)
+        app.state.active_verification_execution = normalized
+        persist_active_execution(_get_workspace_root(), normalized)
+        return normalized
 
     def _clear_active_verification_runtime() -> None:
         app.state.active_verification_process = None
@@ -367,9 +394,12 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         updated_execution['finished_at'] = datetime.now(timezone.utc).isoformat()
         updated_execution['last_error'] = '' if exit_code == 0 else f'验证脚本退出码为 {exit_code}。'
         app.state.active_verification_execution = updated_execution
+        persist_active_execution(_get_workspace_root(), updated_execution)
+        clear_active_execution(_get_workspace_root(), updated_execution)
+        app.state.active_verification_execution = None
         _clear_active_verification_runtime()
 
-    def _start_workbench_verification() -> dict[str, Any]:
+    def _start_workbench_verification(*, rerun_of_run_id: str = '') -> dict[str, Any]:
         current_execution = _get_active_verification_execution()
         if current_execution and str(current_execution.get('status') or '') in {'starting', 'running'}:
             raise APIError(409, 'VERIFICATION_ALREADY_RUNNING', '当前已有一个验证任务正在运行。', {'run_id': current_execution.get('run_id')})
@@ -391,8 +421,24 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
             'console_stdout_path': str(console_paths['stdout'].resolve()),
             'console_stderr_path': str(console_paths['stderr'].resolve()),
             'last_error': '',
+            'progress': {
+                'run_id': run_id,
+                'status': 'starting',
+                'phase': 'preflight',
+                'current_lane': '',
+                'current_step_id': '',
+                'current_step_name': '',
+                'completed_steps': 0,
+                'total_steps': 6,
+                'started_at': datetime.now(timezone.utc).isoformat(),
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+                'last_completed_step_id': '',
+                'real_e2e_status': 'pending',
+            },
+            'rerun_of_run_id': rerun_of_run_id,
         }
-        app.state.active_verification_execution = execution
+        write_verification_request_metadata(artifact_dir, {'rerun_of_run_id': rerun_of_run_id})
+        _set_active_verification_execution(execution)
         try:
             process = start_multi_agent_test_process(workspace_root, artifact_dir, run_id)
         except Exception as exc:
@@ -400,23 +446,75 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
             failed_execution['status'] = 'failed_to_launch'
             failed_execution['finished_at'] = datetime.now(timezone.utc).isoformat()
             failed_execution['last_error'] = str(exc)
-            app.state.active_verification_execution = failed_execution
+            _set_active_verification_execution(failed_execution)
             _clear_active_verification_runtime()
             raise APIError(500, 'VERIFICATION_LAUNCH_FAILED', '验证任务启动失败。', {'error': str(exc), 'run_id': run_id})
 
         running_execution = dict(execution)
         running_execution['status'] = 'running'
         running_execution['pid'] = getattr(process, 'pid', None)
-        app.state.active_verification_execution = running_execution
+        running_execution['progress']['status'] = 'running'
+        running_execution['progress']['updated_at'] = datetime.now(timezone.utc).isoformat()
+        _set_active_verification_execution(running_execution)
         app.state.active_verification_process = process
         app.state.active_verification_waiter = asyncio.create_task(_wait_for_verification_process(process, run_id))
         return running_execution
+
+    def _stop_workbench_verification() -> dict[str, Any]:
+        execution = _get_active_verification_execution()
+        if execution is None or str(execution.get('status') or '') not in {'starting', 'running'}:
+            raise APIError(404, 'VERIFICATION_RUN_NOT_FOUND', '当前没有可停止的验证运行。')
+
+        artifact_dir = verification_artifact_dir(_get_workspace_root(), str(execution.get('run_id') or ''))
+        control_path = artifact_dir / 'control.json'
+        control_path.write_text(
+            json.dumps({'stop_requested': True, 'requested_at': datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        updated = dict(execution)
+        updated['last_error'] = '已请求停止，等待当前步骤结束。'
+        _set_active_verification_execution(updated)
+
+        process = getattr(app.state, 'active_verification_process', None)
+        if process is not None and getattr(process, 'poll', lambda: 0)() is None:
+            try:
+                process.wait(timeout=10)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                cancelled_execution = dict(updated)
+                cancelled_execution['status'] = 'cancelled_force_killed'
+                cancelled_execution['finished_at'] = datetime.now(timezone.utc).isoformat()
+                cancelled_execution['last_error'] = '停止请求超过 10 秒后已强制结束进程。'
+                ensure_cancelled_result(
+                    _get_workspace_root(),
+                    str(cancelled_execution.get('run_id') or ''),
+                    reason='已取消当前验证运行。',
+                    execution=cancelled_execution,
+                )
+                clear_active_execution(_get_workspace_root(), cancelled_execution)
+                app.state.active_verification_execution = None
+                _clear_active_verification_runtime()
+                return cancelled_execution
+        return updated
 
     def _build_verification_overview(limit: int = 10) -> dict[str, Any]:
         return build_verification_overview(
             _get_workspace_root(),
             limit=limit,
             active_execution=_get_active_verification_execution(),
+        )
+
+    def _build_verification_history(limit: int = 20, cursor: str = '', classification: str = '', status: str = '', next_action: str = '') -> dict[str, Any]:
+        return build_verification_history(
+            _get_workspace_root(),
+            limit=limit,
+            cursor=cursor,
+            classification=classification,
+            status=status,
+            next_action=next_action,
         )
 
     def _build_verification_detail(run_id: str) -> dict[str, Any]:
@@ -426,6 +524,16 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
                 run_id,
                 active_execution=_get_active_verification_execution(),
             )
+        except VerificationArtifactError as exc:
+            raise APIError(exc.status_code, exc.code, exc.message) from exc
+
+    def _build_verification_progress(run_id: str) -> dict[str, Any]:
+        try:
+            return get_verification_run_progress(
+                _get_workspace_root(),
+                run_id,
+                active_execution=_get_active_verification_execution(),
+            ) or {}
         except VerificationArtifactError as exc:
             raise APIError(exc.status_code, exc.code, exc.message) from exc
 
@@ -1300,14 +1408,44 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
     def workbench_verification_overview(limit: int = Query(10, ge=1, le=50)):
         return _build_verification_overview(limit=limit)
 
+    @app.get('/api/workbench/verification/history')
+    def workbench_verification_history(
+        limit: int = Query(20, ge=1, le=100),
+        cursor: str = Query(''),
+        classification: str = Query(''),
+        status: str = Query(''),
+        next_action: str = Query(''),
+    ):
+        return _build_verification_history(
+            limit=limit,
+            cursor=cursor,
+            classification=classification,
+            status=status,
+            next_action=next_action,
+        )
+
     @app.post('/api/workbench/verification/run')
     async def run_workbench_verification():
         execution = await asyncio.to_thread(_start_workbench_verification)
         return {'accepted': True, 'execution': execution}
 
+    @app.post('/api/workbench/verification/run/stop')
+    async def stop_workbench_verification():
+        execution = await asyncio.to_thread(_stop_workbench_verification)
+        return {'accepted': True, 'execution': execution}
+
     @app.get('/api/workbench/verification/runs/{run_id}')
     def get_workbench_verification_run(run_id: str):
         return _build_verification_detail(run_id)
+
+    @app.get('/api/workbench/verification/runs/{run_id}/progress')
+    def get_workbench_verification_progress(run_id: str):
+        return _build_verification_progress(run_id)
+
+    @app.post('/api/workbench/verification/runs/{run_id}/rerun')
+    async def rerun_workbench_verification(run_id: str):
+        execution = await asyncio.to_thread(_start_workbench_verification, rerun_of_run_id=run_id)
+        return {'accepted': True, 'execution': execution}
 
     @app.get('/api/workbench/verification/runs/{run_id}/report')
     def get_workbench_verification_report(run_id: str):
@@ -1318,20 +1456,18 @@ def create_app(project_root: str | Path | None = None, workspace_root: str | Pat
         return Response(content=report_path.read_text(encoding='utf-8'), media_type='text/markdown')
 
     @app.get('/api/workbench/verification/runs/{run_id}/steps/{step_id}/logs/{stream}')
-    def get_workbench_verification_step_log(run_id: str, step_id: str, stream: str):
+    def get_workbench_verification_step_log(run_id: str, step_id: str, stream: str, tail_lines: int = Query(200, ge=1, le=1000)):
         try:
-            log_path = get_verification_step_log_path(_get_workspace_root(), run_id, step_id, stream)
+            return get_verification_step_log_payload(_get_workspace_root(), run_id, step_id, stream, tail_lines=tail_lines)
         except VerificationArtifactError as exc:
             raise APIError(exc.status_code, exc.code, exc.message) from exc
-        return Response(content=log_path.read_text(encoding='utf-8'), media_type='text/plain')
 
     @app.get('/api/workbench/verification/runs/{run_id}/console/{stream}')
-    def get_workbench_verification_console_log(run_id: str, stream: str):
+    def get_workbench_verification_console_log(run_id: str, stream: str, tail_lines: int = Query(200, ge=1, le=1000)):
         try:
-            log_path = get_verification_console_log_path(_get_workspace_root(), run_id, stream)
+            return get_verification_console_log_payload(_get_workspace_root(), run_id, stream, tail_lines=tail_lines)
         except VerificationArtifactError as exc:
             raise APIError(exc.status_code, exc.code, exc.message) from exc
-        return Response(content=log_path.read_text(encoding='utf-8'), media_type='text/plain')
 
     @app.get('/api/project/info')
     def project_info(request: Request):

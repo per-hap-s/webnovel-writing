@@ -223,8 +223,11 @@ Dashboard verification console（验证控制台）：
 
 - 入口在 Dashboard 工作台的 `验证页`，不绑定单个项目。
 - 页面会直接调用正式脚本 `tools\Tests\Run-Webnovel-MultiAgentTest.ps1`，不会绕过协调器自己拼测试步骤。
-- 页面会展示 `active_execution`（活动运行）、最近 10 次 runs（运行记录）、`classification`（分类）、`next_action`（动作码）、`failure_summary`（失败摘要）、`RealE2E` 状态以及报告/日志入口。
-- Dashboard 只允许读取当前 run 目录里的 `report.md`、console stdout/stderr 和 step 级 stdout/stderr/combined log，不开放任意文件浏览。
+- 页面会展示 `active_execution`（活动运行）、最近 10 次 runs（运行记录）、`classification`（分类）、`next_action`（动作码）、`failure_summary`（失败摘要）、`minimal_repro`（最小复现）、`failure_fingerprint`（失败指纹）、`RealE2E` 状态以及报告/日志入口。
+- 活动运行会把状态落盘到 `output/verification/multi-agent-test/_runtime/active-execution.json` 与 `_runtime/last-known.json`；Dashboard 重启后会结合 PID（进程号）存活检查和 `result.json` / `progress.json` 做恢复。
+- 活动运行时前端会高频轮询 `GET /api/workbench/verification/runs/{run_id}/progress`，展示 `phase / current_lane / current_step / completed_steps / total_steps / updated_at`。
+- Dashboard 只允许读取当前 run 目录里的 `report.md`、console stdout/stderr 和 step 级 stdout/stderr/combined log，不开放任意文件浏览；日志接口默认使用 `tail_lines` 截尾返回，避免大日志拖慢页面。
+- 页面支持 `POST /api/workbench/verification/run/stop` 停止当前 active run，以及 `POST /api/workbench/verification/runs/{run_id}/rerun` 基于旧 run 创建新 run。
 - 同一 workspace（工作区）同一时刻只允许一个 active multi-agent test（活动多子代理验证）；若已存在运行中任务，再次启动会得到 `VERIFICATION_ALREADY_RUNNING`。
 
 鍥哄畾浜х墿锛?
@@ -249,6 +252,14 @@ Addendum (2026-03-25):
 - Every step now records `blocking_severity`, `timeout_seconds`, and separate stdout/stderr/combined log paths.
 - `failure_kind` is now a first-class field with the fixed values `timeout`, `environment`, `test_failure`, and `tooling_failure`.
 - Top-level `result.json` now includes `blocking_step_ids[]`, `next_action`, and `failure_summary` for direct triage.
+
+Addendum (2026-03-26):
+
+- Coordinator runs now persist `progress.json`, `control.json`, and `manifest.json` in each run directory.
+- `manifest.json` carries `manifest_version`, `run_id`, `classification`, `next_action`, `failure_fingerprint`, and artifact path pointers for Dashboard plus future headless automation.
+- Stop requests are cooperative first: Dashboard writes `control.json` and only force-kills after 10 seconds if the coordinator still has not exited.
+- `classification = cancelled` now maps to `next_action = rerun_after_cancel`.
+- History APIs can now group repeated failures by `failure_fingerprint`, which is derived from missing environment items, `step_id + failure_kind`, or the first failing RealE2E page/task.
 
 ## 甯哥敤鐜鍙橀噺
 

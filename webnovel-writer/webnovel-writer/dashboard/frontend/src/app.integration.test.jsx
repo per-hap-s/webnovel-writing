@@ -765,9 +765,15 @@ test('project mode sidebar omits duplicate workbench entry from project navigati
     expect(navSections[1].querySelectorAll('.nav-button')).toHaveLength(7)
 })
 
-test('workbench verification page starts runs, polls active status, and loads failure logs', async () => {
+test('workbench verification page shows progress, supports stop and rerun, and loads structured logs', async () => {
     const user = userEvent.setup()
     window.history.replaceState({}, '', '/')
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined)
+    let stopRequested = false
+    Object.defineProperty(window.navigator, 'clipboard', {
+        value: { writeText: clipboardWriteText },
+        configurable: true,
+    })
 
     let overviewCallCount = 0
     fetchJSONMock.mockImplementation((path) => {
@@ -791,6 +797,64 @@ test('workbench verification page starts runs, polls active status, and loads fa
                             has_report: true,
                             has_result: true,
                             artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-older',
+                            progress: {
+                                phase: 'finalizing',
+                                completed_steps: 6,
+                                total_steps: 6,
+                                updated_at: '2026-03-26T08:05:00Z',
+                            },
+                        },
+                    ],
+                })
+            }
+            if (stopRequested) {
+                return Promise.resolve({
+                    workspace_root: 'C:/workspace',
+                    active_execution: null,
+                    runs: [
+                        {
+                            run_id: 'run-new',
+                            status: 'completed',
+                            started_at: '2026-03-26T09:00:00Z',
+                            finished_at: '2026-03-26T09:02:00Z',
+                            classification: 'cancelled',
+                            next_action: 'rerun_after_cancel',
+                            failure_summary: '验证已取消，可在修正后重新执行。',
+                            real_e2e_status: 'skipped_due_to_cancel',
+                            has_report: true,
+                            has_result: true,
+                            artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-new',
+                            progress: {
+                                phase: 'finalizing',
+                                current_lane: '',
+                                current_step_id: '',
+                                current_step_name: '',
+                                completed_steps: 4,
+                                total_steps: 6,
+                                updated_at: '2026-03-26T09:02:00Z',
+                            },
+                        },
+                        {
+                            run_id: 'run-older',
+                            status: 'completed',
+                            started_at: '2026-03-26T08:00:00Z',
+                            finished_at: '2026-03-26T08:05:00Z',
+                            classification: 'local_blocker',
+                            next_action: 'fix_local_blocker_and_rerun',
+                            failure_summary: 'Blocking local steps failed.',
+                            real_e2e_status: 'skipped',
+                            has_report: true,
+                            has_result: true,
+                            artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-older',
+                            progress: {
+                                phase: 'finalizing',
+                                current_lane: '',
+                                current_step_id: '',
+                                current_step_name: '',
+                                completed_steps: 6,
+                                total_steps: 6,
+                                updated_at: '2026-03-26T08:05:00Z',
+                            },
                         },
                     ],
                 })
@@ -809,6 +873,15 @@ test('workbench verification page starts runs, polls active status, and loads fa
                     console_stdout_path: 'C:/workspace/output/verification/multi-agent-test/run-new/_dashboard-console.stdout.log',
                     console_stderr_path: 'C:/workspace/output/verification/multi-agent-test/run-new/_dashboard-console.stderr.log',
                     last_error: '',
+                    progress: {
+                        phase: 'frontend',
+                        current_lane: 'frontend',
+                        current_step_id: 'frontend.frontend-tests',
+                        current_step_name: 'frontend-tests',
+                        completed_steps: 4,
+                        total_steps: 6,
+                        updated_at: '2026-03-26T09:01:00Z',
+                    },
                 },
                 runs: [
                     {
@@ -823,6 +896,15 @@ test('workbench verification page starts runs, polls active status, and loads fa
                         has_report: false,
                         has_result: false,
                         artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-new',
+                        progress: {
+                            phase: 'frontend',
+                            current_lane: 'frontend',
+                            current_step_id: 'frontend.frontend-tests',
+                            current_step_name: 'frontend-tests',
+                            completed_steps: 4,
+                            total_steps: 6,
+                            updated_at: '2026-03-26T09:01:00Z',
+                        },
                     },
                     {
                         run_id: 'run-older',
@@ -836,8 +918,30 @@ test('workbench verification page starts runs, polls active status, and loads fa
                         has_report: true,
                         has_result: true,
                         artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-older',
+                        progress: {
+                            phase: 'finalizing',
+                            completed_steps: 6,
+                            total_steps: 6,
+                            updated_at: '2026-03-26T08:05:00Z',
+                        },
                     },
                 ],
+            })
+        }
+        if (path === '/api/workbench/verification/runs/run-new/progress') {
+            return Promise.resolve({
+                run_id: 'run-new',
+                status: 'running',
+                phase: 'frontend',
+                current_lane: 'frontend',
+                current_step_id: 'frontend.frontend-tests',
+                current_step_name: 'frontend-tests',
+                completed_steps: 4,
+                total_steps: 6,
+                started_at: '2026-03-26T09:00:00Z',
+                updated_at: '2026-03-26T09:01:02Z',
+                last_completed_step_id: 'data-cli.mock-cli-e2e',
+                real_e2e_status: 'pending',
             })
         }
         if (path === '/api/workbench/verification/runs/run-older') {
@@ -849,8 +953,15 @@ test('workbench verification page starts runs, polls active status, and loads fa
                 failure_summary: 'Blocking local steps failed.',
                 blocking_step_ids: ['frontend.frontend-tests'],
                 minimal_repro: 'Run frontend tests.',
+                failure_fingerprint: 'frontend.frontend-tests:test_failure',
                 preflight: { classification: 'pass', missing_paths: [], failed_commands: [] },
                 local_decision: { classification: 'local_blocker' },
+                progress: {
+                    phase: 'finalizing',
+                    completed_steps: 6,
+                    total_steps: 6,
+                    updated_at: '2026-03-26T08:05:00Z',
+                },
                 lanes: [
                     {
                         name: 'frontend',
@@ -874,6 +985,9 @@ test('workbench verification page starts runs, polls active status, and loads fa
                     classification: '',
                     artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-older/real-e2e',
                 },
+                manifest: {
+                    failure_fingerprint: 'frontend.frontend-tests:test_failure',
+                },
                 artifacts: {
                     report_url: '/api/workbench/verification/runs/run-older/report',
                     console_stdout_url: '/api/workbench/verification/runs/run-older/console/stdout',
@@ -882,6 +996,42 @@ test('workbench verification page starts runs, polls active status, and loads fa
             })
         }
         if (path === '/api/workbench/verification/runs/run-new') {
+            if (stopRequested) {
+                return Promise.resolve({
+                    run_id: 'run-new',
+                    status: 'completed',
+                    classification: 'cancelled',
+                    next_action: 'rerun_after_cancel',
+                    failure_summary: '验证已取消，可在修正后重新执行。',
+                    blocking_step_ids: [],
+                    minimal_repro: '& .\\tools\\Tests\\Run-Webnovel-MultiAgentTest.ps1',
+                    preflight: null,
+                    local_decision: null,
+                    lanes: [],
+                    progress: {
+                        phase: 'finalizing',
+                        current_lane: '',
+                        current_step_id: '',
+                        current_step_name: '',
+                        completed_steps: 4,
+                        total_steps: 6,
+                        updated_at: '2026-03-26T09:02:00Z',
+                    },
+                    real_e2e: {
+                        status: 'skipped_due_to_cancel',
+                        classification: '',
+                        artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-new/real-e2e',
+                    },
+                    manifest: {
+                        failure_fingerprint: 'cancelled',
+                    },
+                    artifacts: {
+                        report_url: '/api/workbench/verification/runs/run-new/report',
+                        console_stdout_url: '/api/workbench/verification/runs/run-new/console/stdout',
+                        console_stderr_url: '/api/workbench/verification/runs/run-new/console/stderr',
+                    },
+                })
+            }
             return Promise.resolve({
                 run_id: 'run-new',
                 status: 'running',
@@ -893,16 +1043,60 @@ test('workbench verification page starts runs, polls active status, and loads fa
                 preflight: null,
                 local_decision: null,
                 lanes: [],
+                progress: {
+                    phase: 'frontend',
+                    current_lane: 'frontend',
+                    current_step_id: 'frontend.frontend-tests',
+                    current_step_name: 'frontend-tests',
+                    completed_steps: 4,
+                    total_steps: 6,
+                    updated_at: '2026-03-26T09:01:02Z',
+                },
                 real_e2e: {
                     status: 'pending',
                     classification: '',
                     artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-new/real-e2e',
+                },
+                manifest: {
+                    failure_fingerprint: '',
                 },
                 artifacts: {
                     report_url: '',
                     console_stdout_url: '/api/workbench/verification/runs/run-new/console/stdout',
                     console_stderr_url: '/api/workbench/verification/runs/run-new/console/stderr',
                 },
+            })
+        }
+        if (path === '/api/workbench/verification/history') {
+            return Promise.resolve({
+                runs: [
+                    {
+                        run_id: 'run-older',
+                        status: 'completed',
+                        classification: 'local_blocker',
+                        next_action: 'fix_local_blocker_and_rerun',
+                        failure_summary: 'Blocking local steps failed.',
+                        failure_fingerprint: 'frontend.frontend-tests:test_failure',
+                    },
+                ],
+                groups: [
+                    {
+                        failure_fingerprint: 'frontend.frontend-tests:test_failure',
+                        run_count: 1,
+                        latest_run_id: 'run-older',
+                        latest_classification: 'local_blocker',
+                    },
+                ],
+                next_cursor: '',
+            })
+        }
+        if (path === '/api/workbench/verification/runs/run-older/steps/frontend.frontend-tests/logs/combined') {
+            return Promise.resolve({
+                stream: 'combined',
+                content: 'FAILED frontend test',
+                truncated: false,
+                total_bytes: 21,
+                last_modified_at: '2026-03-26T08:05:00Z',
             })
         }
         return Promise.resolve({})
@@ -923,17 +1117,51 @@ test('workbench verification page starts runs, polls active status, and loads fa
                     console_stdout_path: 'C:/workspace/output/verification/multi-agent-test/run-new/_dashboard-console.stdout.log',
                     console_stderr_path: 'C:/workspace/output/verification/multi-agent-test/run-new/_dashboard-console.stderr.log',
                     last_error: '',
+                    progress: {
+                        phase: 'frontend',
+                        current_lane: 'frontend',
+                        current_step_id: 'frontend.frontend-tests',
+                        current_step_name: 'frontend-tests',
+                        completed_steps: 4,
+                        total_steps: 6,
+                        updated_at: '2026-03-26T09:01:00Z',
+                    },
+                },
+            })
+        }
+        if (path === '/api/workbench/verification/run/stop') {
+            stopRequested = true
+            return Promise.resolve({
+                accepted: true,
+                execution: {
+                    run_id: 'run-new',
+                    status: 'completed',
+                    last_error: '',
+                },
+            })
+        }
+        if (path === '/api/workbench/verification/runs/run-older/rerun') {
+            return Promise.resolve({
+                accepted: true,
+                execution: {
+                    run_id: 'run-rerun',
+                    status: 'running',
+                    started_at: '2026-03-26T09:10:00Z',
+                    finished_at: '',
+                    pid: 5678,
+                    artifact_dir: 'C:/workspace/output/verification/multi-agent-test/run-rerun',
+                    result_path: 'C:/workspace/output/verification/multi-agent-test/run-rerun/result.json',
+                    report_path: 'C:/workspace/output/verification/multi-agent-test/run-rerun/report.md',
+                    console_stdout_path: 'C:/workspace/output/verification/multi-agent-test/run-rerun/_dashboard-console.stdout.log',
+                    console_stderr_path: 'C:/workspace/output/verification/multi-agent-test/run-rerun/_dashboard-console.stderr.log',
+                    last_error: '',
+                    rerun_of_run_id: 'run-older',
                 },
             })
         }
         return Promise.resolve({})
     })
-    fetchTextMock.mockImplementation((path) => {
-        if (path === '/api/workbench/verification/runs/run-older/steps/frontend.frontend-tests/logs/combined') {
-            return Promise.resolve('FAILED frontend test')
-        }
-        return Promise.resolve('plain text')
-    })
+    fetchTextMock.mockResolvedValue('report markdown')
 
     render(<App />)
 
@@ -954,16 +1182,33 @@ test('workbench verification page starts runs, polls active status, and loads fa
         await new Promise((resolve) => window.setTimeout(resolve, 3200))
     })
 
-    expect(overviewCallCount).toBeGreaterThanOrEqual(3)
+    expect(overviewCallCount).toBeGreaterThanOrEqual(2)
+    expect(fetchJSONMock).toHaveBeenCalledWith('/api/workbench/verification/runs/run-new/progress')
+    expect(screen.getByText('frontend')).not.toBeNull()
+    expect(screen.getAllByText(/frontend\.frontend-tests/).length).toBeGreaterThan(0)
+
+    await user.click(screen.getByRole('button', { name: '停止验证' }))
+    await waitFor(() => {
+        expect(postJSONMock).toHaveBeenCalledWith('/api/workbench/verification/run/stop', {})
+        expect(screen.getByText('cancelled')).not.toBeNull()
+    })
 
     await user.click(screen.getByRole('button', { name: /run-older/ }))
     expect(await screen.findByText('Blocking local steps failed.')).not.toBeNull()
-
-    await user.click(screen.getByRole('button', { name: '查看 combined' }))
-
+    expect(screen.getAllByText('frontend.frontend-tests:test_failure').length).toBeGreaterThan(0)
     await waitFor(() => {
-        expect(fetchTextMock).toHaveBeenCalledWith('/api/workbench/verification/runs/run-older/steps/frontend.frontend-tests/logs/combined')
+        expect(fetchJSONMock).toHaveBeenCalledWith('/api/workbench/verification/runs/run-older/steps/frontend.frontend-tests/logs/combined', { tail_lines: 200 })
         expect(screen.getByText('FAILED frontend test')).not.toBeNull()
+    })
+
+    await user.click(screen.getByRole('button', { name: '复制最小复现' }))
+    await waitFor(() => {
+        expect(clipboardWriteText).toHaveBeenCalledWith('Run frontend tests.')
+    })
+
+    await user.click(screen.getByRole('button', { name: '重跑本次' }))
+    await waitFor(() => {
+        expect(postJSONMock).toHaveBeenCalledWith('/api/workbench/verification/runs/run-older/rerun', {})
     })
 }, 12000)
 
